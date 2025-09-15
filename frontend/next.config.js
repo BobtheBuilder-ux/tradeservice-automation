@@ -7,14 +7,15 @@ const nextConfig = {
     NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
   },
   async rewrites() {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
     return [
       {
         source: '/api/:path*',
-        destination: 'http://localhost:3001/api/:path*',
+        destination: `${apiUrl}/api/:path*`,
       },
       {
         source: '/webhook/:path*',
-        destination: 'http://localhost:3001/webhook/:path*',
+        destination: `${apiUrl}/webhook/:path*`,
       },
     ];
   },

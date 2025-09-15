@@ -16,8 +16,8 @@ async function testAdminEndpoints() {
       },
       body: JSON.stringify({
         name: 'Admin User',
-        email: 'bobbieberryccv@gmail.com',
-        password: 'AdminPass123!',
+        email: 'berrybobbiechuks@gmail.com',
+        password: 'Password12...$',
         role: 'admin'
       })
     });
@@ -39,17 +39,18 @@ async function testAdminEndpoints() {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          email: 'admin@test.com',
-          password: 'password123'
+          email: 'berrybobbiechuks@gmail.com',
+          password: 'Password12...$'
         })
       });
       
       const loginData = await loginResponse.json();
+      console.log('Login response:', JSON.stringify(loginData, null, 2));
       if (loginResponse.ok && loginData.token) {
         console.log('✅ Admin login successful');
         adminToken = loginData.token;
       } else {
-        console.log('❌ Admin login failed');
+        console.log('❌ Admin login failed:', loginData.error || 'Unknown error');
         return;
       }
     }
