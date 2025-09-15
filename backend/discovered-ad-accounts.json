@@ -1,0 +1,108 @@
+[
+  {
+    "id": "act_297553364641481",
+    "name": "Derek Obasi",
+    "status": 1,
+    "currency": "CAD",
+    "timezone": "Africa/Lagos"
+  },
+  {
+    "id": "act_493862779635991",
+    "name": "AFRIEFACTS",
+    "status": 1,
+    "business": {
+      "id": "1269003907393295",
+      "name": "africaentertaimentfacts"
+    },
+    "currency": "CAD",
+    "timezone": "America/Toronto"
+  },
+  {
+    "id": "act_2137921796592508",
+    "name": "goodkompany",
+    "status": 1,
+    "business": {
+      "id": "1164841651628891",
+      "name": "goodkompany1"
+    },
+    "currency": "USD",
+    "timezone": "America/Toronto"
+  },
+  {
+    "id": "act_1075736330432290",
+    "name": "9494jobs",
+    "status": 1,
+    "business": {
+      "id": "1273359877343682",
+      "name": "9494jobs"
+    },
+    "currency": "CAD",
+    "timezone": "America/Toronto"
+  },
+  {
+    "id": "act_1478716326153231",
+    "name": "Insurance ad",
+    "status": 1,
+    "business": {
+      "id": "425733133959335",
+      "name": "Insurancequoteqc"
+    },
+    "currency": "CAD",
+    "timezone": "America/Toronto"
+  },
+  {
+    "id": "act_3113130818860654",
+    "name": "wealthandcareerhubsubscribe",
+    "status": 1,
+    "business": {
+      "id": "580454014496073",
+      "name": "wealthandcareerhub"
+    },
+    "currency": "CAD",
+    "timezone": "America/Montreal"
+  },
+  {
+    "id": "act_1323895532192651",
+    "name": "Nasco",
+    "status": 1,
+    "business": {
+      "id": "981055952847173",
+      "name": "NasConsulting"
+    },
+    "currency": "CAD",
+    "timezone": "America/Montreal"
+  },
+  {
+    "id": "act_650466154034204",
+    "name": "Global Elite Travel",
+    "status": 1,
+    "business": {
+      "id": "625700859870934",
+      "name": "GLOBALELITE TRAVEL AND TOUR AGENCY LTD"
+    },
+    "currency": "CAD",
+    "timezone": "Africa/Lagos"
+  },
+  {
+    "id": "act_596775403524881",
+    "name": "ONESHOPCENTRALE",
+    "status": 1,
+    "business": {
+      "id": "349396254078562",
+      "name": "Oneshop Centrale"
+    },
+    "currency": "CAD",
+    "timezone": "America/Montreal"
+  },
+  {
+    "id": "act_1921736338634981",
+    "name": "Sceen Connect",
+    "status": 2,
+    "business": {
+      "id": "1050132607180202",
+      "name": "overthebridgefilm"
+    },
+    "currency": "CAD",
+    "timezone": "America/Toronto"
+  }
+]
