@@ -4,13 +4,17 @@
  * Handles email sending, SMS reminders, meeting monitoring, and follow-ups
  */
 
-import { supabase } from '../config/index.js';
+import { db } from '../config/index.js';
+import { workflowAutomation, systemConfig, leads } from '../db/schema.js';
+import { eq, and, lte, isNull, or } from 'drizzle-orm';
 import logger from '../utils/logger.js';
-import CalendlyEmailService from './calendly-email-service.js';
-import TwilioSmsService from './twilio-sms-service.js';
+import calendlyEmailService from './calendly-email-service.js';
+import twilioSmsService from './twilio-sms-service.js';
 import meetingService from './meeting-service.js';
+import emailTemplateService from './email-template-service.js';
 import { hashForLogging } from '../utils/crypto.js';
-import { v4 as uuidv4 } from 'uuid';
+import pkg from 'uuid';
+const { v4: uuidv4 } = pkg;
 
 class WorkflowProcessor {
   constructor() {
@@ -18,8 +22,9 @@ class WorkflowProcessor {
     this.processingInterval = null;
     this.batchSize = 50;
     this.processingDelay = 5000; // 5 seconds between batches
-    this.emailService = new CalendlyEmailService();
-    this.smsService = new TwilioSmsService();
+    this.emailService = calendlyEmailService;
+    this.smsService = twilioSmsService;
+    this.emailTemplateService = emailTemplateService;
     this.trackingId = uuidv4();
   }
 
@@ -84,16 +89,16 @@ class WorkflowProcessor {
    */
   async loadConfiguration() {
     try {
-      const { data: config, error } = await supabase
-        .from('system_config')
-        .select('key, value')
-        .in('key', [
-          'workflow_automation_enabled',
-          'workflow_job_batch_size',
-          'workflow_retry_delay_minutes'
-        ]);
-
-      if (error) throw error;
+      const config = await db.select({
+        key: systemConfig.key,
+        value: systemConfig.value
+      })
+      .from(systemConfig)
+      .where(or(
+        eq(systemConfig.key, 'workflow_automation_enabled'),
+        eq(systemConfig.key, 'workflow_job_batch_size'),
+        eq(systemConfig.key, 'workflow_retry_delay_minutes')
+      ));
 
       // Apply configuration
       config.forEach(item => {
@@ -160,15 +165,26 @@ class WorkflowProcessor {
    * Process a batch of pending workflow jobs
    */
   async processBatch() {
+    let processedCount = 0;
+    let successCount = 0;
+    let errorCount = 0;
+
     try {
       // Get pending jobs
-      const { data: jobs, error } = await supabase
-        .rpc('get_pending_workflow_jobs', { batch_size: this.batchSize });
-
-      if (error) throw error;
+      const jobs = await db.select()
+        .from(workflowAutomation)
+        .where(and(
+          eq(workflowAutomation.status, 'pending'),
+          lte(workflowAutomation.scheduledAt, new Date())
+        ))
+        .limit(this.batchSize);
 
       if (!jobs || jobs.length === 0) {
-        return; // No jobs to process
+        return {
+          processedCount: 0,
+          successCount: 0,
+          errorCount: 0
+        };
       }
 
       logger.info('Processing workflow batch', {
@@ -180,10 +196,26 @@ class WorkflowProcessor {
       const concurrencyLimit = 5;
       for (let i = 0; i < jobs.length; i += concurrencyLimit) {
         const batch = jobs.slice(i, i + concurrencyLimit);
-        await Promise.allSettled(
+        const results = await Promise.allSettled(
           batch.map(job => this.processJob(job))
         );
+        
+        // Count results
+        results.forEach(result => {
+          processedCount++;
+          if (result.status === 'fulfilled') {
+            successCount++;
+          } else {
+            errorCount++;
+          }
+        });
       }
+
+      return {
+        processedCount,
+        successCount,
+        errorCount
+      };
 
     } catch (error) {
       logger.error(error.message, {
@@ -191,6 +223,12 @@ class WorkflowProcessor {
         trackingId: this.trackingId,
         stack: error.stack
       });
+      
+      return {
+        processedCount,
+        successCount,
+        errorCount: errorCount + 1
+      };
     }
   }
 
@@ -230,6 +268,9 @@ class WorkflowProcessor {
           break;
         case 'follow_up':
           success = await this.handleFollowUp(job, jobTrackingId);
+          break;
+        case 'scheduling_automation':
+          success = await this.handleSchedulingAutomation(job, jobTrackingId);
           break;
         default:
           throw new Error(`Unknown workflow type: ${job.workflow_type}`);
@@ -346,21 +387,50 @@ class WorkflowProcessor {
   }
 
   /**
+   * Handle scheduling automation workflow
+   */
+  async handleSchedulingAutomation(job, trackingId) {
+    switch (job.step_name) {
+      case 'send_scheduling_email':
+        return await this.sendSchedulingEmail(job, trackingId);
+      case 'monitor_scheduling_status':
+        return await this.monitorSchedulingStatus(job, trackingId);
+      case 'send_first_reminder':
+        return await this.sendFirstSchedulingReminder(job, trackingId);
+      case 'send_second_reminder':
+        return await this.sendSecondSchedulingReminder(job, trackingId);
+      case 'send_final_reminder':
+        return await this.sendFinalSchedulingReminder(job, trackingId);
+      case 'send_meeting_reminder_24h':
+        return await this.sendMeetingReminder24H(job, trackingId);
+      case 'send_meeting_reminder_1h':
+        return await this.sendMeetingReminder1H(job, trackingId);
+      default:
+        throw new Error(`Unknown scheduling automation step: ${job.step_name}`);
+    }
+  }
+
+  /**
    * Send welcome email
    */
   async sendWelcomeEmail(job, trackingId) {
     try {
-      const result = await this.emailService.sendInitialEngagementEmail(
+      const result = await this.emailTemplateService.queueWelcomeEmail(
+        job.lead_id,
         job.lead_email,
         job.lead_name || 'Valued Customer',
-        trackingId
+        {
+          trackingId: trackingId,
+          workflowType: 'initial_engagement',
+          stepName: 'send_welcome_email'
+        }
       );
 
-      logger.info('Welcome email sent', {
+      logger.info('Welcome email queued', {
         trackingId: trackingId,
         leadId: job.lead_id,
         email: hashForLogging(job.lead_email),
-        messageId: result.messageId
+        queueId: result.id
       });
 
       return true;
@@ -668,17 +738,26 @@ class WorkflowProcessor {
    */
   async sendFollowUpEmail(job, trackingId) {
     try {
-      const result = await this.emailService.sendFollowUpEmail(
-        job.lead_email,
-        job.lead_name || 'Valued Customer',
+      // Prepare lead data object for the email template service
+      const leadData = {
+        id: job.lead_id,
+        email: job.lead_email,
+        full_name: job.lead_name || 'Valued Customer'
+      };
+
+      const calendlyLink = process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK || 'https://calendly.com/your-link';
+
+      const result = await this.emailTemplateService.queueFollowUpEmail(
+        leadData,
+        calendlyLink,
         trackingId
       );
 
-      logger.info('Follow-up email sent', {
+      logger.info('Follow-up email queued', {
         trackingId: trackingId,
         leadId: job.lead_id,
         email: hashForLogging(job.lead_email),
-        messageId: result.messageId
+        queueId: result.queueId
       });
 
       return true;
@@ -725,19 +804,327 @@ class WorkflowProcessor {
   }
 
   /**
+   * Send scheduling email to lead
+   */
+  async sendSchedulingEmail(job, trackingId) {
+    try {
+      const result = await this.emailTemplateService.queueSchedulingEmail(
+        job.lead_id,
+        job.lead_email,
+        job.lead_name || 'Valued Customer',
+        {
+          trackingId: trackingId,
+          workflowType: 'scheduling_automation',
+          stepName: 'send_scheduling_email'
+        }
+      );
+
+      logger.info('Scheduling email queued', {
+        trackingId: trackingId,
+        leadId: job.lead_id,
+        email: hashForLogging(job.lead_email),
+        queueId: result.id
+      });
+
+      // Schedule monitoring task
+      await this.scheduleMonitoringTask(job.lead_id, trackingId);
+
+      return true;
+    } catch (error) {
+      logger.error(error.message, {
+        context: 'send_scheduling_email',
+        trackingId: trackingId,
+        leadId: job.lead_id,
+        stack: error.stack
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Monitor scheduling status
+   */
+  async monitorSchedulingStatus(job, trackingId) {
+    try {
+      const meetingStatus = await meetingService.checkMeetingStatus(job.lead_email);
+      
+      if (meetingStatus.hasScheduled) {
+        logger.info('Meeting scheduled detected', {
+          trackingId: trackingId,
+          leadId: job.lead_id,
+          meetingTime: meetingStatus.meetingTime
+        });
+
+        // Schedule meeting reminders
+        await this.scheduleMeetingReminders(job.lead_id, meetingStatus.meetingTime, trackingId);
+        return true;
+      } else {
+        // Schedule next monitoring check
+        await this.scheduleNextMonitoringCheck(job.lead_id, trackingId);
+        return true;
+      }
+    } catch (error) {
+      logger.error(error.message, {
+        context: 'monitor_scheduling_status',
+        trackingId: trackingId,
+        leadId: job.lead_id,
+        stack: error.stack
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Send first scheduling reminder
+   */
+  async sendFirstSchedulingReminder(job, trackingId) {
+    try {
+      const result = await this.emailTemplateService.queueSchedulingReminderEmail(
+        job.lead_id,
+        job.lead_email,
+        job.lead_name || 'Valued Customer',
+        'first',
+        {
+          trackingId: trackingId,
+          workflowType: 'scheduling_automation',
+          stepName: 'send_first_reminder',
+          reminderType: 'first'
+        }
+      );
+
+      logger.info('First scheduling reminder queued', {
+        trackingId: trackingId,
+        leadId: job.lead_id,
+        email: hashForLogging(job.lead_email),
+        queueId: result.id
+      });
+
+      return true;
+    } catch (error) {
+      logger.error(error.message, {
+        context: 'send_first_scheduling_reminder',
+        trackingId: trackingId,
+        leadId: job.lead_id,
+        stack: error.stack
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Send second scheduling reminder
+   */
+  async sendSecondSchedulingReminder(job, trackingId) {
+    try {
+      const result = await this.emailTemplateService.queueSchedulingReminderEmail(
+        job.lead_id,
+        job.lead_email,
+        job.lead_name || 'Valued Customer',
+        'second',
+        {
+          trackingId: trackingId,
+          workflowType: 'scheduling_automation',
+          stepName: 'send_second_reminder',
+          reminderType: 'second'
+        }
+      );
+
+      logger.info('Second scheduling reminder queued', {
+        trackingId: trackingId,
+        leadId: job.lead_id,
+        email: hashForLogging(job.lead_email),
+        queueId: result.id
+      });
+
+      return true;
+    } catch (error) {
+      logger.error(error.message, {
+        context: 'send_second_scheduling_reminder',
+        trackingId: trackingId,
+        leadId: job.lead_id,
+        stack: error.stack
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Send final scheduling reminder
+   */
+  async sendFinalSchedulingReminder(job, trackingId) {
+    try {
+      const result = await this.emailTemplateService.queueSchedulingReminderEmail(
+        job.lead_id,
+        job.lead_email,
+        job.lead_name || 'Valued Customer',
+        'final',
+        {
+          trackingId: trackingId,
+          workflowType: 'scheduling_automation',
+          stepName: 'send_final_reminder',
+          reminderType: 'final'
+        }
+      );
+
+      logger.info('Final scheduling reminder queued', {
+        trackingId: trackingId,
+        leadId: job.lead_id,
+        email: hashForLogging(job.lead_email),
+        queueId: result.id
+      });
+
+      return true;
+    } catch (error) {
+      logger.error(error.message, {
+        context: 'send_final_scheduling_reminder',
+        trackingId: trackingId,
+        leadId: job.lead_id,
+        stack: error.stack
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Schedule monitoring task
+   */
+  async scheduleMonitoringTask(leadId, trackingId) {
+    try {
+      const { error } = await supabase
+        .from('workflow_automation')
+        .insert({
+          lead_id: leadId,
+          workflow_type: 'scheduling_automation',
+          step_name: 'monitor_scheduling_status',
+          scheduled_at: new Date(Date.now() + 2 * 60 * 60 * 1000), // 2 hours from now
+          metadata: { check_count: 1 }
+        });
+
+      if (error) throw error;
+
+      logger.info('Monitoring task scheduled', {
+        trackingId: trackingId,
+        leadId: leadId
+      });
+    } catch (error) {
+      logger.error(error.message, {
+        context: 'schedule_monitoring_task',
+        trackingId: trackingId,
+        leadId: leadId,
+        stack: error.stack
+      });
+    }
+  }
+
+  /**
+   * Schedule next monitoring check
+   */
+  async scheduleNextMonitoringCheck(leadId, trackingId) {
+    try {
+      const { error } = await supabase
+        .from('workflow_automation')
+        .insert({
+          lead_id: leadId,
+          workflow_type: 'scheduling_automation',
+          step_name: 'monitor_scheduling_status',
+          scheduled_at: new Date(Date.now() + 4 * 60 * 60 * 1000), // 4 hours from now
+          metadata: { check_count: 2 }
+        });
+
+      if (error) throw error;
+
+      logger.info('Next monitoring check scheduled', {
+        trackingId: trackingId,
+        leadId: leadId
+      });
+    } catch (error) {
+      logger.error(error.message, {
+        context: 'schedule_next_monitoring_check',
+        trackingId: trackingId,
+        leadId: leadId,
+        stack: error.stack
+      });
+    }
+  }
+
+  /**
+   * Schedule meeting reminders
+   */
+  async scheduleMeetingReminders(leadId, meetingTime, trackingId) {
+    try {
+      const meetingDate = new Date(meetingTime);
+      const reminder24h = new Date(meetingDate.getTime() - 24 * 60 * 60 * 1000);
+      const reminder1h = new Date(meetingDate.getTime() - 60 * 60 * 1000);
+
+      // Get lead info for email
+      const { data: lead, error: leadError } = await supabase
+        .from('leads')
+        .select('email, first_name, last_name')
+        .eq('id', leadId)
+        .single();
+
+      if (leadError) throw leadError;
+
+      // Queue 24-hour reminder email
+      await this.emailTemplateService.queueMeetingReminderEmail(
+        leadId,
+        lead.email,
+        `${lead.first_name} ${lead.last_name}`.trim() || 'Valued Customer',
+        '24h',
+        reminder24h,
+        {
+          trackingId: trackingId,
+          workflowType: 'meeting_monitor',
+          stepName: 'send_meeting_reminder_24h',
+          meetingTime: meetingTime
+        }
+      );
+
+      // Queue 1-hour reminder email
+      await this.emailTemplateService.queueMeetingReminderEmail(
+        leadId,
+        lead.email,
+        `${lead.first_name} ${lead.last_name}`.trim() || 'Valued Customer',
+        '1h',
+        reminder1h,
+        {
+          trackingId: trackingId,
+          workflowType: 'meeting_monitor',
+          stepName: 'send_meeting_reminder_1h',
+          meetingTime: meetingTime
+        }
+      );
+
+      logger.info('Meeting reminder emails queued', {
+        trackingId: trackingId,
+        leadId: leadId,
+        meetingTime: meetingTime,
+        reminder24h: reminder24h,
+        reminder1h: reminder1h
+      });
+    } catch (error) {
+      logger.error(error.message, {
+        context: 'schedule_meeting_reminders',
+        trackingId: trackingId,
+        leadId: leadId,
+        stack: error.stack
+      });
+    }
+  }
+
+
+
+  /**
    * Update job status
    */
   async updateJobStatus(jobId, status) {
     try {
-      const { error } = await supabase
-        .from('workflow_automation')
-        .update({ 
+      await db.update(workflowAutomation)
+        .set({ 
           status: status,
-          updated_at: new Date().toISOString()
+          updatedAt: new Date()
         })
-        .eq('id', jobId);
-
-      if (error) throw error;
+        .where(eq(workflowAutomation.id, jobId));
     } catch (error) {
       logger.error(error.message, {
         context: 'update_job_status',

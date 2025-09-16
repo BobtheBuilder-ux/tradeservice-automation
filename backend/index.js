@@ -22,6 +22,9 @@ import { WorkflowOrchestrator } from './workflow-orchestrator.js';
 import reminderScheduler from './src/services/reminder-scheduler.js';
 import NewLeadMonitor from './src/services/new-lead-monitor.js';
 import hubspotPollingService from './src/services/hubspot-polling-service.js';
+import emailQueueProcessor from './src/services/email-queue-processor.js';
+import followUpAutomationService from './src/services/follow-up-automation-service.js';
+import automatedEmailWorkflowService from './src/services/automated-email-workflow-service.js';
 import logger from './utils/logger.js';
 
 // Load environment variables
@@ -61,6 +64,7 @@ const newLeadMonitor = new NewLeadMonitor();
 logWithTimestamp('info', '🚀 Workflow Orchestrator initialized');
 logWithTimestamp('info', '🚀 New Lead Monitor initialized');
 logWithTimestamp('info', '🚀 HubSpot Polling Service initialized');
+logWithTimestamp('info', '🚀 Email Queue Processor initialized');
 
 // Create Express app
 const app = express();
@@ -396,6 +400,30 @@ app.listen(PORT, async () => {
   } catch (error) {
     logWithTimestamp('error', '❌ Failed to start HubSpot polling service', { error: error.message, stack: error.stack });
   }
+
+  // Start the email queue processor
+  try {
+    emailQueueProcessor.start();
+    logWithTimestamp('info', '✅ Email queue processor started successfully');
+  } catch (error) {
+    logWithTimestamp('error', '❌ Failed to start email queue processor', { error: error.message, stack: error.stack });
+  }
+
+  // Start the follow-up automation service
+  try {
+    followUpAutomationService.start();
+    logWithTimestamp('info', '✅ Follow-up automation service started successfully');
+  } catch (error) {
+    logWithTimestamp('error', '❌ Failed to start follow-up automation service', { error: error.message, stack: error.stack });
+  }
+
+  // Start the automated email workflow service
+  try {
+    automatedEmailWorkflowService.startContinuousMonitoring();
+    logWithTimestamp('info', '✅ Automated email workflow service started successfully');
+  } catch (error) {
+    logWithTimestamp('error', '❌ Failed to start automated email workflow service', { error: error.message, stack: error.stack });
+  }
   
   // Initialize workflow processing
   try {
@@ -422,8 +450,12 @@ app.listen(PORT, async () => {
   console.log(`🔧 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`⏰ Workflow Processing: Active (5-minute intervals)`);
   console.log(`📅 Reminder Scheduler: Active`);
-  console.log(`🔍 New Lead Monitor: Active (2-minute intervals)`);
+  console.log(`👁️  New Lead Monitor: Active (2-minute intervals)`);
   console.log(`🔄 HubSpot Polling: Active`);
+  console.log(`📧 Email Queue Processor: Active`);
+  console.log(`🔄 Follow-up Automation: Active (30-minute intervals)`);
+  console.log(`📬 Automated Email Workflow: Active (5-minute intervals)`);
+  console.log('='.repeat(80));
   console.log('='.repeat(80) + '\n');
 });
 
@@ -445,6 +477,14 @@ process.on('SIGTERM', () => {
     logWithTimestamp('info', '✅ New lead monitor stopped successfully');
   } catch (error) {
     logWithTimestamp('error', '❌ Error stopping new lead monitor', { error: error.message, stack: error.stack });
+  }
+  
+  try {
+    logWithTimestamp('info', '🛑 Stopping automated email workflow service');
+    automatedEmailWorkflowService.stopContinuousMonitoring();
+    logWithTimestamp('info', '✅ Automated email workflow service stopped successfully');
+  } catch (error) {
+    logWithTimestamp('error', '❌ Error stopping automated email workflow service', { error: error.message, stack: error.stack });
   }
   
   try {

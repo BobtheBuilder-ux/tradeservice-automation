@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
-import { createClient } from '@supabase/supabase-js';
+import { useAuth } from '../lib/auth';
 import { 
   Search, 
   Filter, 
@@ -21,11 +21,7 @@ import {
 import { format } from 'date-fns';
 import { validatePermissions } from '../lib/auth';
 
-// Initialize Supabase client
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-);
+// Use the auth hook for authentication
 
 export default function Dashboard() {
   const router = useRouter();

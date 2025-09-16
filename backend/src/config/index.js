@@ -1,7 +1,7 @@
-import { createClient } from '@supabase/supabase-js';
 import { Client as HubSpotClient } from '@hubspot/api-client';
 import dotenv from 'dotenv';
 import logger from '../utils/logger.js';
+import { db, checkDatabaseConnection } from '../db/connection.js';
 
 dotenv.config();
 
@@ -9,8 +9,7 @@ dotenv.config();
 const requiredVars = [
   'FACEBOOK_APP_SECRET',
   'FACEBOOK_VERIFY_TOKEN',
-  'SUPABASE_URL',
-  'SUPABASE_SERVICE_ROLE_KEY',
+  'DATABASE_URL',
   'HUBSPOT_ACCESS_TOKEN'
 ];
 
@@ -23,19 +22,9 @@ if (missingVars.length > 0) {
   }
 }
 
-// Supabase client configuration
-export const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
-  ? createClient(
-      process.env.SUPABASE_URL,
-      process.env.SUPABASE_SERVICE_ROLE_KEY,
-      {
-        auth: {
-          autoRefreshToken: false,
-          persistSession: false
-        }
-      }
-    )
-  : null;
+// Database connection (Drizzle)
+export { db };
+export { checkDatabaseConnection };
 
 // HubSpot client configuration
 export const hubspotClient = process.env.HUBSPOT_ACCESS_TOKEN
@@ -70,10 +59,9 @@ export const appConfig = {
 };
 
 export default {
-  supabase,
+  db,
   hubspotClient,
   facebookConfig,
-
   calendlyConfig,
   appConfig
 };

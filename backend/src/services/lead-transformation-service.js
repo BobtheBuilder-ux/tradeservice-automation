@@ -263,7 +263,7 @@ export function transformGenericLeadToHubSpotFormat(leadData, source, trackingId
     email: leadData.email || '',
     first_name: leadData.first_name || leadData.firstname || '',
     last_name: leadData.last_name || leadData.lastname || '',
-    full_name: leadData.full_name || leadData.name || '',
+    full_name: leadData.full_name || '',
     phone: leadData.phone || leadData.phone_number || '',
     company: leadData.company || leadData.company_name || '',
     job_title: leadData.job_title || leadData.title || leadData.jobtitle || '',

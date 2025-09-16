@@ -189,7 +189,7 @@ If you did not register for this account, please contact our support team immedi
 export async function sendPasswordResetEmail(email, name, resetToken) {
   try {
     const transporter = getTransporter();
-    const resetUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/reset-password?token=${resetToken}`;
+    const resetUrl = `${process.env.NEXT_PUBLIC_APP_URL}/reset-password?token=${resetToken}`;
     
     const mailOptions = {
       from: process.env.SMTP_FROM || process.env.SMTP_USER,

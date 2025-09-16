@@ -1,7 +1,10 @@
-import { supabase } from '../config/index.js';
+import { db } from '../config/index.js';
+import { leads, meetings, meetingReminders } from '../db/schema.js';
+import { eq, and, gte, lte, lt, isNull, asc } from 'drizzle-orm';
 import logger from '../utils/logger.js';
 import { hashForLogging } from '../utils/crypto.js';
 import TwilioSmsService from './twilio-sms-service.js';
+import EmailTemplateService from './email-template-service.js';
 
 /**
  * Meeting Service - Handles all meeting-related database operations
@@ -23,27 +26,24 @@ class MeetingService {
         startTime: meetingData.start_time
       });
 
-      const meetingRecord = {
-        lead_id: leadId,
-        calendly_event_id: meetingData.uri,
-        calendly_event_uri: meetingData.uri,
-        meeting_title: meetingData.name || 'Consultation Meeting',
-        meeting_description: meetingData.description || '',
-        start_time: meetingData.start_time,
-        end_time: meetingData.end_time,
-        timezone: meetingData.timezone || 'UTC',
-        meeting_url: meetingData.location?.join_url || meetingData.location?.location,
-        location: meetingData.location?.location || 'Online',
-        status: 'scheduled'
+      const meetingUpdate = {
+        calendlyEventUri: meetingData.uri,
+        scheduledAt: new Date(meetingData.start_time),
+        meetingEndTime: new Date(meetingData.end_time),
+        meetingLocation: meetingData.location?.location || 'Online',
+        status: 'scheduled',
+        lastCalendlyUpdate: new Date(),
+        updatedAt: new Date()
       };
 
-      const { data: meeting, error } = await supabase
-        .from('meetings')
-        .insert([meetingRecord])
-        .select()
-        .single();
+      const [meeting] = await db
+        .update(leads)
+        .set(meetingUpdate)
+        .where(eq(leads.id, leadId))
+        .returning();
 
-      if (error) {
+      if (!meeting) {
+        const error = new Error('Failed to update lead with meeting data');
         logger.logError(error, { context: 'create_meeting', trackingId, leadId });
         throw error;
       }
@@ -55,9 +55,8 @@ class MeetingService {
       await this.scheduleReminders(meeting.id, meeting.start_time, trackingId);
 
       logger.logLeadProcessing(trackingId, 'meeting_created_successfully', {
-        meetingId: meeting.id,
-        leadId,
-        startTime: meeting.start_time
+        leadId: meeting.id,
+        calendlyEventId: meeting.calendlyEventUri
       });
 
       return meeting;
@@ -73,7 +72,7 @@ class MeetingService {
    * @param {string} status - New meeting status
    * @param {Object} updateData - Additional update data
    * @param {string} trackingId - Tracking ID for logging
-   * @returns {Object} Updated meeting record
+   * @returns {Object} Updated lead record
    */
   async updateMeetingStatus(calendlyEventId, status, updateData = {}, trackingId) {
     try {
@@ -84,46 +83,47 @@ class MeetingService {
 
       const updateFields = {
         status,
-        ...updateData,
-        updated_at: new Date().toISOString()
+        updatedAt: new Date(),
+        lastCalendlyUpdate: new Date(),
+        ...updateData
       };
 
       // Add specific fields based on status
       if (status === 'canceled') {
-        updateFields.canceled_at = new Date().toISOString();
-        updateFields.canceled_by = updateData.canceled_by || 'system';
-        updateFields.cancellation_reason = updateData.reason || '';
+        updateFields.canceledAt = new Date();
+        updateFields.canceledBy = updateData.canceled_by || 'system';
+        updateFields.cancellationReason = updateData.reason || '';
       } else if (status === 'no_show') {
-        updateFields.no_show = true;
+        updateFields.noShow = true;
         updateFields.attended = false;
       } else if (status === 'completed') {
         updateFields.attended = true;
-        updateFields.no_show = false;
+        updateFields.noShow = false;
       }
 
-      const { data: meeting, error } = await supabase
-        .from('meetings')
-        .update(updateFields)
-        .eq('calendly_event_id', calendlyEventId)
-        .select()
-        .single();
+      const [lead] = await db
+        .update(leads)
+        .set(updateFields)
+        .where(eq(leads.calendlyEventUri, calendlyEventId))
+        .returning();
 
-      if (error) {
+      if (!lead) {
+        const error = new Error(`Lead not found for Calendly event: ${calendlyEventId}`);
         logger.logError(error, { context: 'update_meeting_status', trackingId, calendlyEventId });
         throw error;
       }
 
       // Update lead status if meeting is canceled or completed
       if (status === 'canceled') {
-        await this.updateLeadMeetingStatus(meeting.lead_id, null, false, trackingId);
+        await this.updateLeadMeetingStatus(lead.id, null, false, trackingId);
       }
 
       logger.logLeadProcessing(trackingId, 'meeting_status_updated', {
-        meetingId: meeting.id,
+        leadId: lead.id,
         newStatus: status
       });
 
-      return meeting;
+      return lead;
     } catch (error) {
       logger.logError(error, { context: 'update_meeting_status', trackingId, calendlyEventId });
       throw error;
@@ -142,30 +142,53 @@ class MeetingService {
       const tomorrowEnd = new Date(tomorrowStart);
       tomorrowEnd.setDate(tomorrowEnd.getDate() + 1);
 
-      const { data: meetings, error } = await supabase
-        .from('meetings')
-        .select(`
-          *,
-          leads!inner(
-            id,
-            email,
-            full_name,
-            first_name,
-            last_name
+      const meetingsData = await db
+        .select({
+          id: meetings.id,
+          leadId: meetings.leadId,
+          agentId: meetings.agentId,
+          calendlyEventId: meetings.calendlyEventId,
+          meetingType: meetings.meetingType,
+          title: meetings.title,
+          description: meetings.description,
+          startTime: meetings.startTime,
+          endTime: meetings.endTime,
+          timezone: meetings.timezone,
+          status: meetings.status,
+          meetingUrl: meetings.meetingUrl,
+          location: meetings.location,
+          attendeeEmail: meetings.attendeeEmail,
+          attendeeName: meetings.attendeeName,
+          attendeePhone: meetings.attendeePhone,
+          reminderSent: meetings.reminderSent,
+          followUpSent: meetings.followUpSent,
+          reminder24hSent: meetings.reminder24hSent,
+          reminder1hSent: meetings.reminder1hSent,
+          notes: meetings.notes,
+          metadata: meetings.metadata,
+          createdAt: meetings.createdAt,
+          updatedAt: meetings.updatedAt,
+          leads: {
+            id: leads.id,
+            email: leads.email,
+            fullName: leads.fullName,
+            firstName: leads.firstName,
+            lastName: leads.lastName
+          }
+        })
+        .from(meetings)
+        .innerJoin(leads, eq(meetings.leadId, leads.id))
+        .where(
+          and(
+            eq(meetings.status, 'scheduled'),
+            eq(meetings.reminder24hSent, false),
+            gte(meetings.startTime, tomorrowStart),
+            lt(meetings.startTime, tomorrowEnd)
           )
-        `)
-        .eq('status', 'scheduled')
-        .eq('reminder_24h_sent', false)
-        .gte('start_time', tomorrowStart.toISOString())
-        .lt('start_time', tomorrowEnd.toISOString());
+        );
 
-      if (error) {
-        logger.logError(error, { context: 'get_meetings_needing_daily_reminders' });
-        throw error;
-      }
-
-      logger.info(`Found ${meetings.length} meetings needing 24-hour reminders`);
-      return meetings;
+      logger.info(`Found ${meetingsData.length} meetings needing 24-hour reminders`);
+      return meetingsData;
     } catch (error) {
       logger.logError(error, { context: 'get_meetings_needing_daily_reminders' });
       throw error;
@@ -183,30 +206,53 @@ class MeetingService {
       const reminderWindow = new Date(oneHourFromNow);
       reminderWindow.setMinutes(reminderWindow.getMinutes() + 30); // 30-minute window
 
-      const { data: meetings, error } = await supabase
-        .from('meetings')
-        .select(`
-          *,
-          leads!inner(
-            id,
-            email,
-            full_name,
-            first_name,
-            last_name
+      const meetingsData = await db
+        .select({
+          id: meetings.id,
+          leadId: meetings.leadId,
+          agentId: meetings.agentId,
+          calendlyEventId: meetings.calendlyEventId,
+          meetingType: meetings.meetingType,
+          title: meetings.title,
+          description: meetings.description,
+          startTime: meetings.startTime,
+          endTime: meetings.endTime,
+          timezone: meetings.timezone,
+          status: meetings.status,
+          meetingUrl: meetings.meetingUrl,
+          location: meetings.location,
+          attendeeEmail: meetings.attendeeEmail,
+          attendeeName: meetings.attendeeName,
+          attendeePhone: meetings.attendeePhone,
+          reminderSent: meetings.reminderSent,
+          followUpSent: meetings.followUpSent,
+          reminder24hSent: meetings.reminder24hSent,
+          reminder1hSent: meetings.reminder1hSent,
+          notes: meetings.notes,
+          metadata: meetings.metadata,
+          createdAt: meetings.createdAt,
+          updatedAt: meetings.updatedAt,
+          leads: {
+            id: leads.id,
+            email: leads.email,
+            fullName: leads.fullName,
+            firstName: leads.firstName,
+            lastName: leads.lastName
+          }
+        })
+        .from(meetings)
+        .innerJoin(leads, eq(meetings.leadId, leads.id))
+        .where(
+          and(
+            eq(meetings.status, 'scheduled'),
+            eq(meetings.reminder1hSent, false),
+            gte(meetings.startTime, oneHourFromNow),
+            lte(meetings.startTime, reminderWindow)
           )
-        `)
-        .eq('status', 'scheduled')
-        .eq('reminder_1h_sent', false)
-        .gte('start_time', oneHourFromNow.toISOString())
-        .lte('start_time', reminderWindow.toISOString());
+        );
 
-      if (error) {
-        logger.logError(error, { context: 'get_meetings_needing_hourly_reminders' });
-        throw error;
-      }
-
-      logger.info(`Found ${meetings.length} meetings needing 1-hour reminders`);
-      return meetings;
+      logger.info(`Found ${meetingsData.length} meetings needing 1-hour reminders`);
+      return meetingsData;
     } catch (error) {
       logger.logError(error, { context: 'get_meetings_needing_hourly_reminders' });
       throw error;
@@ -222,21 +268,21 @@ class MeetingService {
    */
   async markReminderSent(meetingId, reminderType, messageId, trackingId) {
     try {
-      const updateField = reminderType === '24h' ? 'reminder_24h_sent' : 'reminder_1h_sent';
-      const timestampField = reminderType === '24h' ? 'reminder_24h_sent_at' : 'reminder_1h_sent_at';
-
-      const { error } = await supabase
-        .from('meetings')
-        .update({
-          [updateField]: true,
-          [timestampField]: new Date().toISOString()
-        })
-        .eq('id', meetingId);
-
-      if (error) {
-        logger.logError(error, { context: 'mark_reminder_sent', trackingId, meetingId });
-        throw error;
+      const updateData = {};
+      const now = new Date();
+      
+      if (reminderType === '24h') {
+        updateData.reminder24hSent = true;
+        updateData.reminder24hSentAt = now;
+      } else {
+        updateData.reminder1hSent = true;
+        updateData.reminder1hSentAt = now;
       }
+
+      await db
+        .update(meetings)
+        .set(updateData)
+        .where(eq(meetings.id, meetingId));
 
       // Create reminder record
       await this.createReminderRecord(meetingId, reminderType, messageId, 'sent', trackingId);
@@ -260,6 +306,38 @@ class MeetingService {
    */
   async scheduleReminders(meetingId, startTime, trackingId) {
     try {
+      // Get meeting details with lead information
+      const meetingResult = await this.db.select({
+        id: meetings.id,
+        leadId: meetings.leadId,
+        calendlyEventId: meetings.calendlyEventId,
+        startTime: meetings.startTime,
+        endTime: meetings.endTime,
+        status: meetings.status,
+        reminder24hSent: meetings.reminder24hSent,
+        reminder1hSent: meetings.reminder1hSent,
+        createdAt: meetings.createdAt,
+        updatedAt: meetings.updatedAt,
+        lead: {
+          id: leads.id,
+          email: leads.email,
+          fullName: leads.fullName,
+          firstName: leads.firstName,
+          lastName: leads.lastName
+        }
+      })
+        .from(meetings)
+        .innerJoin(leads, eq(meetings.leadId, leads.id))
+        .where(eq(meetings.id, meetingId))
+        .limit(1);
+
+      if (!meetingResult || meetingResult.length === 0) {
+        logger.logError(new Error('Meeting not found'), { context: 'schedule_reminders_get_meeting', trackingId, meetingId });
+        throw new Error('Meeting not found');
+      }
+
+      const meeting = meetingResult[0];
+
       const meetingDate = new Date(startTime);
       const reminder24h = new Date(meetingDate);
       reminder24h.setHours(reminder24h.getHours() - 24);
@@ -267,34 +345,77 @@ class MeetingService {
       const reminder1h = new Date(meetingDate);
       reminder1h.setHours(reminder1h.getHours() - 1);
 
-      const reminders = [
-        {
-          meeting_id: meetingId,
-          reminder_type: '24_hour',
-          scheduled_for: reminder24h.toISOString(),
-          status: 'pending'
-        },
-        {
-          meeting_id: meetingId,
-          reminder_type: '1_hour',
-          scheduled_for: reminder1h.toISOString(),
-          status: 'pending'
-        }
-      ];
-
-      const { error } = await supabase
-        .from('meeting_reminders')
-        .insert(reminders);
-
-      if (error) {
-        logger.logError(error, { context: 'schedule_reminders', trackingId, meetingId });
-        throw error;
+      const leadData = meeting.leads;
+      
+      // Queue 24-hour reminder email if meeting is more than 24 hours away
+      if (reminder24h > new Date()) {
+        await EmailTemplateService.queueMeetingReminderEmail(
+          leadData.id,
+          leadData.email,
+          leadData.full_name || leadData.first_name || 'Valued Customer',
+          '24h',
+          {
+            meeting_time: startTime,
+            meeting_title: meeting.meeting_title,
+            meeting_url: meeting.meeting_url,
+            location: meeting.location
+          },
+          reminder24h.toISOString(),
+          trackingId
+        );
       }
 
-      logger.logLeadProcessing(trackingId, 'reminders_scheduled', {
+      // Queue 1-hour reminder email if meeting is more than 1 hour away
+      if (reminder1h > new Date()) {
+        await EmailTemplateService.queueMeetingReminderEmail(
+          leadData.id,
+          leadData.email,
+          leadData.full_name || leadData.first_name || 'Valued Customer',
+          '1h',
+          {
+            meeting_time: startTime,
+            meeting_title: meeting.meeting_title,
+            meeting_url: meeting.meeting_url,
+            location: meeting.location
+          },
+          reminder1h.toISOString(),
+          trackingId
+        );
+      }
+
+      // Still create reminder records for tracking
+      const reminders = [];
+      if (reminder24h > new Date()) {
+        reminders.push({
+          meetingId,
+          reminderType: '24_hour',
+          scheduledFor: reminder24h,
+          status: 'queued',
+          createdAt: new Date(),
+          updatedAt: new Date()
+        });
+      }
+      if (reminder1h > new Date()) {
+        reminders.push({
+          meetingId,
+          reminderType: '1_hour',
+          scheduledFor: reminder1h,
+          status: 'queued',
+          createdAt: new Date(),
+          updatedAt: new Date()
+        });
+      }
+
+      if (reminders.length > 0) {
+        await this.db.insert(meetingReminders)
+          .values(reminders);
+      }
+
+      logger.logLeadProcessing(trackingId, 'meeting_reminders_queued', {
         meetingId,
-        reminder24h: reminder24h.toISOString(),
-        reminder1h: reminder1h.toISOString()
+        leadId: leadData.id,
+        reminder24h: reminder24h > new Date() ? reminder24h.toISOString() : 'skipped',
+        reminder1h: reminder1h > new Date() ? reminder1h.toISOString() : 'skipped'
       });
     } catch (error) {
       logger.logError(error, { context: 'schedule_reminders', trackingId, meetingId });
@@ -312,23 +433,20 @@ class MeetingService {
    */
   async createReminderRecord(meetingId, reminderType, messageId, status, trackingId) {
     try {
+      const now = new Date();
       const reminderRecord = {
-        meeting_id: meetingId,
-        reminder_type: reminderType === '24h' ? '24_hour' : '1_hour',
-        scheduled_for: new Date().toISOString(),
-        sent_at: new Date().toISOString(),
-        email_message_id: messageId,
+        meetingId: meetingId,
+        reminderType: reminderType === '24h' ? '24_hour' : '1_hour',
+        deliveryMethod: 'email',
+        scheduledFor: now,
+        sentAt: now,
+        emailMessageId: messageId,
         status
       };
 
-      const { error } = await supabase
-        .from('meeting_reminders')
-        .insert([reminderRecord]);
-
-      if (error) {
-        logger.logError(error, { context: 'create_reminder_record', trackingId, meetingId });
-        throw error;
-      }
+      await db
+        .insert(meetingReminders)
+        .values(reminderRecord);
     } catch (error) {
       logger.logError(error, { context: 'create_reminder_record', trackingId, meetingId });
       throw error;
@@ -345,17 +463,18 @@ class MeetingService {
   async updateLeadMeetingStatus(leadId, meetingId, hasScheduledMeeting, trackingId) {
     try {
       const updateData = {
-        latest_meeting_id: meetingId,
-        meeting_scheduled: hasScheduledMeeting,
-        last_meeting_reminder_sent: hasScheduledMeeting ? new Date().toISOString() : null
+        hasMeeting: hasScheduledMeeting,
+        updatedAt: new Date()
       };
 
-      const { error } = await supabase
-        .from('leads')
-        .update(updateData)
-        .eq('id', leadId);
+      const [lead] = await db
+        .update(leads)
+        .set(updateData)
+        .where(eq(leads.id, leadId))
+        .returning();
 
-      if (error) {
+      if (!lead) {
+        const error = new Error(`Lead not found: ${leadId}`);
         logger.logError(error, { context: 'update_lead_meeting_status', trackingId, leadId });
         throw error;
       }
@@ -372,35 +491,44 @@ class MeetingService {
   }
 
   /**
-   * Get meeting by Calendly event ID
+   * Get lead by Calendly event ID
    * @param {string} calendlyEventId - Calendly event ID
-   * @returns {Object} Meeting record
+   * @param {string} trackingId - Tracking ID for logging
+   * @returns {Object|null} Lead record or null if not found
    */
-  async getMeetingByCalendlyId(calendlyEventId) {
+  async getMeetingByCalendlyId(calendlyEventId, trackingId) {
     try {
-      const { data: meeting, error } = await supabase
-        .from('meetings')
-        .select(`
-          *,
-          leads!meetings_lead_id_fkey(
-            id,
-            email,
-            full_name,
-            first_name,
-            last_name
-          )
-        `)
-        .eq('calendly_event_id', calendlyEventId)
-        .single();
+      logger.logLeadProcessing(trackingId, 'fetching_meeting_by_calendly_id', {
+        calendlyEventId
+      });
 
-      if (error) {
-        logger.logError(error, { context: 'get_meeting_by_calendly_id', calendlyEventId });
-        throw error;
+      const [lead] = await db
+        .select()
+        .from(leads)
+        .where(eq(leads.calendlyEventUri, calendlyEventId))
+        .limit(1);
+
+      if (!lead) {
+        logger.logLeadProcessing(trackingId, 'meeting_not_found', {
+          calendlyEventId
+        });
+        return null;
       }
 
-      return meeting;
+      logger.logLeadProcessing(trackingId, 'meeting_found', {
+        leadId: lead.id,
+        calendlyEventId,
+        status: lead.status
+      });
+
+      return lead;
+
     } catch (error) {
-      logger.logError(error, { context: 'get_meeting_by_calendly_id', calendlyEventId });
+      logger.logError(error, {
+        context: 'get_meeting_by_calendly_id',
+        trackingId,
+        calendlyEventId
+      });
       throw error;
     }
   }
@@ -417,34 +545,59 @@ class MeetingService {
       const tomorrowEnd = new Date(tomorrowStart);
       tomorrowEnd.setDate(tomorrowEnd.getDate() + 1);
 
-      const { data: meetings, error } = await supabase
-        .from('meetings')
-        .select(`
-          *,
-          leads!meetings_lead_id_fkey(
-            id,
-            email,
-            phone,
-            full_name,
-            first_name,
-            last_name,
-            sms_opt_in
+      const meetingsData = await db
+        .select({
+          id: meetings.id,
+          leadId: meetings.leadId,
+          agentId: meetings.agentId,
+          calendlyEventId: meetings.calendlyEventId,
+          meetingType: meetings.meetingType,
+          title: meetings.title,
+          description: meetings.description,
+          startTime: meetings.startTime,
+          endTime: meetings.endTime,
+          timezone: meetings.timezone,
+          status: meetings.status,
+          meetingUrl: meetings.meetingUrl,
+          location: meetings.location,
+          attendeeEmail: meetings.attendeeEmail,
+          attendeeName: meetings.attendeeName,
+          attendeePhone: meetings.attendeePhone,
+          reminderSent: meetings.reminderSent,
+          followUpSent: meetings.followUpSent,
+          reminder24hSent: meetings.reminder24hSent,
+          reminder1hSent: meetings.reminder1hSent,
+          sms24hSent: meetings.sms24hSent,
+          sms1hSent: meetings.sms1hSent,
+          notes: meetings.notes,
+          metadata: meetings.metadata,
+          createdAt: meetings.createdAt,
+          updatedAt: meetings.updatedAt,
+          leads: {
+            id: leads.id,
+            email: leads.email,
+            phone: leads.phone,
+            fullName: leads.fullName,
+            firstName: leads.firstName,
+            lastName: leads.lastName,
+            smsOptIn: leads.smsOptIn
+          }
+        })
+        .from(meetings)
+        .innerJoin(leads, eq(meetings.leadId, leads.id))
+        .where(
+          and(
+            eq(meetings.status, 'scheduled'),
+            eq(meetings.sms24hSent, false),
+            gte(meetings.startTime, tomorrowStart),
+            lt(meetings.startTime, tomorrowEnd)
           )
-        `)
-        .eq('status', 'scheduled')
-        .eq('sms_24h_sent', false)
-        .gte('start_time', tomorrowStart.toISOString())
-        .lt('start_time', tomorrowEnd.toISOString());
-
-      if (error) {
-        logger.logError(error, { context: 'get_meetings_needing_sms_24h_reminders' });
-        throw error;
-      }
+        );
 
       // Filter for leads with phone numbers and SMS opt-in
-      const eligibleMeetings = meetings.filter(meeting => 
+      const eligibleMeetings = meetingsData.filter(meeting => 
         meeting.leads?.phone && 
-        meeting.leads?.sms_opt_in !== false
+        meeting.leads?.smsOptIn !== false
       );
 
       logger.info(`Found ${eligibleMeetings.length} meetings needing SMS 24-hour reminders`);
@@ -466,34 +619,59 @@ class MeetingService {
       const reminderWindow = new Date(oneHourFromNow);
       reminderWindow.setMinutes(reminderWindow.getMinutes() + 30); // 30-minute window
 
-      const { data: meetings, error } = await supabase
-        .from('meetings')
-        .select(`
-          *,
-          leads!meetings_lead_id_fkey(
-            id,
-            email,
-            phone,
-            full_name,
-            first_name,
-            last_name,
-            sms_opt_in
+      const meetingsData = await db
+        .select({
+          id: meetings.id,
+          leadId: meetings.leadId,
+          agentId: meetings.agentId,
+          calendlyEventId: meetings.calendlyEventId,
+          meetingType: meetings.meetingType,
+          title: meetings.title,
+          description: meetings.description,
+          startTime: meetings.startTime,
+          endTime: meetings.endTime,
+          timezone: meetings.timezone,
+          status: meetings.status,
+          meetingUrl: meetings.meetingUrl,
+          location: meetings.location,
+          attendeeEmail: meetings.attendeeEmail,
+          attendeeName: meetings.attendeeName,
+          attendeePhone: meetings.attendeePhone,
+          reminderSent: meetings.reminderSent,
+          followUpSent: meetings.followUpSent,
+          reminder24hSent: meetings.reminder24hSent,
+          reminder1hSent: meetings.reminder1hSent,
+          sms24hSent: meetings.sms24hSent,
+          sms1hSent: meetings.sms1hSent,
+          notes: meetings.notes,
+          metadata: meetings.metadata,
+          createdAt: meetings.createdAt,
+          updatedAt: meetings.updatedAt,
+          leads: {
+            id: leads.id,
+            email: leads.email,
+            phone: leads.phone,
+            fullName: leads.fullName,
+            firstName: leads.firstName,
+            lastName: leads.lastName,
+            smsOptIn: leads.smsOptIn
+          }
+        })
+        .from(meetings)
+        .innerJoin(leads, eq(meetings.leadId, leads.id))
+        .where(
+          and(
+            eq(meetings.status, 'scheduled'),
+            eq(meetings.sms1hSent, false),
+            gte(meetings.startTime, oneHourFromNow),
+            lte(meetings.startTime, reminderWindow)
           )
-        `)
-        .eq('status', 'scheduled')
-        .eq('sms_1h_sent', false)
-        .gte('start_time', oneHourFromNow.toISOString())
-        .lte('start_time', reminderWindow.toISOString());
-
-      if (error) {
-        logger.logError(error, { context: 'get_meetings_needing_sms_1h_reminders' });
-        throw error;
-      }
+        );
 
       // Filter for leads with phone numbers and SMS opt-in
-      const eligibleMeetings = meetings.filter(meeting => 
+      const eligibleMeetings = meetingsData.filter(meeting => 
         meeting.leads?.phone && 
-        meeting.leads?.sms_opt_in !== false
+        meeting.leads?.smsOptIn !== false
       );
 
       logger.info(`Found ${eligibleMeetings.length} meetings needing SMS 1-hour reminders`);
@@ -563,27 +741,20 @@ class MeetingService {
    */
   async markSmsReminderSent(meetingId, reminderType, messageSid, trackingId) {
     try {
-      const updateFields = {
-        updated_at: new Date().toISOString()
+      const updateData = {
+        updatedAt: new Date()
       };
 
       if (reminderType === '24h') {
-        updateFields.sms_24h_sent = true;
-        updateFields.sms_24h_sent_at = new Date().toISOString();
+        updateData.sms24hSent = true;
       } else if (reminderType === '1h') {
-        updateFields.sms_1h_sent = true;
-        updateFields.sms_1h_sent_at = new Date().toISOString();
+        updateData.sms1hSent = true;
       }
 
-      const { error } = await supabase
-        .from('meetings')
-        .update(updateFields)
-        .eq('id', meetingId);
-
-      if (error) {
-        logger.logError(error, { context: 'mark_sms_reminder_sent', meetingId, reminderType });
-        throw error;
-      }
+      await db
+        .update(meetings)
+        .set(updateData)
+        .where(eq(meetings.id, meetingId));
 
       logger.logLeadProcessing(trackingId, 'sms_reminder_marked_sent', {
         meetingId,
@@ -607,23 +778,18 @@ class MeetingService {
   async createSmsReminderRecord(meetingId, reminderType, messageSid, status, trackingId) {
     try {
       const reminderRecord = {
-        meeting_id: meetingId,
-        reminder_type: reminderType,
-        delivery_method: 'sms',
-        sms_message_sid: messageSid,
+        meetingId: meetingId,
+        reminderType: reminderType,
+        deliveryMethod: 'sms',
+        smsMessageSid: messageSid,
         status: status,
-        sent_at: new Date().toISOString(),
-        scheduled_for: new Date().toISOString()
+        sentAt: new Date(),
+        scheduledFor: new Date()
       };
 
-      const { error } = await supabase
-        .from('meeting_reminders')
-        .insert([reminderRecord]);
-
-      if (error) {
-        logger.logError(error, { context: 'create_sms_reminder_record', meetingId, reminderType });
-        throw error;
-      }
+      await db
+        .insert(meetingReminders)
+        .values(reminderRecord);
 
       logger.logLeadProcessing(trackingId, 'sms_reminder_record_created', {
         meetingId,
@@ -645,23 +811,63 @@ class MeetingService {
       const threeDaysAgo = new Date();
       threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
 
-      const { data: leads, error } = await supabase
-        .from('leads')
-        .select('*')
-        .eq('meeting_scheduled', false)
-        .gte('created_at', threeDaysAgo.toISOString())
-        .is('last_meeting_reminder_sent', null)
-        .order('created_at', { ascending: false });
+      const leadsResult = await this.db.select()
+        .from(leads)
+        .where(
+          and(
+            eq(leads.meetingScheduled, false),
+            gte(leads.createdAt, threeDaysAgo),
+            isNull(leads.lastMeetingReminderSent)
+          )
+        )
+        .orderBy(asc(leads.createdAt));
 
-      if (error) {
-        logger.logError(error, { context: 'get_leads_needing_meeting_reminders' });
-        throw error;
-      }
-
-      logger.info(`Found ${leads.length} leads needing meeting scheduling reminders`);
-      return leads;
+      logger.info(`Found ${leadsResult.length} leads needing meeting scheduling reminders`);
+      return leadsResult;
     } catch (error) {
       logger.logError(error, { context: 'get_leads_needing_meeting_reminders' });
+      throw error;
+    }
+  }
+
+  /**
+   * Get upcoming meetings
+   * @param {number} limit - Number of meetings to fetch
+   * @param {string} trackingId - Tracking ID for logging
+   * @returns {Array} Array of upcoming meetings
+   */
+  async getUpcomingMeetings(limit = 10, trackingId) {
+    try {
+      logger.logLeadProcessing(trackingId, 'fetching_upcoming_meetings', {
+        limit
+      });
+
+      const upcomingLeads = await db
+         .select()
+         .from(leads)
+         .where(
+           and(
+             gte(leads.calendlyStartTime, new Date()),
+             eq(leads.status, 'scheduled'),
+             isNull(leads.canceledAt)
+           )
+         )
+         .orderBy(asc(leads.calendlyStartTime))
+         .limit(limit);
+
+      logger.logLeadProcessing(trackingId, 'upcoming_meetings_fetched', {
+        count: upcomingLeads?.length || 0,
+        limit
+      });
+
+      return upcomingLeads || [];
+
+    } catch (error) {
+      logger.logError(error, {
+        context: 'get_upcoming_meetings',
+        trackingId,
+        limit
+      });
       throw error;
     }
   }

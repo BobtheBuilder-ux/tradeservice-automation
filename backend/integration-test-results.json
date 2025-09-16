@@ -1,0 +1,210 @@
+{
+  "successful": [
+    {
+      "email": "miraclechukwudi@gmail.com",
+      "contactId": "443863003339",
+      "transformedData": {
+        "id": "443863003339",
+        "hubspot_contact_id": "443863003339",
+        "email": "miraclechukwudi@gmail.com",
+        "first_name": "Miracle",
+        "last_name": "Chukwudi",
+        "full_name": "Miracle Chukwudi",
+        "phone": "+1-555-0101",
+        "company": "Tech Innovations Inc",
+        "job_title": "",
+        "website": "",
+        "city": "",
+        "state": "",
+        "country": "",
+        "zip": "",
+        "hubspot_created_date": "2025-09-16T14:11:33.607Z",
+        "hubspot_modified_date": "2025-09-16T14:11:49.267Z",
+        "hubspot_lead_status": "",
+        "lifecycle_stage": "",
+        "lead_source": "HubSpot CRM",
+        "analytics_source": "",
+        "analytics_source_data_1": "",
+        "analytics_source_data_2": "",
+        "source": "hubspot_crm",
+        "created_time": "2025-09-16T14:11:33.607Z",
+        "raw_data": {
+          "id": "443863003339",
+          "properties": {
+            "company": "Tech Innovations Inc",
+            "createdate": "2025-09-16T14:11:33.607Z",
+            "email": "miraclechukwudi@gmail.com",
+            "firstname": "Miracle",
+            "hs_object_id": "443863003339",
+            "lastmodifieddate": "2025-09-16T14:11:49.267Z",
+            "lastname": "Chukwudi",
+            "phone": "+1-555-0101"
+          },
+          "createdAt": "2025-09-16T14:11:33.607Z",
+          "updatedAt": "2025-09-16T14:11:49.267Z",
+          "archived": false
+        },
+        "fields": {
+          "hs_object_id": "443863003339"
+        }
+      },
+      "trackingId": "e44ed45b-8d10-4dff-a90c-087a92b50450"
+    },
+    {
+      "email": "bobbieberryccv@gmail.com",
+      "contactId": "443876327644",
+      "transformedData": {
+        "id": "443876327644",
+        "hubspot_contact_id": "443876327644",
+        "email": "bobbieberryccv@gmail.com",
+        "first_name": "Bobbie",
+        "last_name": "Berry",
+        "full_name": "Bobbie Berry",
+        "phone": "+1-555-0202",
+        "company": "Creative Solutions LLC",
+        "job_title": "",
+        "website": "",
+        "city": "",
+        "state": "",
+        "country": "",
+        "zip": "",
+        "hubspot_created_date": "2025-09-16T14:11:36.769Z",
+        "hubspot_modified_date": "2025-09-16T14:14:13.678Z",
+        "hubspot_lead_status": "",
+        "lifecycle_stage": "",
+        "lead_source": "HubSpot CRM",
+        "analytics_source": "",
+        "analytics_source_data_1": "",
+        "analytics_source_data_2": "",
+        "source": "hubspot_crm",
+        "created_time": "2025-09-16T14:11:36.769Z",
+        "raw_data": {
+          "id": "443876327644",
+          "properties": {
+            "company": "Creative Solutions LLC",
+            "createdate": "2025-09-16T14:11:36.769Z",
+            "email": "bobbieberryccv@gmail.com",
+            "firstname": "Bobbie",
+            "hs_object_id": "443876327644",
+            "lastmodifieddate": "2025-09-16T14:14:13.678Z",
+            "lastname": "Berry",
+            "phone": "+1-555-0202"
+          },
+          "createdAt": "2025-09-16T14:11:36.769Z",
+          "updatedAt": "2025-09-16T14:14:13.678Z",
+          "archived": false
+        },
+        "fields": {
+          "hs_object_id": "443876327644"
+        }
+      },
+      "trackingId": "5125df9d-0743-44dd-bdf9-c728c3aaf423"
+    },
+    {
+      "email": "bestscrapers@gmail.com",
+      "contactId": "443763102927",
+      "transformedData": {
+        "id": "443763102927",
+        "hubspot_contact_id": "443763102927",
+        "email": "bestscrapers@gmail.com",
+        "first_name": "Best",
+        "last_name": "Scrapers",
+        "full_name": "Best Scrapers",
+        "phone": "+1-555-0303",
+        "company": "Data Mining Corp",
+        "job_title": "",
+        "website": "",
+        "city": "",
+        "state": "",
+        "country": "",
+        "zip": "",
+        "hubspot_created_date": "2025-09-16T14:13:20.496Z",
+        "hubspot_modified_date": "2025-09-16T14:14:05.301Z",
+        "hubspot_lead_status": "",
+        "lifecycle_stage": "",
+        "lead_source": "HubSpot CRM",
+        "analytics_source": "",
+        "analytics_source_data_1": "",
+        "analytics_source_data_2": "",
+        "source": "hubspot_crm",
+        "created_time": "2025-09-16T14:13:20.496Z",
+        "raw_data": {
+          "id": "443763102927",
+          "properties": {
+            "company": "Data Mining Corp",
+            "createdate": "2025-09-16T14:13:20.496Z",
+            "email": "bestscrapers@gmail.com",
+            "firstname": "Best",
+            "hs_object_id": "443763102927",
+            "lastmodifieddate": "2025-09-16T14:14:05.301Z",
+            "lastname": "Scrapers",
+            "phone": "+1-555-0303"
+          },
+          "createdAt": "2025-09-16T14:13:20.496Z",
+          "updatedAt": "2025-09-16T14:14:05.301Z",
+          "archived": false
+        },
+        "fields": {
+          "hs_object_id": "443763102927"
+        }
+      },
+      "trackingId": "666abf91-4b21-48ed-bd6f-9c4f6138a288"
+    },
+    {
+      "email": "luckisstarspiff@gmail.com",
+      "contactId": "443754073337",
+      "transformedData": {
+        "id": "443754073337",
+        "hubspot_contact_id": "443754073337",
+        "email": "luckisstarspiff@gmail.com",
+        "first_name": "Lucky",
+        "last_name": "Starspiff",
+        "full_name": "Lucky Starspiff",
+        "phone": "+1-555-0404",
+        "company": "Entertainment Plus",
+        "job_title": "",
+        "website": "",
+        "city": "",
+        "state": "",
+        "country": "",
+        "zip": "",
+        "hubspot_created_date": "2025-09-16T14:11:42.885Z",
+        "hubspot_modified_date": "2025-09-16T14:14:10.180Z",
+        "hubspot_lead_status": "",
+        "lifecycle_stage": "",
+        "lead_source": "HubSpot CRM",
+        "analytics_source": "",
+        "analytics_source_data_1": "",
+        "analytics_source_data_2": "",
+        "source": "hubspot_crm",
+        "created_time": "2025-09-16T14:11:42.885Z",
+        "raw_data": {
+          "id": "443754073337",
+          "properties": {
+            "company": "Entertainment Plus",
+            "createdate": "2025-09-16T14:11:42.885Z",
+            "email": "luckisstarspiff@gmail.com",
+            "firstname": "Lucky",
+            "hs_object_id": "443754073337",
+            "lastmodifieddate": "2025-09-16T14:14:10.180Z",
+            "lastname": "Starspiff",
+            "phone": "+1-555-0404"
+          },
+          "createdAt": "2025-09-16T14:11:42.885Z",
+          "updatedAt": "2025-09-16T14:14:10.180Z",
+          "archived": false
+        },
+        "fields": {
+          "hs_object_id": "443754073337"
+        }
+      },
+      "trackingId": "2b91a368-6352-4112-8a90-33ee99f3119f"
+    }
+  ],
+  "failed": [],
+  "summary": {
+    "total": 4,
+    "success": 4,
+    "failed": 0
+  }
+}

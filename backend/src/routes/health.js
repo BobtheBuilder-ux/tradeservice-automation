@@ -1,5 +1,6 @@
 import express from 'express';
-import { supabase, hubspotClient } from '../config/index.js';
+import { hubspotClient } from '../config/index.js';
+import { checkDatabaseConnection } from '../db/connection.js';
 import logger from '../utils/logger.js';
 
 const router = express.Router();
@@ -16,20 +17,20 @@ router.get('/', async (req, res) => {
     environment: process.env.NODE_ENV || 'development',
     version: '1.0.0',
     services: {
-      supabase: 'unknown',
-      hubspot: 'unknown',
-  
+      database: 'unknown',
+      hubspot: 'unknown'
     }
   };
 
   try {
-    // Check Supabase connection
-    const { error: supabaseError } = await supabase
-      .from('leads')
-      .select('count', { count: 'exact', head: true })
-      .limit(1);
-    
-    healthCheck.services.supabase = supabaseError ? 'error' : 'ok';
+    // Check database connection
+    try {
+      await checkDatabaseConnection();
+      healthCheck.services.database = 'ok';
+    } catch (dbError) {
+      healthCheck.services.database = 'error';
+      logger.warn('Database health check failed', { error: dbError.message });
+    }
 
     // Check HubSpot connection
     try {

@@ -398,6 +398,250 @@ Tracking ID: ${trackingId}
       throw error;
     }
   }
+
+  /**
+   * Send initial scheduling email to new leads
+   * @param {string} email - Lead email address
+   * @param {string} name - Lead name
+   * @param {string} trackingId - Tracking ID for logging
+   * @returns {Object} Email sending result
+   */
+  async sendSchedulingEmail(email, name, trackingId) {
+    try {
+      logger.info('Sending scheduling email', {
+        trackingId: trackingId,
+        email: hashForLogging(email)
+      });
+
+      const subject = `Schedule Your Free Consultation - ${name}`;
+      
+      const html = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="text-align: center; margin-bottom: 30px;">
+            <h1 style="color: #2c3e50; margin-bottom: 10px;">📅 Schedule Your Free Consultation</h1>
+            <p style="color: #7f8c8d; font-size: 16px;">Let's discuss how we can help you achieve your goals</p>
+          </div>
+          
+          <div style="background-color: #f8f9fa; padding: 25px; border-radius: 10px; margin: 20px 0;">
+            <h2 style="color: #2c3e50; margin-top: 0;">Hello ${name}! 👋</h2>
+            <p style="color: #34495e; line-height: 1.6;">Thank you for your interest in our services. We're excited to connect with you and learn more about your needs.</p>
+            
+            <p style="color: #34495e; line-height: 1.6;">We would love to schedule a personalized consultation to discuss:</p>
+            
+            <ul style="color: #34495e; line-height: 1.8; padding-left: 20px;">
+              <li>Your specific goals and challenges</li>
+              <li>How our solutions can benefit you</li>
+              <li>Next steps for getting started</li>
+              <li>Any questions you might have</li>
+            </ul>
+          </div>
+          
+          <div style="text-align: center; margin: 40px 0;">
+            <a href="${process.env.CALENDLY_LINK || '#'}" 
+               style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                      color: white; 
+                      padding: 18px 35px; 
+                      text-decoration: none; 
+                      border-radius: 50px; 
+                      font-weight: bold; 
+                      font-size: 18px; 
+                      display: inline-block; 
+                      box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3); 
+                      transition: all 0.3s ease;">
+              🗓️ Schedule My Free Consultation
+            </a>
+          </div>
+          
+          <div style="text-align: center; margin: 30px 0; padding: 20px; background-color: #f1f2f6; border-radius: 10px;">
+            <p style="color: #2c3e50; margin: 0; font-size: 14px; line-height: 1.6;">
+              <strong>Questions or need help scheduling?</strong><br>
+              Reply to this email or contact our support team.<br>
+              We're here to help! 🤝
+            </p>
+          </div>
+          
+          <div style="text-align: center; margin-top: 40px; padding-top: 20px; border-top: 1px solid #ecf0f1;">
+            <p style="color: #7f8c8d; font-size: 12px; margin: 5px 0;">Tracking ID: ${trackingId}</p>
+            <p style="color: #7f8c8d; font-size: 12px; margin: 5px 0;">Best regards,<br>Your Lead Automation Team</p>
+          </div>
+        </div>
+      `;
+
+      const text = `
+Schedule Your Free Consultation
+
+Hello ${name}!
+
+Thank you for your interest in our services. We'd love to schedule a personalized consultation with you.
+
+Schedule your appointment here: ${process.env.CALENDLY_LINK || 'Contact us for scheduling'}
+
+What to expect:
+- Duration: 30-45 minutes
+- Format: Video call or phone
+- Cost: Completely FREE
+- Outcome: Clear action plan for your needs
+
+Questions? Reply to this email or contact our support team.
+
+Best regards,
+Your Lead Automation Team
+
+Tracking ID: ${trackingId}
+      `;
+
+      const result = await EmailService.sendEmail({ 
+        to: email, 
+        subject, 
+        html, 
+        text 
+      });
+
+      return result;
+
+    } catch (error) {
+      logger.error(error.message, {
+        context: 'send_scheduling_email',
+        trackingId,
+        email: hashForLogging(email),
+        stack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Send scheduling reminder emails
+   * @param {string} email - Lead email address
+   * @param {string} name - Lead name
+   * @param {string} reminderType - Type of reminder (first, second, final)
+   * @param {string} trackingId - Tracking ID for logging
+   * @returns {Object} Email sending result
+   */
+  async sendSchedulingReminder(email, name, reminderType, trackingId) {
+    try {
+      logger.info(`Sending ${reminderType} scheduling reminder`, {
+        trackingId: trackingId,
+        email: hashForLogging(email),
+        reminderType: reminderType
+      });
+
+      const reminderConfig = {
+        first: {
+          subject: `Reminder: Schedule Your Free Consultation - ${name}`,
+          urgency: 'gentle',
+          color: '#3498db',
+          icon: '📅'
+        },
+        second: {
+          subject: `Don't Miss Out: Your Free Consultation Awaits - ${name}`,
+          urgency: 'moderate',
+          color: '#f39c12',
+          icon: '⏰'
+        },
+        final: {
+          subject: `Final Reminder: Schedule Before We're Fully Booked - ${name}`,
+          urgency: 'urgent',
+          color: '#e74c3c',
+          icon: '🚨'
+        }
+      };
+
+      const config = reminderConfig[reminderType] || reminderConfig.first;
+      
+      const html = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+          <div style="text-align: center; margin-bottom: 30px;">
+            <h1 style="color: ${config.color}; margin-bottom: 10px;">${config.icon} ${config.urgency === 'urgent' ? 'Final Reminder' : 'Friendly Reminder'}</h1>
+            <p style="color: #7f8c8d; font-size: 16px;">Your free consultation is still available</p>
+          </div>
+          
+          <div style="background-color: ${config.urgency === 'urgent' ? '#fff5f5' : '#f8f9fa'}; padding: 25px; border-radius: 10px; margin: 20px 0; border-left: 4px solid ${config.color};">
+            <h2 style="color: #2c3e50; margin-top: 0;">Hi ${name}! 👋</h2>
+            <p style="color: #34495e; line-height: 1.6;">
+              ${reminderType === 'final' ? 
+                'This is your final reminder - we don\'t want you to miss out on this valuable opportunity!' :
+                'We noticed you haven\'t scheduled your free consultation yet. We\'re here to help when you\'re ready!'}
+            </p>
+            
+            ${reminderType === 'final' ? 
+              '<p style="color: #e74c3c; font-weight: bold; line-height: 1.6;">⚡ Limited availability - Schedule now before we\'re fully booked!</p>' :
+              ''}
+          </div>
+          
+          <div style="text-align: center; margin: 40px 0;">
+            <a href="${process.env.CALENDLY_LINK || '#'}" 
+               style="background: linear-gradient(135deg, ${config.color} 0%, ${config.urgency === 'urgent' ? '#c0392b' : '#764ba2'} 100%); 
+                      color: white; 
+                      padding: 18px 35px; 
+                      text-decoration: none; 
+                      border-radius: 50px; 
+                      font-weight: bold; 
+                      font-size: 18px; 
+                      display: inline-block; 
+                      box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3); 
+                      transition: all 0.3s ease;">
+              ${config.icon} Schedule My Free Consultation Now
+            </a>
+          </div>
+          
+          <div style="text-align: center; margin-top: 40px; padding-top: 20px; border-top: 1px solid #ecf0f1;">
+            <p style="color: #7f8c8d; font-size: 12px; margin: 5px 0;">Tracking ID: ${trackingId}</p>
+            <p style="color: #7f8c8d; font-size: 12px; margin: 5px 0;">Best regards,<br>Your Lead Automation Team</p>
+          </div>
+        </div>
+      `;
+
+      const text = `
+${config.urgency === 'urgent' ? 'FINAL REMINDER' : 'Friendly Reminder'}
+
+Hi ${name},
+
+${reminderType === 'final' ? 
+  'This is your final reminder - don\'t miss out on this valuable opportunity!' :
+  'We noticed you haven\'t scheduled your free consultation yet.'}
+
+Schedule now: ${process.env.CALENDLY_LINK || 'Contact us for scheduling'}
+
+${reminderType === 'final' ? 'Limited availability - Schedule before we\'re fully booked!' : ''}
+
+Best regards,
+Your Lead Automation Team
+
+Tracking ID: ${trackingId}
+      `;
+
+      const result = await EmailService.sendEmail({ 
+        to: email, 
+        subject: config.subject, 
+        html, 
+        text 
+      });
+
+      return result;
+
+    } catch (error) {
+      logger.error(error.message, {
+        context: 'send_scheduling_reminder',
+        trackingId,
+        email: hashForLogging(email),
+        reminderType,
+        stack: error.stack
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Send initial engagement email (alias for scheduling email)
+   * @param {string} email - Lead email address
+   * @param {string} name - Lead name
+   * @param {string} trackingId - Tracking ID for logging
+   * @returns {Object} Email sending result
+   */
+  async sendInitialEngagementEmail(email, name, trackingId) {
+    return await this.sendSchedulingEmail(email, name, trackingId);
+  }
 }
 
 export default new CalendlyEmailService();

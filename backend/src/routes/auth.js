@@ -2,7 +2,9 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
-import { createClient } from '@supabase/supabase-js';
+import { db } from '../config/index.js';
+import { agents } from '../db/schema.js';
+import { eq } from 'drizzle-orm';
 import emailService from '../services/email-service.js';
 import dotenv from 'dotenv';
 import { authLimiter, registerLimiter, verifyEmailLimiter, passwordResetLimiter } from '../middleware/rateLimiter.js';
@@ -11,12 +13,6 @@ import { validateRegistration, validateLogin, validateEmailVerification } from '
 dotenv.config();
 
 const router = express.Router();
-
-// Initialize Supabase client
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
 
 // JWT secret
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
@@ -66,13 +62,12 @@ router.post('/register', registerLimiter, validateRegistration, async (req, res)
     }
 
     // Check if user already exists
-    const { data: existingUser } = await supabase
-      .from('users')
-      .select('id')
-      .eq('email', email)
-      .single();
+    const existingUser = await db.select({ id: agents.id })
+      .from(agents)
+      .where(eq(agents.email, email))
+      .limit(1);
 
-    if (existingUser) {
+    if (existingUser.length > 0) {
       return res.status(400).json({
         error: 'User already exists with this email'
       });
@@ -94,24 +89,21 @@ router.post('/register', registerLimiter, validateRegistration, async (req, res)
     });
 
     // Create user in database
-    const { data: newUser, error: dbError } = await supabase
-      .from('users')
-      .insert({
-        email,
-        password_hash: hashedPassword,
-        name,
-        role,
-        email_verified: false,
-        verification_token: verificationToken,
-        agent_token: agentToken,
-        agent_token_expires: agentTokenExpires.toISOString(),
-        created_at: new Date().toISOString()
-      })
-      .select()
-      .single();
+    const newUser = await db.insert(agents).values({
+      email,
+      passwordHash: hashedPassword,
+      firstName: name.split(' ')[0] || name,
+      lastName: name.split(' ').slice(1).join(' ') || '',
+      fullName: name,
+      role,
+      emailVerified: false,
+      verificationToken: verificationToken,
+      agentToken: agentToken,
+      agentTokenExpires: agentTokenExpires,
+    }).returning();
 
-    if (dbError) {
-      console.error('Database error:', dbError);
+    if (!newUser || newUser.length === 0) {
+      console.error('Database error: Failed to create user');
       return res.status(500).json({
         error: 'Failed to create user account'
       });
@@ -126,16 +118,16 @@ router.post('/register', registerLimiter, validateRegistration, async (req, res)
     }
 
     // Generate JWT token
-    const token = generateToken(newUser.id, email, role);
+    const token = generateToken(newUser[0].id, email, role);
 
     res.status(201).json({
       message: 'User registered successfully. Please check your email to verify your account.',
       user: {
-        id: newUser.id,
-        email: newUser.email,
-        name: newUser.name,
-        role: newUser.role,
-        emailVerified: newUser.email_verified
+        id: newUser[0].id,
+        email: newUser[0].email,
+        name: newUser[0].fullName,
+        role: newUser[0].role,
+        emailVerified: newUser[0].emailVerified
       },
       token,
       emailSent: emailResult.success
@@ -162,20 +154,21 @@ router.post('/login', authLimiter, validateLogin, async (req, res) => {
     }
 
     // Find user
-    const { data: user, error: dbError } = await supabase
-      .from('users')
-      .select('*')
-      .eq('email', email)
-      .single();
+    const userResult = await db.select()
+      .from(agents)
+      .where(eq(agents.email, email))
+      .limit(1);
 
-    if (dbError || !user) {
+    if (!userResult || userResult.length === 0) {
       return res.status(401).json({
         error: 'Invalid email or password'
       });
     }
 
+    const user = userResult[0];
+
     // Verify password
-    const isValidPassword = await bcrypt.compare(password, user.password_hash);
+    const isValidPassword = await bcrypt.compare(password, user.passwordHash);
     
     if (!isValidPassword) {
       return res.status(401).json({
@@ -184,10 +177,9 @@ router.post('/login', authLimiter, validateLogin, async (req, res) => {
     }
 
     // Update last login
-    await supabase
-      .from('users')
-      .update({ last_login: new Date().toISOString() })
-      .eq('id', user.id);
+    await db.update(agents)
+      .set({ lastLogin: new Date() })
+      .where(eq(agents.id, user.id));
 
     // Generate JWT token
     const token = generateToken(user.id, user.email, user.role);
@@ -197,9 +189,9 @@ router.post('/login', authLimiter, validateLogin, async (req, res) => {
       user: {
         id: user.id,
         email: user.email,
-        name: user.name,
+        name: user.fullName,
         role: user.role,
-        emailVerified: user.email_verified
+        emailVerified: user.emailVerified
       },
       token
     });
@@ -241,20 +233,29 @@ router.post('/verify-email', verifyEmailLimiter, validateEmailVerification, asyn
     }
 
     // Find user with both verification token and agent token
-    const { data: user, error: dbError } = await supabase
-      .from('users')
-      .select('*')
-      .eq('verification_token', token)
-      .eq('agent_token', agentToken)
-      .single();
+    const user = await db.select()
+      .from(agents)
+      .where(
+        eq(agents.verificationToken, token)
+      )
+      .limit(1);
 
-    if (dbError || !user) {
+    if (!user || user.length === 0) {
       return res.status(400).json({
-        error: 'Invalid verification tokens'
+        error: 'Invalid verification token'
       });
     }
 
-    if (user.email_verified) {
+    const userRecord = user[0];
+
+    // Check agent token
+    if (userRecord.agentToken !== agentToken) {
+      return res.status(400).json({
+        error: 'Invalid agent token'
+      });
+    }
+
+    if (userRecord.emailVerified) {
       return res.status(400).json({
         error: 'Email already verified'
       });
@@ -262,7 +263,7 @@ router.post('/verify-email', verifyEmailLimiter, validateEmailVerification, asyn
 
     // Check if agent token has expired
     const now = new Date();
-    const tokenExpiry = new Date(user.agent_token_expires);
+    const tokenExpiry = new Date(userRecord.agentTokenExpires);
     if (now > tokenExpiry) {
       return res.status(400).json({
         error: 'Agent token has expired. Please register again.'
@@ -270,18 +271,17 @@ router.post('/verify-email', verifyEmailLimiter, validateEmailVerification, asyn
     }
 
     // Update user as verified
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({
-        email_verified: true,
-        verification_token: null,
-        agent_token: null,
-        agent_token_expires: null,
-        verified_at: new Date().toISOString()
-      })
-      .eq('id', user.id);
-
-    if (updateError) {
+    try {
+      await db.update(agents)
+        .set({
+          emailVerified: true,
+          verificationToken: null,
+          agentToken: null,
+          agentTokenExpires: null,
+          updatedAt: new Date()
+        })
+        .where(eq(agents.id, userRecord.id));
+    } catch (updateError) {
       console.error('Failed to update user verification:', updateError);
       return res.status(500).json({
         error: 'Failed to verify email'
@@ -289,18 +289,18 @@ router.post('/verify-email', verifyEmailLimiter, validateEmailVerification, asyn
     }
 
     // Send welcome email
-    await emailService.sendWelcomeEmail(user.email, user.name);
+    await emailService.sendWelcomeEmail(userRecord.email, userRecord.fullName || `${userRecord.firstName} ${userRecord.lastName}`);
 
     // Generate new JWT token for the verified user
-    const authToken = generateToken(user.id, user.email, user.role);
+    const authToken = generateToken(userRecord.id, userRecord.email, userRecord.role);
 
     res.json({
       message: 'Email verified successfully',
       user: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
+        id: userRecord.id,
+        email: userRecord.email,
+        name: userRecord.fullName || `${userRecord.firstName} ${userRecord.lastName}`,
+        role: userRecord.role,
         emailVerified: true
       },
       token: authToken
@@ -326,32 +326,32 @@ router.post('/forgot-password', async (req, res) => {
     }
 
     // Find user
-    const { data: user, error: dbError } = await supabase
-      .from('users')
-      .select('*')
-      .eq('email', email)
-      .single();
+    const userRecord = await db.select()
+      .from(agents)
+      .where(eq(agents.email, email))
+      .limit(1);
 
-    if (dbError || !user) {
+    if (!userRecord || userRecord.length === 0) {
       // Don't reveal if user exists or not
       return res.json({
         message: 'If an account with that email exists, a password reset link has been sent.'
       });
     }
 
+    const user = userRecord[0];
+
     // Generate reset token
     const resetToken = generateResetToken(email);
 
     // Store reset token in database
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({
-        reset_token: resetToken,
-        reset_token_expires: new Date(Date.now() + 3600000).toISOString() // 1 hour
-      })
-      .eq('id', user.id);
-
-    if (updateError) {
+    try {
+      await db.update(agents)
+        .set({
+          resetToken: resetToken,
+          resetTokenExpires: new Date(Date.now() + 3600000) // 1 hour
+        })
+        .where(eq(agents.id, user.id));
+    } catch (updateError) {
       console.error('Failed to store reset token:', updateError);
       return res.status(500).json({
         error: 'Failed to process password reset request'
@@ -406,21 +406,21 @@ router.post('/reset-password', async (req, res) => {
     }
 
     // Find user with this reset token
-    const { data: user, error: dbError } = await supabase
-      .from('users')
-      .select('*')
-      .eq('reset_token', token)
-      .eq('email', decoded.email)
-      .single();
+    const userRecord = await db.select()
+      .from(agents)
+      .where(eq(agents.resetToken, token))
+      .limit(1);
 
-    if (dbError || !user) {
+    if (!userRecord || userRecord.length === 0 || userRecord[0].email !== decoded.email) {
       return res.status(400).json({
         error: 'Invalid reset token'
       });
     }
 
+    const user = userRecord[0];
+
     // Check if token is expired
-    if (new Date() > new Date(user.reset_token_expires)) {
+    if (new Date() > new Date(user.resetTokenExpires)) {
       return res.status(400).json({
         error: 'Reset token has expired'
       });
@@ -431,17 +431,16 @@ router.post('/reset-password', async (req, res) => {
     const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
 
     // Update password and clear reset token
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({
-        password_hash: hashedPassword,
-        reset_token: null,
-        reset_token_expires: null,
-        password_updated_at: new Date().toISOString()
-      })
-      .eq('id', user.id);
-
-    if (updateError) {
+    try {
+      await db.update(agents)
+        .set({
+          passwordHash: hashedPassword,
+          resetToken: null,
+          resetTokenExpires: null,
+          updatedAt: new Date()
+        })
+        .where(eq(agents.id, user.id));
+    } catch (updateError) {
       console.error('Failed to update password:', updateError);
       return res.status(500).json({
         error: 'Failed to reset password'
@@ -537,17 +536,24 @@ router.get('/me', async (req, res) => {
       const decoded = jwt.verify(token, JWT_SECRET);
       
       // Get user from database
-      const { data: user, error } = await supabase
-        .from('users')
-        .select('id, email, name, role, email_verified')
-        .eq('id', decoded.userId)
-        .single();
+      const userRecord = await db.select({
+        id: agents.id,
+        email: agents.email,
+        name: agents.fullName,
+        role: agents.role,
+        emailVerified: agents.emailVerified
+      })
+      .from(agents)
+      .where(eq(agents.id, decoded.userId))
+      .limit(1);
 
-      if (error || !user) {
+      if (!userRecord || userRecord.length === 0) {
         return res.status(401).json({
           error: 'User not found'
         });
       }
+
+      const user = userRecord[0];
 
       res.json({
         user: {
@@ -555,7 +561,7 @@ router.get('/me', async (req, res) => {
           email: user.email,
           name: user.name,
           role: user.role,
-          verified: user.email_verified
+          verified: user.emailVerified
         }
       });
     } catch (jwtError) {
@@ -588,31 +594,33 @@ router.get('/agents', async (req, res) => {
       const decoded = jwt.verify(token, JWT_SECRET);
       
       // Verify user exists and is verified
-      const { data: currentUser, error: userError } = await supabase
-        .from('users')
-        .select('id, email_verified')
-        .eq('id', decoded.userId)
-        .single();
+      const currentUser = await db.select({
+        id: agents.id,
+        emailVerified: agents.emailVerified
+      })
+      .from(agents)
+      .where(eq(agents.id, decoded.userId))
+      .limit(1);
 
-      if (userError || !currentUser || !currentUser.email_verified) {
+      if (!currentUser || currentUser.length === 0 || !currentUser[0].emailVerified) {
         return res.status(401).json({
           error: 'User not found or not verified'
         });
       }
 
       // Get all verified agents
-      const { data: agents, error } = await supabase
-        .from('users')
-        .select('id, name, email, role, email_verified, created_at')
-        .eq('email_verified', true)
-        .order('name');
+      const verifiedAgents = await db.select({
+        id: agents.id,
+        name: agents.fullName,
+        email: agents.email,
+        role: agents.role,
+        email_verified: agents.emailVerified,
+        created_at: agents.createdAt
+      })
+      .from(agents)
+      .where(eq(agents.emailVerified, true));
 
-      if (error) {
-        console.error('Error fetching agents:', error);
-        return res.status(500).json({ error: 'Failed to fetch agents' });
-      }
-
-      res.json({ agents: agents || [] });
+      res.json({ agents: verifiedAgents || [] });
     } catch (jwtError) {
       return res.status(401).json({
         error: 'Invalid or expired token'
@@ -621,6 +629,22 @@ router.get('/agents', async (req, res) => {
   } catch (error) {
     console.error('Error in agents route:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Logout endpoint
+router.post('/logout', async (req, res) => {
+  try {
+    // For JWT-based auth, logout is handled client-side by removing the token
+    // This endpoint can be used for logging purposes or token blacklisting if needed
+    res.json({
+      message: 'Logged out successfully'
+    });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({
+      error: 'Internal server error during logout'
+    });
   }
 });
 

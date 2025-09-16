@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
-import { createClient } from '@supabase/supabase-js';
 import { 
   Search, 
   Filter, 
@@ -20,15 +19,11 @@ import {
   LogOut
 } from 'lucide-react';
 import { format } from 'date-fns';
-import { useAuth } from '../lib/auth';
+import { useAuth, authManager } from '../lib/auth';
 
 // Force recompilation
 
-// Initialize Supabase client
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-);
+// Using backend API instead of Supabase direct connection
 
 export default function AgentDashboard() {
   const router = useRouter();
@@ -57,10 +52,20 @@ export default function AgentDashboard() {
       return;
     }
     
-    fetchLeads();
+    // Only fetch leads if user is authenticated and verified
+    if (isAuthenticated && user) {
+      fetchLeads();
+    }
   }, [isAuthenticated, user, router, authLoading]);
 
   const fetchLeads = async () => {
+    // Don't fetch if not authenticated
+    if (!isAuthenticated || !localStorage.getItem('auth_token')) {
+      console.log('Not authenticated, skipping fetch leads');
+      setLoading(false);
+      return;
+    }
+
     try {
       const response = await fetch('/api/leads', {
         headers: {
@@ -70,6 +75,13 @@ export default function AgentDashboard() {
       });
       
       if (!response.ok) {
+        if (response.status === 401) {
+          // Token is invalid, sign out and redirect
+          console.log('Unauthorized, redirecting to login');
+          await authManager.signOut();
+          router.push('/login');
+          return;
+        }
         throw new Error('Failed to fetch leads');
       }
       
@@ -85,10 +97,13 @@ export default function AgentDashboard() {
 
   const handleSignOut = async () => {
     try {
-      localStorage.removeItem('auth_token');
+      await authManager.signOut();
       router.push('/login');
     } catch (err) {
       console.error('Sign out error:', err);
+      // Even if there's an error, clear token and redirect
+      localStorage.removeItem('auth_token');
+      router.push('/login');
     }
   };
 
@@ -331,7 +346,7 @@ export default function AgentDashboard() {
                           <div className="flex items-center">
                             <div>
                               <div className="text-sm font-medium text-gray-900">
-                                {lead.full_name || 'No name'}
+                                {lead.fullName || 'No name'}
                               </div>
                               <div className="text-sm text-gray-500 flex items-center mt-1">
                                 <Mail className="w-3 h-3 mr-1" />
@@ -360,7 +375,7 @@ export default function AgentDashboard() {
                           </span>
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                          {lead.created_at ? format(new Date(lead.created_at), 'MMM d, yyyy') : 'N/A'}
+                          {lead.createdAt ? format(new Date(lead.createdAt), 'MMM d, yyyy') : 'N/A'}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                           <button

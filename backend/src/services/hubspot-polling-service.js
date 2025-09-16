@@ -2,7 +2,11 @@ import cron from 'node-cron';
 import { generateTrackingId } from '../utils/crypto.js';
 import logger from '../utils/logger.js';
 import { syncHubSpotLeads, fetchHubSpotLeads } from './hubspot-lead-service.js';
-import { supabase } from '../config/index.js';
+import { db } from '../config/index.js';
+import { systemConfig } from '../db/schema.js';
+import { eq, desc } from 'drizzle-orm';
+import { WorkflowOrchestrator } from '../../workflow-orchestrator.js';
+import automatedEmailWorkflowService from './automated-email-workflow-service.js';
 
 /**
  * HubSpot Lead Polling Service
@@ -13,8 +17,9 @@ class HubSpotPollingService {
     this.isRunning = false;
     this.cronJob = null;
     this.lastSyncTime = null;
-    this.syncInterval = process.env.HUBSPOT_SYNC_INTERVAL || '*/15 * * * *'; // Default: every 15 minutes
+    this.syncInterval = process.env.HUBSPOT_SYNC_INTERVAL || '*/2 * * * *'; // Default: every 2 minutes
     this.maxLeadsPerSync = parseInt(process.env.HUBSPOT_MAX_LEADS_PER_SYNC) || 100;
+    this.workflowOrchestrator = new WorkflowOrchestrator();
   }
 
   /**
@@ -23,6 +28,7 @@ class HubSpotPollingService {
   async start() {
     if (this.isRunning) {
       logger.warn('HubSpot polling service is already running');
+      console.log('⚠️ [HUBSPOT POLLING] Already running - skipping start');
       return;
     }
 
@@ -31,9 +37,14 @@ class HubSpotPollingService {
         interval: this.syncInterval,
         maxLeadsPerSync: this.maxLeadsPerSync
       });
+      
+      console.log('🚀 [HUBSPOT POLLING] Starting autonomous HubSpot lead synchronization');
+      console.log(`⏰ [HUBSPOT POLLING] Sync interval: ${this.syncInterval} (cron format)`);
+      console.log(`📊 [HUBSPOT POLLING] Max leads per sync: ${this.maxLeadsPerSync}`);
 
       // Get last sync time from database
       await this.initializeLastSyncTime();
+      console.log(`📅 [HUBSPOT POLLING] Last sync time initialized: ${this.lastSyncTime || 'Never'}`);
 
       // Schedule the cron job
       this.cronJob = cron.schedule(this.syncInterval, async () => {
@@ -46,6 +57,8 @@ class HubSpotPollingService {
       // Start the cron job
       this.cronJob.start();
       this.isRunning = true;
+      console.log('✅ [HUBSPOT POLLING] Autonomous polling service started successfully');
+      console.log('🔄 [HUBSPOT POLLING] Will automatically sync leads and trigger workflows');
 
       // Perform initial sync
       await this.performSync();
@@ -133,18 +146,13 @@ class HubSpotPollingService {
    */
   async initializeLastSyncTime() {
     try {
-      const { data, error } = await supabase
-        .from('hubspot_sync_status')
-        .select('last_sync_time')
-        .eq('sync_type', 'polling')
-        .single();
+      const result = await db.select()
+        .from(systemConfig)
+        .where(eq(systemConfig.key, 'hubspot_last_sync_time'))
+        .limit(1);
 
-      if (error && error.code !== 'PGRST116') {
-        throw error;
-      }
-
-      if (data) {
-        this.lastSyncTime = new Date(data.last_sync_time);
+      if (result.length > 0 && result[0].value) {
+        this.lastSyncTime = new Date(result[0].value);
         logger.info('Initialized last sync time from database', {
           lastSyncTime: this.lastSyncTime
         });
@@ -170,18 +178,28 @@ class HubSpotPollingService {
    */
   async updateLastSyncTime(syncTime) {
     try {
-      const { error } = await supabase
-        .from('hubspot_sync_status')
-        .upsert({
-          sync_type: 'polling',
-          last_sync_time: syncTime.toISOString(),
-          updated_at: new Date().toISOString()
-        }, {
-          onConflict: 'sync_type'
-        });
+      // Try to update existing record first
+      const existing = await db.select()
+        .from(systemConfig)
+        .where(eq(systemConfig.key, 'hubspot_last_sync_time'))
+        .limit(1);
 
-      if (error) {
-        throw error;
+      if (existing.length > 0) {
+        // Update existing record
+        await db.update(systemConfig)
+          .set({
+            value: syncTime.toISOString(),
+            updatedAt: new Date()
+          })
+          .where(eq(systemConfig.key, 'hubspot_last_sync_time'));
+      } else {
+        // Insert new record
+        await db.insert(systemConfig)
+          .values({
+            key: 'hubspot_last_sync_time',
+            value: syncTime.toISOString(),
+            description: 'Last sync time for HubSpot polling service'
+          });
       }
 
       this.lastSyncTime = syncTime;
@@ -206,6 +224,12 @@ class HubSpotPollingService {
     const syncStartTime = new Date();
 
     try {
+      console.log('\n🔄 HUBSPOT POLLING STARTED');
+      console.log(`⏰ Sync Time: ${syncStartTime.toISOString()}`);
+      console.log(`🔍 Tracking ID: ${trackingId}`);
+      console.log(`📅 Last Sync: ${this.lastSyncTime || 'Never'}`);
+      console.log(`📊 Max Leads Per Sync: ${this.maxLeadsPerSync}`);
+      
       logger.logLeadProcessing(trackingId, 'hubspot_polling_sync_started', {
         lastSyncTime: this.lastSyncTime,
         maxLeadsPerSync: this.maxLeadsPerSync
@@ -218,6 +242,9 @@ class HubSpotPollingService {
       }, trackingId);
 
       if (!hubspotLeads || hubspotLeads.length === 0) {
+        console.log('📭 NO NEW LEADS FOUND');
+        console.log('✅ Sync completed - no action needed');
+        
         logger.logLeadProcessing(trackingId, 'hubspot_polling_no_new_leads', {
           lastSyncTime: this.lastSyncTime
         });
@@ -232,6 +259,9 @@ class HubSpotPollingService {
           message: 'No new leads found'
         };
       }
+      
+      console.log(`📥 FOUND ${hubspotLeads.length} NEW LEADS FROM HUBSPOT`);
+      console.log('🔄 Processing leads and triggering automation...');
 
       // Process each lead through the sync pipeline
       const results = {
@@ -253,8 +283,63 @@ class HubSpotPollingService {
           if (syncResult.results && syncResult.results.length > 0) {
             const leadResult = syncResult.results[0];
             if (leadResult.operation === 'created') {
-              results.created++;
-            } else if (leadResult.operation === 'updated') {
+                results.created++;
+                
+                // Console log new lead creation
+                console.log(`🆕 NEW LEAD CREATED: ${leadResult.leadId}`);
+                console.log(`📧 Lead Email: ${hubspotLead.properties?.email || 'N/A'}`);
+                console.log(`👤 Lead Name: ${hubspotLead.properties?.firstname || ''} ${hubspotLead.properties?.lastname || ''}`);
+                console.log(`🔄 Triggering automation workflows...`);
+                
+                // Trigger automation workflows for new leads
+                try {
+                  const workflowSuccess = await this.workflowOrchestrator.initializeWorkflow(leadResult.leadId);
+                  
+                  if (workflowSuccess) {
+                    console.log(`✅ AUTOMATION TRIGGERED: Workflows initialized for lead ${leadResult.leadId}`);
+                    console.log(`📋 Workflow types: initial_engagement, scheduling_automation`);
+                    
+                    // Initialize automated email workflow for new lead
+                    try {
+                      const emailWorkflowResult = await automatedEmailWorkflowService.initializeLeadEmailWorkflow(
+                        leadResult.leadId,
+                        trackingId
+                      );
+                      
+                      if (emailWorkflowResult.success) {
+                        console.log(`📧 EMAIL WORKFLOW INITIALIZED: Lead ${leadResult.leadId}`);
+                        console.log(`📋 Email workflows: ${emailWorkflowResult.workflowsCreated.join(', ')}`);
+                      }
+                    } catch (emailWorkflowError) {
+                      console.error(`❌ EMAIL WORKFLOW FAILED: Lead ${leadResult.leadId}`, emailWorkflowError.message);
+                      logger.error('Failed to initialize email workflow for new lead', {
+                        trackingId,
+                        leadId: leadResult.leadId,
+                        error: emailWorkflowError.message,
+                        stack: emailWorkflowError.stack
+                      });
+                    }
+                  } else {
+                    console.log(`❌ AUTOMATION FAILED: Could not initialize workflows for lead ${leadResult.leadId}`);
+                  }
+                  
+                  logger.logLeadProcessing(trackingId, 'automation_workflow_triggered', {
+                    leadId: leadResult.leadId,
+                    workflowSuccess,
+                    source: 'hubspot_polling'
+                  });
+                  
+                } catch (workflowError) {
+                  console.log(`❌ AUTOMATION ERROR: ${workflowError.message}`);
+                  console.log(`🔍 Lead ID: ${leadResult.leadId}`);
+                  
+                  logger.logError(workflowError, {
+                    context: 'hubspot_polling_workflow_trigger',
+                    trackingId,
+                    leadId: leadResult.leadId
+                  });
+                }
+              } else if (leadResult.operation === 'updated') {
               results.updated++;
             }
           }
@@ -276,11 +361,32 @@ class HubSpotPollingService {
 
       // Update last sync time
       await this.updateLastSyncTime(syncStartTime);
+      
+      const duration = Date.now() - syncStartTime.getTime();
+      
+      console.log('\n✅ HUBSPOT POLLING COMPLETED');
+      console.log(`📊 SYNC RESULTS:`);
+      console.log(`   📥 Processed: ${results.processed} leads`);
+      console.log(`   🆕 Created: ${results.created} new leads`);
+      console.log(`   🔄 Updated: ${results.updated} existing leads`);
+      console.log(`   ❌ Errors: ${results.errors} failed`);
+      console.log(`   ⏱️  Duration: ${duration}ms`);
+      
+      if (results.created > 0) {
+        console.log(`🚀 AUTOMATION STATUS: ${results.created} workflows triggered for new leads`);
+      }
+      
+      if (results.errors > 0) {
+        console.log(`⚠️  ERROR DETAILS:`);
+        results.errorDetails.forEach((error, index) => {
+          console.log(`   ${index + 1}. Contact ${error.contactId}: ${error.error}`);
+        });
+      }
 
       logger.logLeadProcessing(trackingId, 'hubspot_polling_sync_completed', {
         ...results,
         syncTime: syncStartTime,
-        duration: Date.now() - syncStartTime.getTime()
+        duration
       });
 
       return {
@@ -290,6 +396,11 @@ class HubSpotPollingService {
       };
 
     } catch (error) {
+      console.log('\n❌ HUBSPOT POLLING ERROR');
+      console.log(`🔍 Tracking ID: ${trackingId}`);
+      console.log(`💥 Error: ${error.message}`);
+      console.log(`📅 Last Sync Time: ${this.lastSyncTime}`);
+      
       logger.logError(error, {
         context: 'hubspot_polling_sync',
         trackingId,

@@ -1,5 +1,7 @@
 import express from 'express';
-import { supabase } from '../config/index.js';
+import { db } from '../config/index.js';
+import { leads, agents } from '../db/schema.js';
+import { eq, desc } from 'drizzle-orm';
 import jwt from 'jsonwebtoken';
 
 const router = express.Router();
@@ -16,21 +18,28 @@ const verifyToken = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     
     // Get user from database
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('id, name, email, role, email_verified')
-      .eq('id', decoded.userId)
-      .single();
+    const user = await db.select({
+      id: agents.id,
+      agentId: agents.agentId,
+      email: agents.email,
+      firstName: agents.firstName,
+      lastName: agents.lastName,
+      role: agents.role,
+      emailVerified: agents.emailVerified
+    })
+    .from(agents)
+    .where(eq(agents.id, decoded.userId))
+    .limit(1);
 
-    if (error || !user) {
+    if (!user || user.length === 0) {
       return res.status(401).json({ error: 'User not found' });
     }
 
-    if (!user.email_verified) {
+    if (!user[0].emailVerified) {
       return res.status(401).json({ error: 'Email not verified' });
     }
 
-    req.user = user;
+    req.user = user[0];
     next();
   } catch (error) {
     console.error('Token verification failed:', error);
@@ -41,17 +50,11 @@ const verifyToken = async (req, res, next) => {
 // GET /api/leads - Get all leads
 router.get('/', verifyToken, async (req, res) => {
   try {
-    const { data: leads, error } = await supabase
-      .from('leads')
-      .select('*')
-      .order('created_at', { ascending: false });
+    const leadsData = await db.select()
+      .from(leads)
+      .orderBy(desc(leads.createdAt));
 
-    if (error) {
-      console.error('Error fetching leads:', error);
-      return res.status(500).json({ error: 'Failed to fetch leads' });
-    }
-
-    res.json({ leads: leads || [] });
+    res.json({ leads: leadsData || [] });
   } catch (error) {
     console.error('Error in leads route:', error);
     res.status(500).json({ error: 'Internal server error' });

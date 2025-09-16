@@ -1,19 +1,15 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
-import { createClient } from '@supabase/supabase-js';
+import { db } from '../config/index.js';
+import { agents, leads } from '../db/schema.js';
+import { eq, count, or, inArray } from 'drizzle-orm';
 import emailService from '../services/email-service.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 const router = express.Router();
-
-// Initialize Supabase client
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
@@ -32,17 +28,23 @@ const verifyAdmin = async (req, res, next) => {
     const decoded = jwt.verify(token, JWT_SECRET);
     
     // Get user from database to verify admin role
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('id, email, role, email_verified')
-      .eq('id', decoded.userId)
-      .single();
+    const userResult = await db.select({
+      id: agents.id,
+      email: agents.email,
+      role: agents.role,
+      emailVerified: agents.emailVerified
+    })
+    .from(agents)
+    .where(eq(agents.id, decoded.userId))
+    .limit(1);
 
-    if (error || !user || !user.email_verified) {
+    if (!userResult || userResult.length === 0 || !userResult[0].emailVerified) {
       return res.status(401).json({
         error: 'User not found or not verified'
       });
     }
+
+    const user = userResult[0];
 
     if (user.role !== 'admin') {
       return res.status(403).json({
@@ -78,15 +80,20 @@ const generateResetToken = (email) => {
 // Get all agents
 router.get('/agents', verifyAdmin, async (req, res) => {
   try {
-    const { data: agents, error } = await supabase
-      .from('users')
-      .select('id, name, email, role, email_verified, created_at, last_login')
-      .in('role', ['agent', 'admin'])
-      .order('created_at', { ascending: false });
+    const agentsResult = await db.select({
+      id: agents.id,
+      name: agents.fullName,
+      email: agents.email,
+      role: agents.role,
+      email_verified: agents.emailVerified,
+      created_at: agents.createdAt,
+      last_login: agents.lastLogin
+    })
+    .from(agents)
+    .where(or(eq(agents.role, 'agent'), eq(agents.role, 'admin')))
+    .orderBy(agents.createdAt);
 
-    if (error) throw error;
-
-    res.json({ success: true, agents });
+    res.json({ success: true, agents: agentsResult });
   } catch (error) {
     console.error('Error fetching agents:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch agents' });
@@ -112,13 +119,12 @@ router.post('/agents', verifyAdmin, async (req, res) => {
     }
 
     // Check if user already exists
-    const { data: existingUser } = await supabase
-      .from('users')
-      .select('id')
-      .eq('email', email)
-      .single();
+    const existingUserResult = await db.select({ id: agents.id })
+      .from(agents)
+      .where(eq(agents.email, email))
+      .limit(1);
 
-    if (existingUser) {
+    if (existingUserResult.length > 0) {
       return res.status(400).json({
         error: 'User with this email already exists'
       });
@@ -130,28 +136,28 @@ router.post('/agents', verifyAdmin, async (req, res) => {
     const resetToken = generateResetToken(email);
 
     // Create user with reset token
-    const { data: newAgent, error: createError } = await supabase
-      .from('users')
-      .insert({
-        name,
+    const newAgentResult = await db.insert(agents)
+      .values({
+        fullName: name,
         email,
-        password_hash: hashedPassword,
+        passwordHash: hashedPassword,
         role,
-        email_verified: true, // Auto-verify admin-created accounts
-        reset_token: resetToken,
-        reset_token_expires: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 24 hours
-        temp_password_expires: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 24 hours
-        created_at: new Date().toISOString()
+        emailVerified: true, // Auto-verify admin-created accounts
+        verificationToken: resetToken,
+        agentToken: resetToken,
+        agentTokenExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        createdAt: new Date()
       })
-      .select()
-      .single();
+      .returning();
 
-    if (createError) {
-      console.error('Error creating agent:', createError);
+    if (!newAgentResult || newAgentResult.length === 0) {
+      console.error('Error creating agent');
       return res.status(500).json({
         error: 'Failed to create agent'
       });
     }
+
+    const newAgent = newAgentResult[0];
 
     // Send credentials email
     try {
@@ -212,32 +218,29 @@ router.delete('/agents/:agentId', verifyAdmin, async (req, res) => {
     }
 
     // Check if agent exists
-    const { data: agent, error: fetchError } = await supabase
-      .from('users')
-      .select('id, role')
-      .eq('id', agentId)
-      .single();
+    const agentResult = await db.select({ id: agents.id, role: agents.role })
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .limit(1);
 
-    if (fetchError || !agent) {
+    if (!agentResult || agentResult.length === 0) {
       return res.status(404).json({
         error: 'Agent not found'
       });
     }
 
     // Unassign all leads from this agent before deletion
-    await supabase
-      .from('leads')
-      .update({ assigned_agent_id: null })
-      .eq('assigned_agent_id', agentId);
+    await db.update(leads)
+      .set({ assignedAgentId: null })
+      .where(eq(leads.assignedAgentId, agentId));
 
     // Delete the agent
-    const { error: deleteError } = await supabase
-      .from('users')
-      .delete()
-      .eq('id', agentId);
+    const deleteResult = await db.delete(agents)
+      .where(eq(agents.id, agentId))
+      .returning();
 
-    if (deleteError) {
-      console.error('Error deleting agent:', deleteError);
+    if (!deleteResult || deleteResult.length === 0) {
+      console.error('Error deleting agent');
       return res.status(500).json({
         error: 'Failed to delete agent'
       });
@@ -255,17 +258,11 @@ router.delete('/agents/:agentId', verifyAdmin, async (req, res) => {
 // Get all leads with assignment info
 router.get('/leads', verifyAdmin, async (req, res) => {
   try {
-    const { data: leads, error } = await supabase
-      .from('leads')
-      .select('*')
-      .order('created_at', { ascending: false });
+    const leadsResult = await db.select()
+      .from(leads)
+      .orderBy(leads.createdAt);
 
-    if (error) {
-      console.error('Error fetching leads:', error);
-      return res.status(500).json({ error: 'Failed to fetch leads' });
-    }
-
-    res.json({ leads: leads || [] });
+    res.json({ leads: leadsResult || [] });
   } catch (error) {
     console.error('Error in get leads route:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -284,31 +281,29 @@ router.post('/assign-leads', verifyAdmin, async (req, res) => {
     }
 
     // Verify agent exists
-    const { data: agent, error: agentError } = await supabase
-      .from('users')
-      .select('id')
-      .eq('id', agentId)
-      .in('role', ['agent', 'admin'])
-      .single();
+    const agentResult = await db.select({ id: agents.id })
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .where(or(eq(agents.role, 'agent'), eq(agents.role, 'admin')))
+      .limit(1);
 
-    if (agentError || !agent) {
+    if (!agentResult || agentResult.length === 0) {
       return res.status(404).json({
         error: 'Agent not found'
       });
     }
 
     // Update leads with agent assignment
-    const { data: updatedLeads, error: updateError } = await supabase
-      .from('leads')
-      .update({ 
-        assigned_agent_id: agentId,
-        updated_at: new Date().toISOString()
+    const updatedLeads = await db.update(leads)
+      .set({ 
+        assignedAgentId: agentId,
+        updatedAt: new Date()
       })
-      .in('id', leadIds)
-      .select();
+      .where(inArray(leads.id, leadIds))
+      .returning();
 
-    if (updateError) {
-      console.error('Error assigning leads:', updateError);
+    if (!updatedLeads || updatedLeads.length === 0) {
+      console.error('Error assigning leads');
       return res.status(500).json({
         error: 'Failed to assign leads'
       });
@@ -336,17 +331,16 @@ router.post('/unassign-leads', verifyAdmin, async (req, res) => {
     }
 
     // Update leads to remove agent assignment
-    const { data: updatedLeads, error: updateError } = await supabase
-      .from('leads')
-      .update({ 
-        assigned_agent_id: null,
-        updated_at: new Date().toISOString()
+    const updatedLeads = await db.update(leads)
+      .set({ 
+        assignedAgentId: null,
+        updatedAt: new Date()
       })
-      .in('id', leadIds)
-      .select();
+      .where(inArray(leads.id, leadIds))
+      .returning();
 
-    if (updateError) {
-      console.error('Error unassigning leads:', updateError);
+    if (!updatedLeads || updatedLeads.length === 0) {
+      console.error('Error unassigning leads');
       return res.status(500).json({
         error: 'Failed to unassign leads'
       });
@@ -393,26 +387,22 @@ router.get('/campaigns', verifyAdmin, async (req, res) => {
 router.get('/stats', verifyAdmin, async (req, res) => {
   try {
     // Get agent count
-    const { count: agentCount, error: agentError } = await supabase
-      .from('users')
-      .select('*', { count: 'exact', head: true })
-      .in('role', ['agent', 'admin']);
+    const agentCountResult = await db.select({ count: count() })
+      .from(agents)
+      .where(or(eq(agents.role, 'agent'), eq(agents.role, 'admin')));
 
     // Get lead count
-    const { count: leadCount, error: leadError } = await supabase
-      .from('leads')
-      .select('*', { count: 'exact', head: true });
+    const leadCountResult = await db.select({ count: count() })
+      .from(leads);
 
     // Get unassigned lead count
-    const { count: unassignedCount, error: unassignedError } = await supabase
-      .from('leads')
-      .select('*', { count: 'exact', head: true })
-      .is('assigned_agent_id', null);
+    const unassignedCountResult = await db.select({ count: count() })
+      .from(leads)
+      .where(eq(leads.assignedAgentId, null));
 
-    if (agentError || leadError || unassignedError) {
-      console.error('Error fetching stats:', { agentError, leadError, unassignedError });
-      return res.status(500).json({ error: 'Failed to fetch statistics' });
-    }
+    const agentCount = agentCountResult[0]?.count || 0;
+    const leadCount = leadCountResult[0]?.count || 0;
+    const unassignedCount = unassignedCountResult[0]?.count || 0;
 
     res.json({
       stats: {

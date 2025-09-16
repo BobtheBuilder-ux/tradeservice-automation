@@ -1,7 +1,7 @@
 import { facebookConfig } from '../config/index.js';
 import logger from '../utils/logger.js';
 import { upsertHubSpotContact } from './hubspot-service.js';
-import { upsertLeadToSupabase } from './supabase-service.js';
+import { upsertLeadToDatabase } from './database-service.js';
 import { transformLead } from './lead-transformation-service.js';
 
 
@@ -121,21 +121,21 @@ export async function processFacebookLead(webhookData, trackingId) {
       results.errors.push(`HubSpot: ${hubspotError.message}`);
     }
 
-    // Step 4: Upsert lead to Supabase
+    // Step 4: Upsert lead to Database
     try {
-      const supabaseResult = await upsertLeadToSupabase(transformedLead, trackingId);
-      results.supabase = { success: true, data: supabaseResult };
-      logger.logLeadProcessing(trackingId, 'supabase_upsert_completed', {
-        leadId: supabaseResult.id
+      const databaseResult = await upsertLeadToDatabase(transformedLead, trackingId);
+      results.supabase = { success: true, data: databaseResult };
+      logger.logLeadProcessing(trackingId, 'database_upsert_completed', {
+        leadId: databaseResult.id
       });
-    } catch (supabaseError) {
-      logger.logError(supabaseError, {
-        context: 'supabase_upsert',
+    } catch (databaseError) {
+      logger.logError(databaseError, {
+        context: 'database_upsert',
         trackingId,
         leadgenId
       });
-      results.supabase = { success: false, error: supabaseError.message };
-      results.errors.push(`Supabase: ${supabaseError.message}`);
+      results.supabase = { success: false, error: databaseError.message };
+      results.errors.push(`Database: ${databaseError.message}`);
     }
 
 

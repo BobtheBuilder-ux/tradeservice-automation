@@ -1,8 +1,9 @@
-import { calendlyConfig } from '../config/index.js';
-import { supabase } from '../config/index.js';
+import { calendlyConfig, db } from '../config/index.js';
+import { leads } from '../db/schema.js';
+import { eq, desc } from 'drizzle-orm';
 import logger from '../utils/logger.js';
 import { hashForLogging } from '../utils/crypto.js';
-import { updateLeadStatus } from './supabase-service.js';
+import { updateLeadStatus } from './database-service.js';
 import MeetingService from './meeting-service.js';
 
 /**
@@ -324,24 +325,19 @@ async function findLeadByEmail(email, trackingId) {
       email: hashForLogging(email)
     });
 
-    const { data, error } = await supabase
-      .from('leads')
-      .select('*')
-      .eq('email', email)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
+    const [lead] = await db
+       .select()
+       .from(leads)
+       .where(eq(leads.email, email))
+       .orderBy(desc(leads.createdAt))
+       .limit(1);
 
-    if (error && error.code !== 'PGRST116') {
-      throw error;
-    }
-
-    if (data) {
+    if (lead) {
       logger.logLeadProcessing(trackingId, 'lead_found_by_email', {
-        leadId: data.id,
+        leadId: lead.id,
         email: hashForLogging(email)
       });
-      return data;
+      return lead;
     }
 
     return null;
@@ -372,27 +368,26 @@ async function updateLeadWithCalendlyData(leadId, calendlyData, trackingId) {
 
     const updateData = {
       ...calendlyData,
-      updated_at: new Date().toISOString(),
-      last_calendly_update: new Date().toISOString()
+      updatedAt: new Date(),
+      lastCalendlyUpdate: new Date()
     };
 
-    const { data, error } = await supabase
-      .from('leads')
-      .update(updateData)
-      .eq('id', leadId)
-      .select()
-      .single();
+    const [lead] = await db
+      .update(leads)
+      .set(updateData)
+      .where(eq(leads.id, leadId))
+      .returning();
 
-    if (error) {
-      throw error;
+    if (!lead) {
+      throw new Error(`Lead not found: ${leadId}`);
     }
 
     logger.logLeadProcessing(trackingId, 'lead_updated_with_calendly_data', {
-      leadId: data.id,
-      status: data.status
+      leadId: lead.id,
+      status: lead.status
     });
 
-    return data;
+    return lead;
 
   } catch (error) {
     logger.logError(error, {
@@ -421,27 +416,27 @@ async function createLeadFromCalendlyEvent(payload, trackingId) {
 
     const leadRecord = {
       email: invitee.email,
-      first_name: invitee.first_name || '',
-      last_name: invitee.last_name || '',
-      full_name: invitee.name || `${invitee.first_name || ''} ${invitee.last_name || ''}`.trim(),
+      firstName: invitee.first_name || '',
+      lastName: invitee.last_name || '',
+      fullName: invitee.name || `${invitee.first_name || ''} ${invitee.last_name || ''}`.trim(),
       status: 'scheduled',
       source: 'calendly_direct',
-      calendly_event_uri: event.uri,
-      calendly_invitee_uri: invitee.uri,
-      scheduled_at: event.start_time,
-      meeting_end_time: event.end_time,
-      meeting_location: event.location?.join(', ') || null,
-      calendly_event_type: payload.event_type?.name,
-      calendly_questions: invitee.questions_and_answers || [],
-      calendly_tracking_data: {
+      calendlyEventUri: event.uri,
+      calendlyInviteeUri: invitee.uri,
+      calendlyStartTime: new Date(event.start_time),
+      calendlyEndTime: new Date(event.end_time),
+      meetingLocation: event.location?.join(', ') || null,
+      calendlyEventType: payload.event_type?.name,
+      calendlyQuestions: invitee.questions_and_answers || [],
+      calendlyTrackingData: {
         utm_campaign: invitee.tracking?.utm_campaign,
         utm_source: invitee.tracking?.utm_source,
         utm_medium: invitee.tracking?.utm_medium,
         utm_content: invitee.tracking?.utm_content,
         utm_term: invitee.tracking?.utm_term
       },
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
+      createdAt: new Date(),
+      updatedAt: new Date()
     };
 
     // Remove null/undefined values
@@ -451,22 +446,21 @@ async function createLeadFromCalendlyEvent(payload, trackingId) {
       }
     });
 
-    const { data, error } = await supabase
-      .from('leads')
-      .insert([leadRecord])
-      .select()
-      .single();
+    const [lead] = await db
+      .insert(leads)
+      .values(leadRecord)
+      .returning();
 
-    if (error) {
-      throw error;
+    if (!lead) {
+      throw new Error('Failed to create lead from Calendly event');
     }
 
     logger.logLeadProcessing(trackingId, 'lead_created_from_calendly', {
-      leadId: data.id,
+      leadId: lead.id,
       email: invitee.email ? hashForLogging(invitee.email) : '[MISSING]'
     });
 
-    return data;
+    return lead;
 
   } catch (error) {
     logger.logError(error, {
