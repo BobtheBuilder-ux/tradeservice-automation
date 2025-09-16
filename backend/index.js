@@ -12,6 +12,7 @@ import hubspotWebhookRoutes from './src/routes/hubspot-webhook.js';
 import facebookWebhookRoutes from './src/routes/facebook-webhook.js';
 import facebookAdsRoutes from './src/routes/facebook-ads.js';
 import calendlyWebhookRoutes from './src/routes/calendly-webhook.js';
+import zapierWebhookRoutes from './src/routes/zapier-webhook.js';
 import healthRoutes from './src/routes/health.js';
 import authRoutes from './src/routes/auth.js';
 import analyticsRoutes from './src/routes/analytics.js';
@@ -105,6 +106,7 @@ app.use('/api/facebook-ads', facebookAdsRoutes);
 app.use('/webhook/hubspot', hubspotWebhookRoutes);
 app.use('/webhook/facebook', facebookWebhookRoutes);
 app.use('/webhook/calendly', calendlyWebhookRoutes);
+app.use('/webhook/zapier', zapierWebhookRoutes);
 app.use('/health', healthRoutes);
 
 // Workflow Management Routes
