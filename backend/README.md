@@ -1,32 +1,34 @@
-# Facebook Lead Automation System
+# HubSpot Lead Automation System
 
-A comprehensive automation system that captures Facebook lead ads, processes them through HubSpot, stores them in Supabase, creates Trello cards for tracking, and integrates with Calendly for meeting scheduling.
+A comprehensive automation system that synchronizes leads from HubSpot CRM, processes them through automated workflows, stores them in Supabase, creates Trello cards for tracking, and integrates with Calendly for meeting scheduling.
 
 ## Features
 
-- **Facebook Lead Ads Integration**: Automatically receives and processes Facebook lead ad webhooks
-- **HubSpot CRM Integration**: Creates and updates contacts in HubSpot
+- **HubSpot CRM Integration**: Automatically syncs and processes leads from HubSpot CRM
+- **Lead Polling Service**: Continuously monitors HubSpot for new leads
+- **Unified Lead Transformation**: Standardized lead processing supporting multiple sources
 - **Supabase Database**: Stores lead data with full audit trail
 - **Trello Project Management**: Creates cards for lead tracking and follow-up
 - **Calendly Integration**: Tracks meeting scheduling, cancellations, and no-shows
 - **Comprehensive Logging**: Winston-based logging with request tracking
-- **Security**: Webhook signature verification for Facebook and Calendly
+- **Security**: Webhook signature verification and secure API access
 - **Health Monitoring**: Built-in health checks for all services
 
 ## Architecture
 
 ```
-Facebook Lead Ads → Webhook → Express Server → Processing Pipeline
+HubSpot CRM → Polling Service → Express Server → Processing Pipeline
                                     ↓
                             ┌─────────────────┐
-                            │   Lead Data     │
+                            │ Lead Transform  │
+                            │   & Validate    │
                             └─────────────────┘
                                     ↓
                     ┌───────────────┼───────────────┐
                     ↓               ↓               ↓
               ┌──────────┐   ┌──────────┐   ┌──────────┐
               │ HubSpot  │   │ Supabase │   │ Trello   │
-              │   CRM    │   │ Database │   │  Cards   │
+              │ Webhook  │   │ Database │   │  Cards   │
               └──────────┘   └──────────┘   └──────────┘
                                     ↑
                             ┌─────────────────┐
@@ -39,8 +41,7 @@ Facebook Lead Ads → Webhook → Express Server → Processing Pipeline
 
 - Node.js 18+ and npm
 - Supabase account and project
-- Facebook Developer account with app configured for Lead Ads
-- HubSpot account with API access
+- HubSpot account with API access and CRM data
 - Trello account with API access
 - Calendly account with webhook access (optional)
 
@@ -61,11 +62,6 @@ Facebook Lead Ads → Webhook → Express Server → Processing Pipeline
    Fill in your API credentials in the `.env` file:
    
    ```env
-   # Facebook Configuration
-   FACEBOOK_APP_SECRET=your_facebook_app_secret
-   FACEBOOK_ACCESS_TOKEN=your_facebook_access_token
-   FACEBOOK_VERIFY_TOKEN=your_webhook_verify_token
-   
    # Supabase Configuration
    SUPABASE_URL=your_supabase_project_url
    SUPABASE_ANON_KEY=your_supabase_anon_key
@@ -93,25 +89,13 @@ Facebook Lead Ads → Webhook → Express Server → Processing Pipeline
    The application will automatically create the required `leads` table in Supabase on first run. The table schema includes:
    
    - Lead information (name, email, phone, etc.)
-   - Facebook lead data and metadata
-   - HubSpot contact ID and sync status
+   - HubSpot contact data and metadata
+   - Lead source and transformation status
    - Trello card ID and tracking
    - Calendly meeting information
    - Processing timestamps and status
 
 ## API Configuration
-
-### Facebook Lead Ads Setup
-
-1. **Create Facebook App:**
-   - Go to [Facebook Developers](https://developers.facebook.com/)
-   - Create a new app and add "Lead Ads" product
-   - Configure webhook URL: `https://yourdomain.com/webhook/facebook`
-   - Subscribe to `leadgen` events
-
-2. **Webhook Verification:**
-   - Set verify token in your `.env` file
-   - Facebook will verify your webhook during setup
 
 ### HubSpot Setup
 
@@ -119,6 +103,16 @@ Facebook Lead Ads → Webhook → Express Server → Processing Pipeline
    - Go to HubSpot Settings → Integrations → Private Apps
    - Create new private app with contacts read/write permissions
    - Copy the access token to your `.env` file
+
+2. **Configure Webhook (Optional):**
+   - Go to HubSpot Settings → Integrations → Webhooks
+   - Add webhook URL: `https://yourdomain.com/webhook/hubspot`
+   - Subscribe to contact creation/update events
+
+3. **Lead Polling:**
+   - The system automatically polls HubSpot for new leads
+   - Polling interval can be configured in the application
+   - No additional setup required for basic lead synchronization
 
 ### Trello Setup
 
@@ -150,19 +144,23 @@ npm start
 npm test
 ```
 
-### Testing Webhooks
+### Testing Integration
 
-**Test Facebook webhook:**
+**Test HubSpot sync:**
 ```bash
-curl -X POST http://localhost:3000/webhook/facebook/test \
+curl -X POST http://localhost:3000/api/hubspot/sync \
+  -H "Content-Type: application/json"
+```
+
+**Test HubSpot webhook:**
+```bash
+curl -X POST http://localhost:3000/webhook/hubspot \
   -H "Content-Type: application/json" \
   -d '{
-    "leadgen_id": "test_lead_123",
-    "page_id": "your_page_id",
-    "form_id": "your_form_id",
-    "adgroup_id": "your_adgroup_id",
-    "ad_id": "your_ad_id",
-    "campaign_id": "your_campaign_id"
+    "subscriptionType": "contact.creation",
+    "eventId": "test_event_123",
+    "objectId": "test_contact_456",
+    "changeSource": "CRM"
   }'
 ```
 
@@ -199,9 +197,9 @@ curl http://localhost:3000/health/detailed
 
 ### Webhooks
 
-- `GET /webhook/facebook` - Facebook webhook verification
-- `POST /webhook/facebook` - Facebook lead webhook handler
-- `POST /webhook/facebook/test` - Test Facebook lead processing
+- `GET /webhook/hubspot` - HubSpot webhook verification
+- `POST /webhook/hubspot` - HubSpot contact webhook handler
+- `POST /api/hubspot/sync` - Manual HubSpot lead synchronization
 - `POST /webhook/calendly` - Calendly event webhook handler
 - `POST /webhook/calendly/test` - Test Calendly event processing
 
@@ -212,17 +210,17 @@ curl http://localhost:3000/health/detailed
 
 ## Data Flow
 
-1. **Facebook Lead Capture:**
-   - User submits lead form on Facebook
-   - Facebook sends webhook to `/webhook/facebook`
-   - System fetches full lead data from Facebook Graph API
+1. **HubSpot Lead Synchronization:**
+   - HubSpot polling service continuously monitors for new contacts
+   - System fetches new/updated contacts from HubSpot CRM
+   - Optional: HubSpot sends webhook notifications for real-time updates
 
 2. **Lead Processing Pipeline:**
-   - Validate and transform lead data
-   - Create/update contact in HubSpot
-   - Store lead record in Supabase
-   - Create tracking card in Trello
-   - Log all activities with tracking ID
+   - Validate and transform lead data using unified transformation service
+   - Process lead through standardized format (supports multiple sources)
+   - Store lead record in Supabase with full audit trail
+   - Create tracking card in Trello for follow-up
+   - Log all activities with unique tracking ID
 
 3. **Calendly Integration:**
    - User schedules meeting via Calendly
@@ -252,7 +250,8 @@ The system uses Winston for comprehensive logging:
 
 ## Security Features
 
-- **Webhook signature verification** for Facebook and Calendly
+- **Webhook signature verification** for HubSpot and Calendly
+- **Secure API token management** for HubSpot integration
 - **Environment variable validation** on startup
 - **Sensitive data hashing** in logs
 - **CORS configuration** for API security
@@ -281,22 +280,27 @@ Monitor these log patterns:
 
 ### Common Issues
 
-1. **Webhook verification fails:**
-   - Check `FACEBOOK_APP_SECRET` and `FACEBOOK_VERIFY_TOKEN`
+1. **HubSpot API connection fails:**
+   - Verify `HUBSPOT_ACCESS_TOKEN` is valid and has proper permissions
+   - Check HubSpot API rate limits and quotas
+   - Ensure private app has contacts read/write scopes
+
+2. **Lead polling issues:**
+   - Check HubSpot polling service logs for errors
+   - Verify network connectivity to HubSpot API
+   - Review polling interval configuration
+
+3. **Webhook verification fails:**
    - Ensure webhook URL is accessible from internet
    - Verify SSL certificate if using HTTPS
+   - Check HubSpot webhook configuration
 
-2. **HubSpot contact creation fails:**
-   - Verify `HUBSPOT_ACCESS_TOKEN` permissions
-   - Check for duplicate contacts
-   - Review HubSpot API rate limits
-
-3. **Supabase connection issues:**
+4. **Supabase connection issues:**
    - Verify `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`
    - Check database permissions
    - Ensure `leads` table exists
 
-4. **Trello card creation fails:**
+5. **Trello card creation fails:**
    - Verify `TRELLO_API_KEY`, `TRELLO_TOKEN`, `TRELLO_BOARD_ID`, `TRELLO_LIST_ID`
    - Check board and list accessibility
    - Review Trello API permissions

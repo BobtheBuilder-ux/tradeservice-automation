@@ -2,6 +2,7 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { createClient } from '@supabase/supabase-js';
+import emailService from '../services/email-service.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -63,6 +64,15 @@ const generateRandomPassword = () => {
   return Math.random().toString(36).slice(-12) + Math.random().toString(36).slice(-12);
 };
 
+// Generate password reset token
+const generateResetToken = (email) => {
+  return jwt.sign(
+    { type: 'reset', email, timestamp: Date.now() },
+    JWT_SECRET,
+    { expiresIn: '24h' }
+  );
+};
+
 // AGENT MANAGEMENT ENDPOINTS
 
 // Get all agents
@@ -114,11 +124,12 @@ router.post('/agents', verifyAdmin, async (req, res) => {
       });
     }
 
-    // Generate temporary password
+    // Generate temporary password and reset token
     const tempPassword = generateRandomPassword();
     const hashedPassword = await bcrypt.hash(tempPassword, 12);
+    const resetToken = generateResetToken(email);
 
-    // Create user
+    // Create user with reset token
     const { data: newAgent, error: createError } = await supabase
       .from('users')
       .insert({
@@ -127,6 +138,9 @@ router.post('/agents', verifyAdmin, async (req, res) => {
         password_hash: hashedPassword,
         role,
         email_verified: true, // Auto-verify admin-created accounts
+        reset_token: resetToken,
+        reset_token_expires: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 24 hours
+        temp_password_expires: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 24 hours
         created_at: new Date().toISOString()
       })
       .select()
@@ -139,17 +153,46 @@ router.post('/agents', verifyAdmin, async (req, res) => {
       });
     }
 
-    // Return success (in production, you'd send the temp password via email)
-    res.status(201).json({
-      message: 'Agent created successfully',
-      agent: {
-        id: newAgent.id,
-        name: newAgent.name,
-        email: newAgent.email,
-        role: newAgent.role
-      },
-      temporaryPassword: tempPassword // In production, send via email instead
-    });
+    // Send credentials email
+    try {
+      const emailResult = await emailService.sendAgentCredentialsEmail(
+        email,
+        name,
+        tempPassword,
+        resetToken
+      );
+
+      if (!emailResult.success) {
+        console.error('Failed to send credentials email:', emailResult.error);
+        // Don't fail the creation if email fails, just log it
+      }
+
+      res.status(201).json({
+        message: 'Agent created successfully and credentials sent via email',
+        agent: {
+          id: newAgent.id,
+          name: newAgent.name,
+          email: newAgent.email,
+          role: newAgent.role
+        },
+        emailSent: emailResult.success
+      });
+    } catch (emailError) {
+      console.error('Error sending credentials email:', emailError);
+      
+      // Still return success for agent creation
+      res.status(201).json({
+        message: 'Agent created successfully, but failed to send credentials email',
+        agent: {
+          id: newAgent.id,
+          name: newAgent.name,
+          email: newAgent.email,
+          role: newAgent.role
+        },
+        emailSent: false,
+        emailError: 'Failed to send credentials email'
+      });
+    }
   } catch (error) {
     console.error('Error in create agent route:', error);
     res.status(500).json({ error: 'Internal server error' });

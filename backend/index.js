@@ -8,6 +8,7 @@ import { dirname, join } from 'path';
 import fs from 'fs';
 
 // Import route handlers
+import hubspotWebhookRoutes from './src/routes/hubspot-webhook.js';
 import facebookWebhookRoutes from './src/routes/facebook-webhook.js';
 import facebookAdsRoutes from './src/routes/facebook-ads.js';
 import calendlyWebhookRoutes from './src/routes/calendly-webhook.js';
@@ -20,6 +21,7 @@ import adminRoutes from './src/routes/admin.js';
 import { WorkflowOrchestrator } from './workflow-orchestrator.js';
 import reminderScheduler from './src/services/reminder-scheduler.js';
 import NewLeadMonitor from './src/services/new-lead-monitor.js';
+import hubspotPollingService from './src/services/hubspot-polling-service.js';
 import logger from './utils/logger.js';
 
 // Load environment variables
@@ -58,6 +60,7 @@ const workflowOrchestrator = new WorkflowOrchestrator();
 const newLeadMonitor = new NewLeadMonitor();
 logWithTimestamp('info', '🚀 Workflow Orchestrator initialized');
 logWithTimestamp('info', '🚀 New Lead Monitor initialized');
+logWithTimestamp('info', '🚀 HubSpot Polling Service initialized');
 
 // Create Express app
 const app = express();
@@ -66,7 +69,9 @@ const PORT = process.env.PORT || 3001;
 // Middleware
 app.use(helmet());
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://127.0.0.1:3000', process.env.FRONTEND_URL].filter(Boolean),
+  origin: process.env.NODE_ENV === 'production' 
+    ? [process.env.FRONTEND_URL].filter(Boolean)
+    : ['http://localhost:3000', 'http://127.0.0.1:3000', process.env.FRONTEND_URL].filter(Boolean),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -87,12 +92,13 @@ app.use((req, res, next) => {
   next();
 });
 
-// Routes
+// Route handlers
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/leads', leadsRoutes);
 app.use('/api/facebook-ads', facebookAdsRoutes);
+app.use('/webhook/hubspot', hubspotWebhookRoutes);
 app.use('/webhook/facebook', facebookWebhookRoutes);
 app.use('/webhook/calendly', calendlyWebhookRoutes);
 app.use('/health', healthRoutes);
@@ -368,7 +374,7 @@ app.listen(PORT, async () => {
   
   // Start the automated reminder scheduler
   try {
-    ReminderScheduler.start();
+    reminderScheduler.start();
     logWithTimestamp('info', '✅ Automated reminder scheduler started successfully');
   } catch (error) {
     logWithTimestamp('error', '❌ Failed to start reminder scheduler', { error: error.message, stack: error.stack });
@@ -381,6 +387,14 @@ app.listen(PORT, async () => {
     logWithTimestamp('info', '✅ New lead monitor started successfully with 2-minute intervals');
   } catch (error) {
     logWithTimestamp('error', '❌ Failed to start new lead monitor', { error: error.message, stack: error.stack });
+  }
+
+  // Start the HubSpot polling service
+  try {
+    hubspotPollingService.start();
+    logWithTimestamp('info', '✅ HubSpot polling service started successfully');
+  } catch (error) {
+    logWithTimestamp('error', '❌ Failed to start HubSpot polling service', { error: error.message, stack: error.stack });
   }
   
   // Initialize workflow processing
@@ -409,6 +423,7 @@ app.listen(PORT, async () => {
   console.log(`⏰ Workflow Processing: Active (5-minute intervals)`);
   console.log(`📅 Reminder Scheduler: Active`);
   console.log(`🔍 New Lead Monitor: Active (2-minute intervals)`);
+  console.log(`🔄 HubSpot Polling: Active`);
   console.log('='.repeat(80) + '\n');
 });
 

@@ -2,6 +2,7 @@ import { facebookConfig } from '../config/index.js';
 import logger from '../utils/logger.js';
 import { upsertHubSpotContact } from './hubspot-service.js';
 import { upsertLeadToSupabase } from './supabase-service.js';
+import { transformLead } from './lead-transformation-service.js';
 
 
 /**
@@ -47,88 +48,19 @@ export async function fetchFacebookLead(leadgenId, trackingId) {
 }
 
 /**
- * Transform Facebook lead data to standardized format
+ * Transform Facebook lead data to standardized format (deprecated - use transformLead instead)
  * @param {Object} facebookLead - Raw lead data from Facebook
  * @param {string} trackingId - Tracking ID for logging
  * @returns {Object} Standardized lead data
+ * @deprecated Use transformLead from lead-transformation-service.js instead
  */
 export function transformFacebookLead(facebookLead, trackingId) {
-  const transformedLead = {
-    id: facebookLead.id,
-    created_time: facebookLead.created_time,
-    ad_id: facebookLead.ad_id,
-    ad_name: facebookLead.ad_name,
-    adset_id: facebookLead.adset_id,
-    adset_name: facebookLead.adset_name,
-    campaign_id: facebookLead.campaign_id,
-    campaign_name: facebookLead.campaign_name,
-    form_id: facebookLead.form_id,
-    form_name: facebookLead.form_name,
-    is_organic: facebookLead.is_organic,
-    platform: facebookLead.platform,
-    fields: {},
-    raw_data: facebookLead
-  };
-
-  // Transform field_data array to key-value pairs
-  if (facebookLead.field_data && Array.isArray(facebookLead.field_data)) {
-    for (const field of facebookLead.field_data) {
-      const fieldName = field.name?.toLowerCase();
-      const fieldValue = field.values?.[0] || '';
-      
-      if (fieldName && fieldValue) {
-        transformedLead.fields[fieldName] = fieldValue;
-        
-        // Map common fields to standard properties
-        switch (fieldName) {
-          case 'email':
-            transformedLead.email = fieldValue;
-            break;
-          case 'first_name':
-          case 'firstname':
-            transformedLead.first_name = fieldValue;
-            break;
-          case 'last_name':
-          case 'lastname':
-            transformedLead.last_name = fieldValue;
-            break;
-          case 'full_name':
-          case 'name':
-            transformedLead.full_name = fieldValue;
-            // Try to split full name if first/last not provided
-            if (!transformedLead.first_name && !transformedLead.last_name) {
-              const nameParts = fieldValue.split(' ');
-              transformedLead.first_name = nameParts[0] || '';
-              transformedLead.last_name = nameParts.slice(1).join(' ') || '';
-            }
-            break;
-          case 'phone':
-          case 'phone_number':
-            transformedLead.phone = fieldValue;
-            break;
-          case 'company':
-          case 'company_name':
-            transformedLead.company = fieldValue;
-            break;
-          case 'job_title':
-          case 'title':
-            transformedLead.job_title = fieldValue;
-            break;
-        }
-      }
-    }
-  }
-
-  logger.logLeadProcessing(trackingId, 'lead_transformed', {
-    leadId: transformedLead.id,
-    email: transformedLead.email ? '[PROVIDED]' : '[MISSING]',
-    firstName: transformedLead.first_name ? '[PROVIDED]' : '[MISSING]',
-    lastName: transformedLead.last_name ? '[PROVIDED]' : '[MISSING]',
-    phone: transformedLead.phone ? '[PROVIDED]' : '[MISSING]',
-    fieldCount: Object.keys(transformedLead.fields).length
+  logger.logLeadProcessing(trackingId, 'using_deprecated_facebook_transform', {
+    leadId: facebookLead.id,
+    message: 'Consider using transformLead from lead-transformation-service.js'
   });
-
-  return transformedLead;
+  
+  return transformLead(facebookLead, 'facebook_lead_ads', trackingId);
 }
 
 /**
@@ -169,8 +101,8 @@ export async function processFacebookLead(webhookData, trackingId) {
     const facebookLead = await fetchFacebookLead(leadgenId, trackingId);
     results.facebook = { success: true, data: facebookLead };
 
-    // Step 2: Transform the lead data
-    const transformedLead = transformFacebookLead(facebookLead, trackingId);
+    // Step 2: Transform the lead data using unified transformation service
+    const transformedLead = transformLead(facebookLead, 'facebook_lead_ads', trackingId);
 
     // Step 3: Upsert contact to HubSpot
     try {

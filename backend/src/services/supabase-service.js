@@ -43,21 +43,21 @@ export async function createLeadsTableIfNotExists() {
 }
 
 /**
- * Find existing lead by Facebook lead ID
- * @param {string} facebookLeadId - Facebook lead ID
+ * Find existing lead by HubSpot contact ID
+ * @param {string} hubspotContactId - HubSpot contact ID
  * @param {string} trackingId - Tracking ID for logging
  * @returns {Object|null} Existing lead or null
  */
-export async function findLeadByFacebookId(facebookLeadId, trackingId) {
+export async function findLeadByHubSpotId(hubspotContactId, trackingId) {
   try {
     logger.logLeadProcessing(trackingId, 'searching_supabase_lead', {
-      facebookLeadId
+      hubspotContactId
     });
 
     const { data, error } = await supabase
       .from('leads')
       .select('*')
-      .eq('facebook_lead_id', facebookLeadId)
+      .eq('hubspot_contact_id', hubspotContactId)
       .single();
 
     if (error && error.code !== 'PGRST116') {
@@ -67,13 +67,13 @@ export async function findLeadByFacebookId(facebookLeadId, trackingId) {
     if (data) {
       logger.logLeadProcessing(trackingId, 'supabase_lead_found', {
         leadId: data.id,
-        facebookLeadId
+        hubspotContactId
       });
       return data;
     }
 
     logger.logLeadProcessing(trackingId, 'supabase_lead_not_found', {
-      facebookLeadId
+      hubspotContactId
     });
     return null;
 
@@ -81,7 +81,52 @@ export async function findLeadByFacebookId(facebookLeadId, trackingId) {
     logger.logError(error, {
       context: 'supabase_lead_search',
       trackingId,
-      facebookLeadId
+      hubspotContactId
+    });
+    throw error;
+  }
+}
+
+/**
+ * Find existing lead by email address
+ * @param {string} email - Email address
+ * @param {string} trackingId - Tracking ID for logging
+ * @returns {Object|null} Existing lead or null
+ */
+export async function findLeadByEmail(email, trackingId) {
+  try {
+    logger.logLeadProcessing(trackingId, 'searching_supabase_lead_by_email', {
+      email: hashForLogging(email)
+    });
+
+    const { data, error } = await supabase
+      .from('leads')
+      .select('*')
+      .eq('email', email)
+      .single();
+
+    if (error && error.code !== 'PGRST116') {
+      throw error;
+    }
+
+    if (data) {
+      logger.logLeadProcessing(trackingId, 'supabase_lead_found_by_email', {
+        leadId: data.id,
+        email: hashForLogging(email)
+      });
+      return data;
+    }
+
+    logger.logLeadProcessing(trackingId, 'supabase_lead_not_found_by_email', {
+      email: hashForLogging(email)
+    });
+    return null;
+
+  } catch (error) {
+    logger.logError(error, {
+      context: 'supabase_lead_search_by_email',
+      trackingId,
+      email: hashForLogging(email)
     });
     throw error;
   }
@@ -96,28 +141,31 @@ export async function findLeadByFacebookId(facebookLeadId, trackingId) {
 export async function createLead(leadData, trackingId) {
   try {
     logger.logLeadProcessing(trackingId, 'creating_supabase_lead', {
-      facebookLeadId: leadData.id,
+      hubspotContactId: leadData.hubspot_contact_id,
       email: leadData.email ? hashForLogging(leadData.email) : '[MISSING]'
     });
 
     const leadRecord = {
-      facebook_lead_id: leadData.id,
+      hubspot_contact_id: leadData.hubspot_contact_id,
       email: leadData.email,
       first_name: leadData.first_name,
       last_name: leadData.last_name,
       full_name: leadData.full_name,
       phone: leadData.phone,
-      facebook_ad_id: leadData.ad_id,
-      facebook_ad_name: leadData.ad_name,
-      facebook_adgroup_id: leadData.adset_id, // Map adset to adgroup
-      facebook_campaign_id: leadData.campaign_id,
-      facebook_campaign_name: leadData.campaign_name,
-      facebook_form_id: leadData.form_id,
-      facebook_form_name: leadData.form_name,
-      custom_fields: leadData.fields,
-      facebook_raw_data: leadData.raw_data,
+      company: leadData.company,
+      job_title: leadData.job_title,
+      website: leadData.website,
+      city: leadData.city,
+      state: leadData.state,
+      country: leadData.country,
+      lead_source: leadData.lead_source,
+      lifecycle_stage: leadData.lifecycle_stage,
+      hubspot_owner_id: leadData.hubspot_owner_id,
+      hubspot_deal_ids: leadData.hubspot_deal_ids,
+      custom_properties: leadData.custom_properties,
+      hubspot_raw_data: leadData.hubspot_raw_data,
       status: 'new',
-      source: 'facebook_lead_ads',
+      source: 'hubspot_crm',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     };
@@ -141,7 +189,7 @@ export async function createLead(leadData, trackingId) {
 
     logger.logLeadProcessing(trackingId, 'supabase_lead_created', {
       leadId: data.id,
-      facebookLeadId: leadData.id,
+      hubspotContactId: leadData.hubspot_contact_id,
       email: leadData.email ? hashForLogging(leadData.email) : '[MISSING]'
     });
 
@@ -178,7 +226,7 @@ export async function createLead(leadData, trackingId) {
     logger.logError(error, {
       context: 'supabase_lead_creation',
       trackingId,
-      facebookLeadId: leadData.id,
+      hubspotContactId: leadData.hubspot_contact_id,
       email: leadData.email ? hashForLogging(leadData.email) : '[MISSING]'
     });
     throw error;
@@ -196,7 +244,7 @@ export async function updateLead(leadId, leadData, trackingId) {
   try {
     logger.logLeadProcessing(trackingId, 'updating_supabase_lead', {
       leadId,
-      facebookLeadId: leadData.id,
+      hubspotContactId: leadData.hubspot_contact_id,
       email: leadData.email ? hashForLogging(leadData.email) : '[MISSING]'
     });
 
@@ -209,19 +257,19 @@ export async function updateLead(leadId, leadData, trackingId) {
       ...(leadData.phone && { phone: leadData.phone }),
       ...(leadData.company && { company: leadData.company }),
       ...(leadData.job_title && { job_title: leadData.job_title }),
-      // Always update Facebook campaign data
-      facebook_ad_id: leadData.ad_id,
-      facebook_ad_name: leadData.ad_name,
-      facebook_adset_id: leadData.adset_id,
-      facebook_adset_name: leadData.adset_name,
-      facebook_campaign_id: leadData.campaign_id,
-      facebook_campaign_name: leadData.campaign_name,
-      facebook_form_id: leadData.form_id,
-      facebook_form_name: leadData.form_name,
-      custom_fields: leadData.fields,
-      raw_facebook_data: leadData.raw_data,
+      ...(leadData.website && { website: leadData.website }),
+      ...(leadData.city && { city: leadData.city }),
+      ...(leadData.state && { state: leadData.state }),
+      ...(leadData.country && { country: leadData.country }),
+      // Always update HubSpot-specific data
+      lead_source: leadData.lead_source,
+      lifecycle_stage: leadData.lifecycle_stage,
+      hubspot_owner_id: leadData.hubspot_owner_id,
+      hubspot_deal_ids: leadData.hubspot_deal_ids,
+      custom_properties: leadData.custom_properties,
+      hubspot_raw_data: leadData.hubspot_raw_data,
       updated_at: new Date().toISOString(),
-      last_facebook_update: new Date().toISOString()
+      last_hubspot_update: new Date().toISOString()
     };
 
     // Remove null/undefined values
@@ -244,7 +292,7 @@ export async function updateLead(leadId, leadData, trackingId) {
 
     logger.logLeadProcessing(trackingId, 'supabase_lead_updated', {
       leadId: data.id,
-      facebookLeadId: leadData.id,
+      hubspotContactId: leadData.hubspot_contact_id,
       email: leadData.email ? hashForLogging(leadData.email) : '[MISSING]'
     });
 
@@ -255,7 +303,7 @@ export async function updateLead(leadId, leadData, trackingId) {
       context: 'supabase_lead_update',
       trackingId,
       leadId,
-      facebookLeadId: leadData.id,
+      hubspotContactId: leadData.hubspot_contact_id,
       email: leadData.email ? hashForLogging(leadData.email) : '[MISSING]'
     });
     throw error;
@@ -271,15 +319,27 @@ export async function updateLead(leadId, leadData, trackingId) {
 export async function upsertLeadToSupabase(leadData, trackingId) {
   try {
     logger.logLeadProcessing(trackingId, 'supabase_upsert_started', {
-      facebookLeadId: leadData.id,
+      hubspotContactId: leadData.hubspot_contact_id,
       email: leadData.email ? hashForLogging(leadData.email) : '[MISSING]'
     });
 
     let lead;
     let operation;
 
-    // Try to find existing lead by Facebook ID
-    const existingLead = await findLeadByFacebookId(leadData.id, trackingId);
+    // Try to find existing lead by HubSpot contact ID first
+    let existingLead = await findLeadByHubSpotId(leadData.hubspot_contact_id, trackingId);
+    
+    // If not found by HubSpot ID, try by email as fallback
+    if (!existingLead && leadData.email) {
+      existingLead = await findLeadByEmail(leadData.email, trackingId);
+      if (existingLead) {
+        logger.logLeadProcessing(trackingId, 'lead_found_by_email_fallback', {
+          leadId: existingLead.id,
+          hubspotContactId: leadData.hubspot_contact_id,
+          email: hashForLogging(leadData.email)
+        });
+      }
+    }
     
     if (existingLead) {
       // Update existing lead
@@ -294,7 +354,7 @@ export async function upsertLeadToSupabase(leadData, trackingId) {
     logger.logLeadProcessing(trackingId, 'supabase_upsert_completed', {
       leadId: lead.id,
       operation,
-      facebookLeadId: leadData.id,
+      hubspotContactId: leadData.hubspot_contact_id,
       email: leadData.email ? hashForLogging(leadData.email) : '[MISSING]'
     });
 
@@ -307,7 +367,7 @@ export async function upsertLeadToSupabase(leadData, trackingId) {
     logger.logError(error, {
       context: 'supabase_upsert',
       trackingId,
-      facebookLeadId: leadData.id,
+      hubspotContactId: leadData.hubspot_contact_id,
       email: leadData.email ? hashForLogging(leadData.email) : '[MISSING]'
     });
     throw error;

@@ -67,7 +67,7 @@ class EmailService {
 
   async sendPasswordResetEmail(userEmail, resetToken) {
     const subject = 'Password Reset Request';
-    const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:3001'}/reset-password?token=${resetToken}`;
+    const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
     
     const html = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -91,7 +91,7 @@ class EmailService {
 
   async sendVerificationEmail(userEmail, verificationToken, agentToken) {
     const subject = 'Verify Your Email Address';
-    const verificationUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/verify-email?token=${verificationToken}&agent=${agentToken}`;
+    const verificationUrl = `${process.env.FRONTEND_URL}/verify-email?token=${verificationToken}&agent=${agentToken}`;
     
     const html = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -144,7 +144,7 @@ class EmailService {
         ` : ''}
         
         <div style="text-align: center; margin: 30px 0;">
-          <a href="${process.env.FRONTEND_URL || 'http://localhost:3000'}" style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">View in Dashboard</a>
+          <a href="${process.env.FRONTEND_URL}" style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; display: inline-block;">View in Dashboard</a>
         </div>
         
         <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 5px; margin: 20px 0;">
@@ -156,9 +156,127 @@ class EmailService {
       </div>
     `;
     
-    const text = `New Lead Alert!\n\nName: ${leadData.full_name || 'Not provided'}\nEmail: ${leadData.email || 'Not provided'}\nPhone: ${leadData.phone || 'Not provided'}\nSource: Facebook Lead Ad\nCampaign: ${leadData.facebook_campaign_name || 'Not available'}\nReceived: ${new Date().toLocaleString()}\n\nPlease log into the dashboard to view and follow up: ${process.env.FRONTEND_URL || 'http://localhost:3000'}\n\nTracking ID: ${trackingId}`;
+    const text = `New Lead Alert!\n\nName: ${leadData.full_name || 'Not provided'}\nEmail: ${leadData.email || 'Not provided'}\nPhone: ${leadData.phone || 'Not provided'}\nSource: Facebook Lead Ad\nCampaign: ${leadData.facebook_campaign_name || 'Not available'}\nReceived: ${new Date().toLocaleString()}\n\nPlease log into the dashboard to view and follow up: ${process.env.FRONTEND_URL}\n\nTracking ID: ${trackingId}`;
 
     return await this.sendEmail({ to: agentEmail, subject, html, text });
+  }
+
+  async sendAgentCredentialsEmail(userEmail, userName, temporaryPassword, resetToken) {
+    const subject = 'Welcome to Lead Management Dashboard - Your Login Credentials';
+    const resetUrl = `${process.env.FRONTEND_URL}/reset-password?token=${resetToken}`;
+    
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #ffffff;">
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 8px 8px 0 0;">
+          <h1 style="margin: 0; font-size: 28px;">Welcome to Lead Management Dashboard</h1>
+          <p style="margin: 10px 0 0 0; font-size: 16px; opacity: 0.9;">Your account has been created by an administrator</p>
+        </div>
+        
+        <div style="padding: 30px; background-color: #f8f9fa; border-radius: 0 0 8px 8px;">
+          <h2 style="color: #333; margin-top: 0;">Hello ${userName},</h2>
+          
+          <p style="color: #555; line-height: 1.6;">An administrator has created an account for you on our Lead Management Dashboard. Below are your login credentials and instructions to get started.</p>
+          
+          <div style="background: white; border: 2px solid #667eea; border-radius: 8px; padding: 25px; margin: 25px 0; text-align: center;">
+            <h3 style="color: #667eea; margin-top: 0; margin-bottom: 20px;">🔐 Your Login Credentials</h3>
+            <div style="margin-bottom: 15px;">
+              <strong style="color: #333;">Username (Email):</strong><br>
+              <span style="font-family: 'Courier New', monospace; background-color: #f1f3f4; padding: 8px 12px; border-radius: 4px; display: inline-block; margin-top: 5px; color: #333;">${userEmail}</span>
+            </div>
+            <div>
+              <strong style="color: #333;">Temporary Password:</strong><br>
+              <span style="font-family: 'Courier New', monospace; background-color: #f1f3f4; padding: 8px 12px; border-radius: 4px; display: inline-block; margin-top: 5px; color: #333; font-weight: bold;">${temporaryPassword}</span>
+            </div>
+          </div>
+          
+          <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 8px; padding: 20px; margin: 25px 0;">
+            <h4 style="color: #856404; margin-top: 0; display: flex; align-items: center;">⚠️ Important Security Information</h4>
+            <ul style="color: #856404; margin: 10px 0; padding-left: 20px;">
+              <li><strong>This is a temporary password</strong> that expires after first use or within 24 hours</li>
+              <li><strong>You must change your password</strong> immediately after logging in</li>
+              <li><strong>Never share your credentials</strong> with anyone</li>
+              <li><strong>Always log out</strong> when finished using the system</li>
+              <li><strong>Contact support immediately</strong> if you suspect unauthorized access</li>
+            </ul>
+          </div>
+          
+          <h4 style="color: #333; margin-bottom: 15px;">🚀 Getting Started:</h4>
+          <ol style="color: #555; line-height: 1.8; padding-left: 20px;">
+            <li>Visit the dashboard login page</li>
+            <li>Enter your email address as the username</li>
+            <li>Use the temporary password provided above</li>
+            <li><strong>Immediately change your password</strong> using the secure link below</li>
+            <li>Complete your profile setup</li>
+            <li>Start managing your assigned leads</li>
+          </ol>
+          
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="${resetUrl}" style="background-color: #28a745; color: white; padding: 15px 30px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: bold; font-size: 16px;">🔒 Change Password Now</a>
+          </div>
+          
+          <div style="background-color: #e9ecef; border-radius: 6px; padding: 15px; margin: 25px 0;">
+            <p style="margin: 0; font-size: 14px; color: #495057;"><strong>Secure Password Reset Link:</strong></p>
+            <p style="word-break: break-all; color: #6c757d; font-family: 'Courier New', monospace; font-size: 12px; margin: 5px 0 0 0;">${resetUrl}</p>
+            <p style="margin: 10px 0 0 0; font-size: 12px; color: #dc3545;"><strong>⏰ This link expires in 24 hours</strong></p>
+          </div>
+          
+          <div style="background-color: #d1ecf1; border: 1px solid #bee5eb; border-radius: 6px; padding: 15px; margin: 25px 0;">
+            <h4 style="color: #0c5460; margin-top: 0;">📋 Your Access Level</h4>
+            <p style="color: #0c5460; margin: 0;">As an agent, you have access to view and manage leads assigned to you. You can update lead status, add notes, and track your performance metrics.</p>
+          </div>
+          
+          <p style="color: #555; line-height: 1.6;">If you have any questions or need assistance getting started, please don't hesitate to contact our support team or your administrator.</p>
+          
+          <p style="color: #555;">Best regards,<br>
+          <strong>Lead Management Team</strong></p>
+        </div>
+        
+        <div style="text-align: center; padding: 20px; background-color: #f8f9fa; border-top: 1px solid #dee2e6; color: #6c757d; font-size: 12px;">
+          <p style="margin: 0;">This email contains sensitive login information. Please keep it confidential.</p>
+          <p style="margin: 5px 0 0 0;">If you did not expect this account creation, please contact support immediately.</p>
+        </div>
+      </div>
+    `;
+    
+    const text = `Welcome to Lead Management Dashboard!
+
+Hello ${userName},
+
+An administrator has created an account for you. Here are your login credentials:
+
+Username (Email): ${userEmail}
+Temporary Password: ${temporaryPassword}
+
+IMPORTANT SECURITY INFORMATION:
+- This is a temporary password that expires after first use or within 24 hours
+- You must change your password immediately after logging in
+- Never share your credentials with anyone
+- Always log out when finished using the system
+- Contact support immediately if you suspect unauthorized access
+
+Getting Started:
+1. Visit the dashboard login page
+2. Enter your email address as the username
+3. Use the temporary password provided above
+4. Immediately change your password using this secure link: ${resetUrl}
+5. Complete your profile setup
+6. Start managing your assigned leads
+
+Secure Password Reset Link: ${resetUrl}
+⏰ This link expires in 24 hours
+
+Your Access Level:
+As an agent, you have access to view and manage leads assigned to you. You can update lead status, add notes, and track your performance metrics.
+
+If you have any questions or need assistance, please contact our support team.
+
+Best regards,
+Lead Management Team
+
+This email contains sensitive login information. Please keep it confidential.
+If you did not expect this account creation, please contact support immediately.`;
+
+    return await this.sendEmail({ to: userEmail, subject, html, text });
   }
 
   async testConnection() {
