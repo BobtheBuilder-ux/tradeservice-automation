@@ -100,7 +100,9 @@ logger.logError = (error, context = {}) => {
 
 // Add lead processing logging helper
 logger.logLeadProcessing = (leadId, step, data = {}) => {
-  logger.info('Lead Processing', {
+  // Use debug level to reduce console verbosity
+  // Set LOG_LEVEL=debug to see detailed lead processing logs
+  logger.debug('Lead Processing', {
     leadId,
     step,
     timestamp: new Date().toISOString(),
