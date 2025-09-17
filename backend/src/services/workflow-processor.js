@@ -745,7 +745,7 @@ class WorkflowProcessor {
         full_name: job.lead_name || 'Valued Customer'
       };
 
-      const calendlyLink = process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK || 'https://calendly.com/your-link';
+      const calendlyLink = process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK;
 
       const result = await this.emailTemplateService.queueFollowUpEmail(
         leadData,

@@ -71,7 +71,7 @@ class AutomatedEmailWorkflowService {
    */
   async queueMeetingSchedulingInvitation(leadData, trackingId) {
     try {
-      const calendlyLink = process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK || 'https://calendly.com/your-link';
+      const calendlyLink = process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK;
       
       // Use existing email template service
       const result = await this.emailTemplateService.queueAppointmentEmail(

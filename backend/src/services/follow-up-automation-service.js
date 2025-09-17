@@ -173,7 +173,7 @@ class FollowUpAutomationService {
    * Queue follow-up email for a lead
    */
   async queueFollowUpEmail(lead, trackingId) {
-    const calendlyLink = process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK || 'https://calendly.com/your-link';
+    const calendlyLink = process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK;
 
     const leadData = {
       id: lead.id,
