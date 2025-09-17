@@ -279,6 +279,190 @@ If you did not expect this account creation, please contact support immediately.
     return await this.sendEmail({ to: userEmail, subject, html, text });
   }
 
+  async sendMeetingConfirmationEmail(userEmail, userName, meetingDetails) {
+    const subject = 'Meeting Confirmation - Your Appointment is Scheduled!';
+    const meetingDate = new Date(meetingDetails.startTime).toLocaleDateString('en-US', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+    const meetingTime = new Date(meetingDetails.startTime).toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZoneName: 'short'
+    });
+    const duration = Math.round((new Date(meetingDetails.endTime) - new Date(meetingDetails.startTime)) / (1000 * 60));
+    
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f9f9f9; padding: 20px;">
+        <div style="background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+          <div style="text-align: center; margin-bottom: 30px;">
+            <h1 style="color: #2c5aa0; margin: 0; font-size: 28px;">🎉 Meeting Confirmed!</h1>
+          </div>
+          
+          <p style="font-size: 16px; color: #333; margin-bottom: 20px;">Hi ${userName || 'there'},</p>
+          
+          <p style="font-size: 16px; color: #333; line-height: 1.6;">Great news! Your meeting has been successfully scheduled. We're looking forward to speaking with you.</p>
+          
+          <div style="background-color: #f0f7ff; border-left: 4px solid #2c5aa0; padding: 20px; margin: 25px 0; border-radius: 5px;">
+            <h3 style="color: #2c5aa0; margin: 0 0 15px 0; font-size: 20px;">📅 Meeting Details</h3>
+            <table style="width: 100%; border-collapse: collapse;">
+              <tr>
+                <td style="padding: 8px 0; font-weight: bold; color: #555; width: 120px;">📋 Title:</td>
+                <td style="padding: 8px 0; color: #333;">${meetingDetails.title || 'Consultation Meeting'}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; font-weight: bold; color: #555;">📅 Date:</td>
+                <td style="padding: 8px 0; color: #333;">${meetingDate}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; font-weight: bold; color: #555;">⏰ Time:</td>
+                <td style="padding: 8px 0; color: #333;">${meetingTime}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; font-weight: bold; color: #555;">⏱️ Duration:</td>
+                <td style="padding: 8px 0; color: #333;">${duration} minutes</td>
+              </tr>
+              ${meetingDetails.location ? `
+              <tr>
+                <td style="padding: 8px 0; font-weight: bold; color: #555;">📍 Location:</td>
+                <td style="padding: 8px 0; color: #333;">${meetingDetails.location}</td>
+              </tr>` : ''}
+            </table>
+          </div>
+          
+          <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <h4 style="color: #856404; margin: 0 0 10px 0;">📝 What to Expect:</h4>
+            <ul style="color: #856404; margin: 0; padding-left: 20px;">
+              <li>We'll discuss your needs and goals</li>
+              <li>Review potential solutions and strategies</li>
+              <li>Answer any questions you may have</li>
+              <li>Outline next steps if we're a good fit</li>
+            </ul>
+          </div>
+          
+          <div style="background-color: #d1ecf1; border: 1px solid #bee5eb; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <h4 style="color: #0c5460; margin: 0 0 10px 0;">🔔 Reminder Settings:</h4>
+            <p style="color: #0c5460; margin: 0;">You'll receive reminder notifications 24 hours and 1 hour before your meeting via email and SMS.</p>
+          </div>
+          
+          <div style="text-align: center; margin: 30px 0;">
+            <p style="color: #666; font-size: 14px; margin: 0;">Need to reschedule or have questions?</p>
+            <p style="color: #666; font-size: 14px; margin: 5px 0 0 0;">Reply to this email or contact our support team.</p>
+          </div>
+          
+          <p style="font-size: 16px; color: #333; margin-top: 30px;">We're excited to connect with you!</p>
+          <p style="font-size: 16px; color: #333;">Best regards,<br>The Team</p>
+        </div>
+      </div>
+    `;
+    
+    const text = `Meeting Confirmed!\n\nHi ${userName || 'there'},\n\nYour meeting has been scheduled for ${meetingDate} at ${meetingTime}.\n\nMeeting: ${meetingDetails.title || 'Consultation Meeting'}\nDuration: ${duration} minutes\n${meetingDetails.location ? `Location: ${meetingDetails.location}\n` : ''}\nYou'll receive reminders 24 hours and 1 hour before the meeting.\n\nWe're looking forward to speaking with you!\n\nBest regards,\nThe Team`;
+
+    return await this.sendEmail({ to: userEmail, subject, html, text });
+  }
+
+  async sendMeetingReminderEmail(userEmail, userName, meetingDetails, reminderType = '24h') {
+    const isHourlyReminder = reminderType === '1h';
+    const subject = isHourlyReminder ? 
+      'Meeting Reminder - Starting in 1 Hour!' : 
+      'Meeting Reminder - Tomorrow at ' + new Date(meetingDetails.startTime).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+    
+    const meetingDate = new Date(meetingDetails.startTime).toLocaleDateString('en-US', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+    const meetingTime = new Date(meetingDetails.startTime).toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZoneName: 'short'
+    });
+    const duration = Math.round((new Date(meetingDetails.endTime) - new Date(meetingDetails.startTime)) / (1000 * 60));
+    
+    const reminderText = isHourlyReminder ? 
+      'Your meeting is starting in just 1 hour!' : 
+      'This is a friendly reminder about your meeting tomorrow.';
+    
+    const urgencyColor = isHourlyReminder ? '#dc3545' : '#28a745';
+    const urgencyIcon = isHourlyReminder ? '🚨' : '⏰';
+    
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background-color: #f9f9f9; padding: 20px;">
+        <div style="background-color: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+          <div style="text-align: center; margin-bottom: 30px;">
+            <h1 style="color: ${urgencyColor}; margin: 0; font-size: 28px;">${urgencyIcon} Meeting Reminder</h1>
+          </div>
+          
+          <p style="font-size: 16px; color: #333; margin-bottom: 20px;">Hi ${userName || 'there'},</p>
+          
+          <p style="font-size: 16px; color: #333; line-height: 1.6;">${reminderText}</p>
+          
+          <div style="background-color: #f0f7ff; border-left: 4px solid ${urgencyColor}; padding: 20px; margin: 25px 0; border-radius: 5px;">
+            <h3 style="color: ${urgencyColor}; margin: 0 0 15px 0; font-size: 20px;">📅 Meeting Details</h3>
+            <table style="width: 100%; border-collapse: collapse;">
+              <tr>
+                <td style="padding: 8px 0; font-weight: bold; color: #555; width: 120px;">📋 Title:</td>
+                <td style="padding: 8px 0; color: #333;">${meetingDetails.title || 'Consultation Meeting'}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; font-weight: bold; color: #555;">📅 Date:</td>
+                <td style="padding: 8px 0; color: #333;">${meetingDate}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; font-weight: bold; color: #555;">⏰ Time:</td>
+                <td style="padding: 8px 0; color: #333;">${meetingTime}</td>
+              </tr>
+              <tr>
+                <td style="padding: 8px 0; font-weight: bold; color: #555;">⏱️ Duration:</td>
+                <td style="padding: 8px 0; color: #333;">${duration} minutes</td>
+              </tr>
+              ${meetingDetails.location ? `
+              <tr>
+                <td style="padding: 8px 0; font-weight: bold; color: #555;">📍 Location:</td>
+                <td style="padding: 8px 0; color: #333;">${meetingDetails.location}</td>
+              </tr>` : ''}
+            </table>
+          </div>
+          
+          ${isHourlyReminder ? `
+          <div style="background-color: #f8d7da; border: 1px solid #f5c6cb; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <h4 style="color: #721c24; margin: 0 0 10px 0;">🎯 Final Preparation:</h4>
+            <ul style="color: #721c24; margin: 0; padding-left: 20px;">
+              <li>Join the meeting 5 minutes early</li>
+              <li>Test your audio and video if it's a video call</li>
+              <li>Have any questions or materials ready</li>
+              <li>Ensure you're in a quiet environment</li>
+            </ul>
+          </div>` : `
+          <div style="background-color: #d4edda; border: 1px solid #c3e6cb; padding: 15px; border-radius: 5px; margin: 20px 0;">
+            <h4 style="color: #155724; margin: 0 0 10px 0;">📝 Preparation Tips:</h4>
+            <ul style="color: #155724; margin: 0; padding-left: 20px;">
+              <li>Review any materials or questions you'd like to discuss</li>
+              <li>Prepare a brief overview of your goals and challenges</li>
+              <li>Ensure your calendar is clear for the meeting time</li>
+              <li>You'll receive another reminder 1 hour before the meeting</li>
+            </ul>
+          </div>`}
+          
+          <div style="text-align: center; margin: 30px 0;">
+            <p style="color: #666; font-size: 14px; margin: 0;">Need to reschedule or have questions?</p>
+            <p style="color: #666; font-size: 14px; margin: 5px 0 0 0;">Reply to this email or contact our support team.</p>
+          </div>
+          
+          <p style="font-size: 16px; color: #333; margin-top: 30px;">Looking forward to our conversation!</p>
+          <p style="font-size: 16px; color: #333;">Best regards,<br>The Team</p>
+        </div>
+      </div>
+    `;
+    
+    const text = `Meeting Reminder!\n\nHi ${userName || 'there'},\n\n${reminderText}\n\nMeeting: ${meetingDetails.title || 'Consultation Meeting'}\nDate: ${meetingDate}\nTime: ${meetingTime}\nDuration: ${duration} minutes\n${meetingDetails.location ? `Location: ${meetingDetails.location}\n` : ''}\n${isHourlyReminder ? 'Please join 5 minutes early and ensure you\'re prepared.' : 'You\'ll receive another reminder 1 hour before the meeting.'}\n\nLooking forward to our conversation!\n\nBest regards,\nThe Team`;
+
+    return await this.sendEmail({ to: userEmail, subject, html, text });
+  }
+
   async testConnection() {
     try {
       await this.transporter.verify();

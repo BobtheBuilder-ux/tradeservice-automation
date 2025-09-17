@@ -654,7 +654,7 @@ Tracking ID: ${trackingId}
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.CALENDLY_LINK || '#'}" 
+          <a href="${process.env.CALENDLY_LINK}" 
              style="background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -738,7 +738,7 @@ Tracking ID: ${trackingId}
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${calendlyLink}" 
+          <a href="${process.env.CALENDLY_LINK}" 
              style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -772,17 +772,17 @@ Tracking ID: ${trackingId}
         </div>
         ` : ''}
         
-        <div style="border-top: 2px solid #ecf0f1; padding-top: 20px; margin-top: 30px;">
-          <h3 style="color: #2c3e50; margin-bottom: 15px;">Your Information Summary:</h3>
-          <table style="width: 100%; border-collapse: collapse; background-color: #f8f9fa; border-radius: 5px;">
-            <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Name:</td><td style="padding: 12px; color: #34495e;">${leadData.full_name || 'Not provided'}</td></tr>
-            <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Email:</td><td style="padding: 12px; color: #34495e;">${leadData.email || 'Not provided'}</td></tr>
-            ${leadData.phone ? `<tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Phone:</td><td style="padding: 12px; color: #34495e;">${leadData.phone}</td></tr>` : ''}
-            ${leadData.company ? `<tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Company:</td><td style="padding: 12px; color: #34495e;">${leadData.company}</td></tr>` : ''}
-            <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Source:</td><td style="padding: 12px; color: #34495e;">HubSpot CRM</td></tr>
-            <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Received:</td><td style="padding: 12px; color: #34495e;">${new Date().toLocaleDateString()}</td></tr>
-          </table>
-        </div>
+        // <div style="border-top: 2px solid #ecf0f1; padding-top: 20px; margin-top: 30px;">
+        //   <h3 style="color: #2c3e50; margin-bottom: 15px;">Your Information Summary:</h3>
+        //   <table style="width: 100%; border-collapse: collapse; background-color: #f8f9fa; border-radius: 5px;">
+        //     <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Name:</td><td style="padding: 12px; color: #34495e;">${leadData.full_name || 'Not provided'}</td></tr>
+        //     <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Email:</td><td style="padding: 12px; color: #34495e;">${leadData.email || 'Not provided'}</td></tr>
+        //     ${leadData.phone ? `<tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Phone:</td><td style="padding: 12px; color: #34495e;">${leadData.phone}</td></tr>` : ''}
+        //     ${leadData.company ? `<tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Company:</td><td style="padding: 12px; color: #34495e;">${leadData.company}</td></tr>` : ''}
+        //     <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Source:</td><td style="padding: 12px; color: #34495e;">HubSpot CRM</td></tr>
+        //     <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Received:</td><td style="padding: 12px; color: #34495e;">${new Date().toLocaleDateString()}</td></tr>
+        //   </table>
+        // </div>
         
         <div style="text-align: center; margin: 30px 0; padding: 20px; background-color: #f1f2f6; border-radius: 10px;">
           <p style="color: #2c3e50; margin: 0; font-size: 14px; line-height: 1.6;">
@@ -809,7 +809,7 @@ We'd love to schedule a personalized consultation to discuss:
 - Next steps for getting started
 - Any questions you might have
 
-Schedule your appointment here: ${calendlyLink}
+Schedule your appointment here: ${process.env.CALENDLY_LINK}
 
 What to expect:
 - Duration: 30-45 minutes
@@ -844,7 +844,7 @@ Tracking ID: ${trackingId}
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${calendlyLink}" 
+          <a href="${process.env.CALENDLY_LINK}" 
              style="background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -865,7 +865,7 @@ Tracking ID: ${trackingId}
         
         <div style="text-align: center; margin-top: 40px; padding-top: 20px; border-top: 1px solid #ecf0f1;">
           <p style="color: #7f8c8d; font-size: 12px; margin: 5px 0;">Tracking ID: ${trackingId}</p>
-          <p style="color: #7f8c8d; font-size: 12px; margin: 5px 0;">Best regards,<br>Your Lead Automation Team</p>
+          <p style="color: #7f8c8d; font-size: 12px; margin: 5px 0;">Best regards,<br>Trade Service Team</p>
         </div>
       </div>
     `;
@@ -879,12 +879,12 @@ Hi ${leadData.full_name || 'there'},
 
 We noticed you haven't scheduled your free consultation yet. Don't miss out on this valuable opportunity!
 
-Schedule now: ${calendlyLink}
+Schedule now: ${process.env.CALENDLY_LINK}
 
 Limited time: Schedule within 48 hours for a bonus strategy guide!
 
 Best regards,
-Your Lead Automation Team
+Your Trading Service Team
 
 Tracking ID: ${trackingId}
     `;

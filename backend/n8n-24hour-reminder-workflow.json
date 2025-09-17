@@ -1,0 +1,137 @@
+{
+  "name": "Meeting Notifications Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "calendly-webhook",
+        "options": {}
+      },
+      "name": "Calendly Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "position": [240, 200]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:3000/api/notifications/send-confirmation",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": {
+          "to": "{{ $json.payload.invitee.email }}",
+          "template_type": "meeting_confirmation",
+          "lead_data": {
+            "full_name": "{{ $json.payload.invitee.name }}",
+            "email": "{{ $json.payload.invitee.email }}",
+            "meeting_time": "{{ $json.payload.event.start_time }}",
+            "meeting_url": "{{ $json.payload.event.location.join_url }}"
+          }
+        }
+      },
+      "name": "Send Confirmation Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [460, 200]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      },
+      "name": "Daily Check",
+      "type": "n8n-nodes-base.cron",
+      "position": [240, 400]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:3000/api/meetings/needing-24h-reminders"
+      },
+      "name": "Get Meetings",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [460, 400]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:3000/api/notifications/send-24h-reminder",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": {
+          "to": "{{ $json.lead_email }}",
+          "template_type": "24_hour_reminder",
+          "lead_data": {
+            "full_name": "{{ $json.lead_name }}",
+            "id": "{{ $json.lead_id }}",
+            "email": "{{ $json.lead_email }}",
+            "meeting_time": "{{ $json.meeting_time }}",
+            "meeting_url": "{{ $json.meeting_url }}"
+          }
+        }
+      },
+      "name": "Send Email Reminder",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [680, 400]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:3000/api/sms/send-24h-reminder",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": {
+          "phone": "{{ $json.lead_phone }}",
+          "lead_data": {
+            "full_name": "{{ $json.lead_name }}",
+            "meeting_time": "{{ $json.meeting_time }}",
+            "meeting_url": "{{ $json.meeting_url }}"
+          }
+        }
+      },
+      "name": "Send SMS Reminder",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [680, 550]
+    }
+  ],
+  "connections": {
+    "Calendly Webhook": {
+      "main": [
+        [
+          {
+            "node": "Send Confirmation Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Check": {
+      "main": [
+        [
+          {
+            "node": "Get Meetings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Meetings": {
+      "main": [
+        [
+          {
+            "node": "Send Email Reminder",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send SMS Reminder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

@@ -79,7 +79,7 @@ class EmailQueueProcessor {
         .from(emailQueue)
         .where(
           and(
-            eq(emailQueue.status, 'scheduled'),
+            eq(emailQueue.status, 'pending'),
             lte(emailQueue.scheduledFor, new Date())
           )
         )

@@ -5,6 +5,7 @@ import logger from '../utils/logger.js';
 import { hashForLogging } from '../utils/crypto.js';
 import { updateLeadStatus } from './database-service.js';
 import meetingService from './meeting-service.js';
+import EmailService from './email-service.js';
 
 /**
  * Process Calendly webhook events with comprehensive validation and consistency checks
@@ -343,6 +344,39 @@ async function handleInviteeCreated(payload, trackingId, results) {
         }
       }, trackingId);
       results.leadUpdated = true;
+      
+      // Send meeting confirmation email
+      try {
+        logger.info('Sending meeting confirmation email', {
+          trackingId,
+          leadId: lead.id,
+          email: hashForLogging(invitee.email)
+        });
+        
+        await EmailService.sendMeetingConfirmationEmail(
+          invitee.email,
+          invitee.name || `${invitee.first_name || ''} ${invitee.last_name || ''}`.trim(),
+          {
+            title: payload.event_type?.name || 'Consultation Meeting',
+            startTime: event.start_time,
+            endTime: event.end_time,
+            location: Array.isArray(event.location) ? event.location.join(', ') : 
+                     (typeof event.location === 'object' ? event.location.location || JSON.stringify(event.location) : event.location) || 'Online Meeting'
+          }
+        );
+        
+        logger.info('Meeting confirmation email sent successfully', {
+          trackingId,
+          leadId: lead.id
+        });
+      } catch (emailError) {
+        logger.warn('Failed to send meeting confirmation email', {
+          trackingId,
+          leadId: lead.id,
+          error: emailError.message
+        });
+        // Don't fail the entire process if email fails
+      }
       
       logger.logLeadProcessing(trackingId, 'lead_updated_with_scheduling', {
         leadId: lead.id,

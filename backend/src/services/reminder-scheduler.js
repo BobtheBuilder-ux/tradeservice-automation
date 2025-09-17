@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import MeetingService from './meeting-service.js';
 import CalendlyEmailService from './calendly-email-service.js';
 import TwilioSmsService from './twilio-sms-service.js';
+import EmailService from './email-service.js';
 import logger from '../utils/logger.js';
 import { generateTrackingId } from '../utils/crypto.js';
 
@@ -113,20 +114,20 @@ class ReminderScheduler {
         try {
           const leadData = meeting.leads;
           
-          // Send 24-hour reminder email
-          const emailResult = await CalendlyEmailService.sendAppointmentReminder(
-            leadData,
+          // Send 24-hour reminder email using new email service
+          const emailResult = await EmailService.sendMeetingReminderEmail(
+            leadData.email,
+            leadData.name,
             {
-              start_time: meeting.start_time,
-              end_time: meeting.end_time,
-              meeting_url: meeting.meeting_url,
-              location: meeting.location,
-              title: meeting.meeting_title
+              title: meeting.meeting_title,
+              startTime: meeting.start_time,
+              endTime: meeting.end_time,
+              location: meeting.location
             },
-            trackingId
+            '24h'
           );
 
-          if (emailResult.success) {
+          if (emailResult && emailResult.messageId) {
             // Mark reminder as sent
             await MeetingService.markReminderSent(
               meeting.id,
@@ -148,7 +149,7 @@ class ReminderScheduler {
               trackingId,
               meetingId: meeting.id,
               leadEmail: leadData.email,
-              error: emailResult.error
+              error: emailResult?.error || 'Unknown error'
             });
           }
         } catch (error) {
@@ -204,20 +205,20 @@ class ReminderScheduler {
         try {
           const leadData = meeting.leads;
           
-          // Send 1-hour reminder email
-          const emailResult = await CalendlyEmailService.sendAppointmentReminder(
-            leadData,
+          // Send 1-hour reminder email using new email service
+          const emailResult = await EmailService.sendMeetingReminderEmail(
+            leadData.email,
+            leadData.name,
             {
-              start_time: meeting.start_time,
-              end_time: meeting.end_time,
-              meeting_url: meeting.meeting_url,
-              location: meeting.location,
-              title: meeting.meeting_title
+              title: meeting.meeting_title,
+              startTime: meeting.start_time,
+              endTime: meeting.end_time,
+              location: meeting.location
             },
-            trackingId
+            '1h'
           );
 
-          if (emailResult.success) {
+          if (emailResult && emailResult.messageId) {
             // Mark reminder as sent
             await MeetingService.markReminderSent(
               meeting.id,
@@ -239,7 +240,7 @@ class ReminderScheduler {
               trackingId,
               meetingId: meeting.id,
               leadEmail: leadData.email,
-              error: emailResult.error
+              error: emailResult?.error || 'Unknown error'
             });
           }
         } catch (error) {
