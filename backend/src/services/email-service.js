@@ -130,8 +130,8 @@ class EmailService {
             <tr><td style="padding: 8px 0; font-weight: bold;">Name:</td><td style="padding: 8px 0;">${leadData.full_name || 'Not provided'}</td></tr>
             <tr><td style="padding: 8px 0; font-weight: bold;">Email:</td><td style="padding: 8px 0;">${leadData.email || 'Not provided'}</td></tr>
             <tr><td style="padding: 8px 0; font-weight: bold;">Phone:</td><td style="padding: 8px 0;">${leadData.phone || 'Not provided'}</td></tr>
-            <tr><td style="padding: 8px 0; font-weight: bold;">Source:</td><td style="padding: 8px 0;">Facebook Lead Ad</td></tr>
-            <tr><td style="padding: 8px 0; font-weight: bold;">Campaign:</td><td style="padding: 8px 0;">${leadData.facebook_campaign_name || 'Not available'}</td></tr>
+            <tr><td style="padding: 8px 0; font-weight: bold;">Source:</td><td style="padding: 8px 0;">HubSpot CRM</td></tr>
+        <tr><td style="padding: 8px 0; font-weight: bold;">Lead Source:</td><td style="padding: 8px 0;">${leadData.source || 'Direct Import'}</td></tr>
             <tr><td style="padding: 8px 0; font-weight: bold;">Received:</td><td style="padding: 8px 0;">${new Date().toLocaleString()}</td></tr>
           </table>
         </div>
@@ -156,7 +156,7 @@ class EmailService {
       </div>
     `;
     
-    const text = `New Lead Alert!\n\nName: ${leadData.full_name || 'Not provided'}\nEmail: ${leadData.email || 'Not provided'}\nPhone: ${leadData.phone || 'Not provided'}\nSource: Facebook Lead Ad\nCampaign: ${leadData.facebook_campaign_name || 'Not available'}\nReceived: ${new Date().toLocaleString()}\n\nPlease log into the dashboard to view and follow up: ${process.env.FRONTEND_URL}\n\nTracking ID: ${trackingId}`;
+    const text = `New Lead Alert!\n\nName: ${leadData.full_name || 'Not provided'}\nEmail: ${leadData.email || 'Not provided'}\nPhone: ${leadData.phone || 'Not provided'}\nSource: HubSpot CRM\nLead Source: ${leadData.source || 'Direct Import'}\nReceived: ${new Date().toLocaleString()}\n\nPlease log into the dashboard to view and follow up: ${process.env.FRONTEND_URL}\n\nTracking ID: ${trackingId}`;
 
     return await this.sendEmail({ to: agentEmail, subject, html, text });
   }

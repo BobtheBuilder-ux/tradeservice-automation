@@ -74,9 +74,6 @@ router.get('/detailed', async (req, res) => {
     version: '1.0.0',
     services: {},
     configuration: {
-      facebook: {
-        configured: !!(process.env.FACEBOOK_APP_SECRET && process.env.FACEBOOK_VERIFY_TOKEN)
-      },
       supabase: {
         configured: !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
       },

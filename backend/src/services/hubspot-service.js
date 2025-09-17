@@ -75,23 +75,8 @@ export async function createHubSpotContact(leadData, trackingId) {
       phone: leadData.phone || '',
       company: leadData.company || '',
       jobtitle: leadData.job_title || '',
-      // Custom properties for Facebook lead data
-      facebook_lead_id: leadData.id,
-      facebook_ad_id: leadData.ad_id,
-      facebook_ad_name: leadData.ad_name,
-      facebook_campaign_id: leadData.campaign_id,
-      facebook_campaign_name: leadData.campaign_name,
-      facebook_form_id: leadData.form_id,
-      facebook_form_name: leadData.form_name,
-      lead_source: 'Facebook Lead Ad',
-      lead_source_detail: `Campaign: ${leadData.campaign_name || 'Unknown'}`,
-      // Add custom fields from Facebook
-      ...Object.keys(leadData.fields).reduce((acc, key) => {
-        // Map Facebook fields to HubSpot custom properties
-        const hubspotKey = `facebook_${key.replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        acc[hubspotKey] = leadData.fields[key];
-        return acc;
-      }, {})
+      lead_source: 'HubSpot CRM',
+      lead_source_detail: leadData.source || 'Direct Import'
     };
 
     // Remove empty values to avoid HubSpot validation errors
@@ -146,21 +131,7 @@ export async function updateHubSpotContact(contactId, leadData, trackingId) {
       ...(leadData.phone && { phone: leadData.phone }),
       ...(leadData.company && { company: leadData.company }),
       ...(leadData.job_title && { jobtitle: leadData.job_title }),
-      // Always update Facebook-specific data
-      facebook_lead_id: leadData.id,
-      facebook_ad_id: leadData.ad_id,
-      facebook_ad_name: leadData.ad_name,
-      facebook_campaign_id: leadData.campaign_id,
-      facebook_campaign_name: leadData.campaign_name,
-      facebook_form_id: leadData.form_id,
-      facebook_form_name: leadData.form_name,
-      last_facebook_lead_date: new Date().toISOString(),
-      // Add custom fields from Facebook
-      ...Object.keys(leadData.fields).reduce((acc, key) => {
-        const hubspotKey = `facebook_${key.replace(/[^a-zA-Z0-9_]/g, '_')}`;
-        acc[hubspotKey] = leadData.fields[key];
-        return acc;
-      }, {})
+      last_updated_date: new Date().toISOString()
     };
 
     // Remove empty values

@@ -7,8 +7,6 @@ dotenv.config();
 
 // Validate required environment variables (warn in development, error in production)
 const requiredVars = [
-  'FACEBOOK_APP_SECRET',
-  'FACEBOOK_VERIFY_TOKEN',
   'DATABASE_URL',
   'HUBSPOT_ACCESS_TOKEN'
 ];
@@ -35,15 +33,6 @@ export const hubspotClient = process.env.HUBSPOT_ACCESS_TOKEN
 
 
 
-// Facebook configuration
-export const facebookConfig = {
-  appSecret: process.env.FACEBOOK_APP_SECRET,
-  verifyToken: process.env.FACEBOOK_VERIFY_TOKEN,
-  accessToken: process.env.FACEBOOK_ACCESS_TOKEN,
-  graphApiUrl: 'https://graph.facebook.com/v18.0'
-};
-
-
 
 // Calendly configuration
 export const calendlyConfig = {
@@ -61,7 +50,6 @@ export const appConfig = {
 export default {
   db,
   hubspotClient,
-  facebookConfig,
   calendlyConfig,
   appConfig
 };

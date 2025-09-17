@@ -361,8 +361,7 @@ router.post('/unassign-leads', verifyAdmin, async (req, res) => {
 // Get campaign stats and data
 router.get('/campaigns', verifyAdmin, async (req, res) => {
   try {
-    // For now, return mock data since Facebook integration isn't implemented
-    // In production, this would fetch from Facebook Ads API
+    // Return mock data for campaign analytics
     const mockCampaigns = [];
     const mockStats = {
       active: 0,

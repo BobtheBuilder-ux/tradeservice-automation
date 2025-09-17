@@ -4,8 +4,10 @@ This document describes how to integrate N8N with your email automation system u
 
 ## Base URL
 
-**Production Webhook URL:** `https://n8n-test-nluz.onrender.com/webhook/639181ea-18f1-4e89-94b0-c257d61619e3`
+**Production Backend:** `https://tradeservice-automation.onrender.com/webhook/n8n`
 **Local Development:** `http://localhost:3001/webhook/n8n`
+
+> **Note:** Use the production URL for N8N workflows in production environment. The local development URL is only for testing during development.
 
 ## Available Endpoints
 
@@ -148,6 +150,62 @@ Queues emails for later processing by the email queue system.
 Returns the health status and configuration of the N8N webhook service.
 
 ## N8N Workflow Configuration
+
+### Setting up HTTP Request Node in N8N
+
+1. **Add HTTP Request Node** to your N8N workflow
+2. **Configure the node** with these settings:
+   - **Method:** POST
+   - **URL:** `https://tradeservice-automation.onrender.com/webhook/n8n/send-template-email`
+   - **Authentication:** None
+   - **Headers:**
+     ```json
+     {
+       "Content-Type": "application/json"
+     }
+     ```
+
+3. **Request Body** (use JSON format):
+   ```json
+   {
+     "to": "{{ $json.email }}",
+     "template_type": "appointment_scheduling",
+     "lead_data": {
+       "full_name": "{{ $json.full_name }}",
+       "id": "{{ $json.id }}",
+       "email": "{{ $json.email }}"
+     },
+     "calendly_link": "https://calendly.com/your-actual-link"
+   }
+   ```
+
+### Production vs Development URLs
+
+**For Production N8N Workflows:**
+- Base URL: `https://tradeservice-automation.onrender.com`
+- Full endpoint: `https://tradeservice-automation.onrender.com/webhook/n8n/send-template-email`
+
+**For Local Testing:**
+- Base URL: `http://localhost:3001`
+- Full endpoint: `http://localhost:3001/webhook/n8n/send-template-email`
+
+### Testing Your Integration
+
+You can test the production endpoint using curl:
+
+```bash
+curl -X POST https://tradeservice-automation.onrender.com/webhook/n8n/send-template-email \
+  -H "Content-Type: application/json" \
+  -d '{
+    "to": "test@example.com",
+    "template_type": "appointment_scheduling",
+    "lead_data": {
+      "full_name": "John Test",
+      "id": "test-123"
+    },
+    "calendly_link": "https://calendly.com/your-link"
+  }'
+```
 
 ### Basic Email Sending Workflow
 

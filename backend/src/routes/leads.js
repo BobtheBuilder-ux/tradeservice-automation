@@ -79,9 +79,7 @@ router.get('/unassigned', verifyToken, async (req, res) => {
       source: leads.source,
       status: leads.status,
       priority: leads.priority,
-      createdAt: leads.createdAt,
-      facebookFormName: leads.facebookFormName,
-      facebookCampaignName: leads.facebookCampaignName
+      createdAt: leads.createdAt
     })
     .from(leads)
     .where(isNull(leads.assignedAgentId))

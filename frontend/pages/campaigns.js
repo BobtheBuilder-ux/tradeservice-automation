@@ -34,7 +34,8 @@ export default function Campaigns() {
     try {
       setLoadingCampaigns(true);
       console.log('Fetching campaigns with apiClient');
-      const response = await apiClient.get('/facebook-ads/campaigns');
+      // Facebook Ads integration removed - now using HubSpot CRM
+    const response = await apiClient.get('/api/leads');
       console.log('Campaigns response:', response);
       if (response.success) {
         setCampaigns(response.data);
@@ -58,7 +59,8 @@ export default function Campaigns() {
 
     try {
       console.log('Creating campaign:', newCampaign);
-      const response = await apiClient.post('/facebook-ads/campaigns', newCampaign);
+      // Facebook Ads integration removed - now using HubSpot CRM
+    const response = await apiClient.post('/api/leads', newCampaign);
       console.log('Create campaign response:', response);
       if (response.success) {
         setSuccess('Campaign created successfully!');
@@ -83,7 +85,8 @@ export default function Campaigns() {
 
     try {
       console.log('Creating quick campaign');
-      const response = await apiClient.post('/facebook-ads/campaigns/quick-create', {
+      // Facebook Ads integration removed - now using HubSpot CRM
+    const response = await apiClient.post('/api/leads/quick-create', {
         name: `Lead Gen ${new Date().toLocaleDateString()}`,
         budget: 50
       });
@@ -105,7 +108,8 @@ export default function Campaigns() {
   const updateCampaignStatus = async (campaignId, newStatus) => {
     try {
       console.log('Updating campaign status:', campaignId, newStatus);
-      const response = await apiClient.put(`/facebook-ads/campaigns/${campaignId}/status`, {
+      // Facebook Ads integration removed - now using HubSpot CRM
+    const response = await apiClient.put(`/api/leads/${campaignId}/status`, {
         status: newStatus
       });
       console.log('Update campaign status response:', response);
@@ -143,8 +147,8 @@ export default function Campaigns() {
         <div className="px-4 py-6 sm:px-0">
           <div className="flex justify-between items-center">
             <div>
-              <h1 className="text-3xl font-bold text-gray-900">Facebook Campaigns</h1>
-              <p className="mt-2 text-gray-600">Manage your Facebook ad campaigns</p>
+              <h1 className="text-3xl font-bold text-gray-900">HubSpot CRM Integration</h1>
+        <p className="mt-2 text-gray-600">Manage your HubSpot leads and contacts</p>
             </div>
             <div className="flex space-x-3">
               <button

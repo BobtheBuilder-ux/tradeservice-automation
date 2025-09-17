@@ -390,7 +390,7 @@ router.post('/queue-email', express.json(), async (req, res) => {
       template_type: template_type || 'custom',
       lead_id,
       tracking_id: trackingId,
-      scheduled_for: scheduled_for ? new Date(scheduled_for).toISOString() : new Date().toISOString(),
+      scheduled_for: scheduled_for || new Date().toISOString(),
       priority: priority || 'normal',
       metadata: {
         ...metadata,

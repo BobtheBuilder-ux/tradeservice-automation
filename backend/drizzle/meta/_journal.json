@@ -29,6 +29,27 @@
       "when": 1758035098760,
       "tag": "0003_redundant_lilandra",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1758111900000,
+      "tag": "0004_fix_email_queue_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1758112000000,
+      "tag": "0005_remove_facebook_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1758112922017,
+      "tag": "0006_unique_scream",
+      "breakpoints": true
     }
   ]
 }

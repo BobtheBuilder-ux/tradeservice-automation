@@ -20,8 +20,8 @@ export const agents = pgTable('agents', {
   resetToken: varchar('reset_token', { length: 255 }),
   resetTokenExpires: timestamp('reset_token_expires', { withTimezone: true }),
   lastLogin: timestamp('last_login', { withTimezone: true }),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
 }, (table) => ({
   agentIdIdx: index('idx_agents_agent_id').on(table.agentId),
   emailIdx: index('idx_agents_email').on(table.email),
@@ -33,7 +33,6 @@ export const agents = pgTable('agents', {
 export const leads = pgTable('leads', {
   // Primary identifiers
   id: uuid('id').primaryKey().defaultRandom(),
-  facebookLeadId: varchar('facebook_lead_id', { length: 255 }).unique(),
   
   // Contact information
   email: varchar('email', { length: 255 }).notNull(),
@@ -43,19 +42,10 @@ export const leads = pgTable('leads', {
   phone: varchar('phone', { length: 50 }),
   
   // Lead source and metadata
-  source: varchar('source', { length: 100 }).notNull().default('facebook_lead_ads'),
+  source: varchar('source', { length: 100 }).notNull().default('hubspot_crm'),
   status: varchar('status', { length: 50 }).notNull().default('new'),
   
-  // Facebook specific data
-  facebookPageId: varchar('facebook_page_id', { length: 255 }),
-  facebookFormId: varchar('facebook_form_id', { length: 255 }),
-  facebookAdId: varchar('facebook_ad_id', { length: 255 }),
-  facebookAdgroupId: varchar('facebook_adgroup_id', { length: 255 }),
-  facebookCampaignId: varchar('facebook_campaign_id', { length: 255 }),
-  facebookFormName: varchar('facebook_form_name', { length: 255 }),
-  facebookAdName: varchar('facebook_ad_name', { length: 255 }),
-  facebookCampaignName: varchar('facebook_campaign_name', { length: 255 }),
-  facebookRawData: jsonb('facebook_raw_data'),
+  // Custom fields
   customFields: jsonb('custom_fields'),
   
   // HubSpot integration
@@ -95,10 +85,9 @@ export const leads = pgTable('leads', {
   trackingId: varchar('tracking_id', { length: 255 }),
   
   // Timestamps
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
 }, (table) => ({
-  facebookLeadIdIdx: index('idx_leads_facebook_lead_id').on(table.facebookLeadId),
   emailIdx: index('idx_leads_email').on(table.email),
   statusIdx: index('idx_leads_status').on(table.status),
   createdAtIdx: index('idx_leads_created_at').on(table.createdAt),
@@ -230,7 +219,7 @@ export const meetingReminders = pgTable('meeting_reminders', {
   reminderType: varchar('reminder_type', { length: 50 }).notNull(),
   deliveryMethod: varchar('delivery_method', { length: 20 }).notNull().default('email'),
   scheduledFor: timestamp('scheduled_for', { withTimezone: true }).notNull(),
-  sentAt: timestamp('sent_at', { withTimezone: true }),
+  sentAt: timestamp('sent_at', { withTimezone: true, mode: 'string' }),
   emailMessageId: varchar('email_message_id', { length: 255 }),
   smsMessageSid: varchar('sms_message_sid', { length: 255 }),
   status: varchar('status', { length: 50 }).notNull().default('pending'),
@@ -276,8 +265,8 @@ export const emailQueue = pgTable('email_queue', {
   textContent: text('text_content'),
   emailType: varchar('email_type', { length: 100 }).notNull(),
   status: varchar('status', { length: 50 }).notNull().default('pending'),
-  scheduledFor: timestamp('scheduled_for', { withTimezone: true }),
-  sentAt: timestamp('sent_at', { withTimezone: true }),
+  scheduledFor: timestamp('scheduled_for', { withTimezone: true, mode: 'string' }),
+  sentAt: timestamp('sent_at', { withTimezone: true, mode: 'string' }),
   messageId: varchar('message_id', { length: 255 }),
   errorMessage: text('error_message'),
   retryCount: integer('retry_count').notNull().default(0),

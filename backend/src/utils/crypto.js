@@ -1,31 +1,6 @@
 import crypto from 'crypto';
 
 /**
- * Verify Facebook webhook signature
- * @param {string} payload - Raw request body
- * @param {string} signature - X-Hub-Signature-256 header value
- * @param {string} appSecret - Facebook app secret
- * @returns {boolean} - True if signature is valid
- */
-export function verifyFacebookSignature(payload, signature, appSecret) {
-  if (!signature || !signature.startsWith('sha256=')) {
-    return false;
-  }
-
-  const expectedSignature = crypto
-    .createHmac('sha256', appSecret)
-    .update(payload, 'utf8')
-    .digest('hex');
-
-  const receivedSignature = signature.replace('sha256=', '');
-
-  return crypto.timingSafeEqual(
-    Buffer.from(expectedSignature, 'hex'),
-    Buffer.from(receivedSignature, 'hex')
-  );
-}
-
-/**
  * Verify Calendly webhook signature
  * @param {string} payload - Raw request body
  * @param {string} signature - Calendly-Webhook-Signature header value

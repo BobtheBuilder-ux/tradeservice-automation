@@ -39,7 +39,7 @@ const fileFormat = format.combine(
 // Create logger instance
 const logger = createLogger({
   level: process.env.LOG_LEVEL || 'info',
-  defaultMeta: { service: 'facebook-lead-automation' },
+  defaultMeta: { service: 'hubspot-lead-automation' },
   transports: [
     // Error log file
     new transports.File({

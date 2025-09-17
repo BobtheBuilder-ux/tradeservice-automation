@@ -38,8 +38,8 @@ class EmailTemplateService {
         tracking_id: trackingId,
         metadata: {
           calendly_link: calendlyLink,
-          campaign_name: leadData.facebook_campaign_name,
-          lead_source: 'facebook_lead_ad'
+          campaign_name: leadData.source || 'HubSpot CRM',
+    lead_source: 'hubspot_crm'
         }
       });
 
@@ -524,16 +524,18 @@ class EmailTemplateService {
         .insert(emailQueue)
         .values({
           toEmail: emailData.to,
+          fromEmail: emailData.from_email || 'noreply@tradeservice-automation.com',
           subject: emailData.subject,
           htmlContent: emailData.html,
           textContent: emailData.text,
           templateType: emailData.template_type,
+          emailType: emailData.email_type || 'transactional',
           leadId: emailData.lead_id,
           trackingId: emailData.tracking_id,
           metadata: emailData.metadata,
           status: 'pending',
           priority: emailData.priority || 'normal',
-          scheduledFor: emailData.scheduled_for || new Date()
+          scheduledFor: emailData.scheduled_for || new Date().toISOString()
         })
         .returning();
 
@@ -725,7 +727,7 @@ Tracking ID: ${trackingId}
           <h2 style="color: #2c3e50; margin-top: 0;">Hello ${leadData.full_name || 'there'}! 👋</h2>
           <p style="color: #34495e; line-height: 1.6;">Thank you for your interest in our services. We're excited to connect with you and learn more about your needs.</p>
           
-          <p style="color: #34495e; line-height: 1.6;">We've received your information from our Facebook campaign <strong>"${leadData.facebook_campaign_name || 'Lead Generation Campaign'}"</strong> and would love to schedule a personalized consultation to discuss:</p>
+          <p style="color: #34495e; line-height: 1.6;">We've received your information from our HubSpot CRM and would love to schedule a personalized consultation to discuss:</p>
           
           <ul style="color: #34495e; line-height: 1.8; padding-left: 20px;">
             <li>Your specific goals and challenges</li>
@@ -777,7 +779,7 @@ Tracking ID: ${trackingId}
             <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Email:</td><td style="padding: 12px; color: #34495e;">${leadData.email || 'Not provided'}</td></tr>
             ${leadData.phone ? `<tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Phone:</td><td style="padding: 12px; color: #34495e;">${leadData.phone}</td></tr>` : ''}
             ${leadData.company ? `<tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Company:</td><td style="padding: 12px; color: #34495e;">${leadData.company}</td></tr>` : ''}
-            <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Source:</td><td style="padding: 12px; color: #34495e;">Facebook Lead Ad</td></tr>
+            <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Source:</td><td style="padding: 12px; color: #34495e;">HubSpot CRM</td></tr>
             <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Received:</td><td style="padding: 12px; color: #34495e;">${new Date().toLocaleDateString()}</td></tr>
           </table>
         </div>

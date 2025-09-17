@@ -9,7 +9,7 @@ import { hashForLogging } from '../utils/crypto.js';
 /**
  * Transform any lead data to standardized HubSpot-compatible format
  * @param {Object} leadData - Raw lead data from any source
- * @param {string} source - Source type ('hubspot_crm', 'facebook_lead_ads', etc.)
+ * @param {string} source - Source type ('hubspot_crm', 'generic', etc.)
  * @param {string} trackingId - Tracking ID for logging
  * @returns {Object} Standardized lead data in HubSpot format
  */
@@ -24,9 +24,6 @@ export function transformLead(leadData, source, trackingId) {
   switch (source) {
     case 'hubspot_crm':
       transformedLead = transformHubSpotLead(leadData, trackingId);
-      break;
-    case 'facebook_lead_ads':
-      transformedLead = transformFacebookLeadToHubSpotFormat(leadData, trackingId);
       break;
     default:
       transformedLead = transformGenericLeadToHubSpotFormat(leadData, source, trackingId);
@@ -103,148 +100,6 @@ export function transformHubSpotLead(hubspotContact, trackingId) {
     contactId: hubspotContact.id,
     email: transformedLead.email ? hashForLogging(transformedLead.email) : '[MISSING]',
     hasCustomFields: Object.keys(transformedLead.fields).length > 0
-  });
-
-  return transformedLead;
-}
-
-/**
- * Transform Facebook lead data to HubSpot-compatible format
- * @param {Object} facebookLead - Raw lead data from Facebook
- * @param {string} trackingId - Tracking ID for logging
- * @returns {Object} Standardized lead data in HubSpot format
- */
-export function transformFacebookLeadToHubSpotFormat(facebookLead, trackingId) {
-  const transformedLead = {
-    id: facebookLead.id,
-    facebook_lead_id: facebookLead.id,
-    email: '',
-    first_name: '',
-    last_name: '',
-    full_name: '',
-    phone: '',
-    company: '',
-    job_title: '',
-    website: '',
-    city: '',
-    state: '',
-    country: '',
-    zip: '',
-    
-    // Facebook specific data mapped to HubSpot format
-    lead_source: 'Facebook Lead Ads',
-    analytics_source: 'facebook',
-    analytics_source_data_1: facebookLead.ad_name || '',
-    analytics_source_data_2: facebookLead.campaign_name || '',
-    lifecycle_stage: 'lead',
-    
-    // Facebook metadata
-    facebook_ad_id: facebookLead.ad_id,
-    facebook_ad_name: facebookLead.ad_name,
-    facebook_adset_id: facebookLead.adset_id,
-    facebook_adset_name: facebookLead.adset_name,
-    facebook_campaign_id: facebookLead.campaign_id,
-    facebook_campaign_name: facebookLead.campaign_name,
-    facebook_form_id: facebookLead.form_id,
-    facebook_form_name: facebookLead.form_name,
-    facebook_is_organic: facebookLead.is_organic,
-    facebook_platform: facebookLead.platform,
-    
-    // Metadata
-    source: 'facebook_lead_ads',
-    created_time: facebookLead.created_time,
-    raw_data: facebookLead,
-    fields: {}
-  };
-
-  // Transform Facebook field_data array to key-value pairs
-  if (facebookLead.field_data && Array.isArray(facebookLead.field_data)) {
-    for (const field of facebookLead.field_data) {
-      const fieldName = field.name?.toLowerCase();
-      const fieldValue = field.values?.[0] || '';
-      
-      if (fieldName && fieldValue) {
-        transformedLead.fields[fieldName] = fieldValue;
-        
-        // Map common fields to HubSpot standard properties
-        switch (fieldName) {
-          case 'email':
-          case 'email_address':
-          case 'e_mail':
-            transformedLead.email = fieldValue;
-            break;
-          case 'first_name':
-          case 'firstname':
-          case 'given_name':
-            transformedLead.first_name = fieldValue;
-            break;
-          case 'last_name':
-          case 'lastname':
-          case 'family_name':
-          case 'surname':
-            transformedLead.last_name = fieldValue;
-            break;
-          case 'full_name':
-          case 'name':
-            transformedLead.full_name = fieldValue;
-            // Try to split full name if first/last not provided
-            if (!transformedLead.first_name && !transformedLead.last_name) {
-              const nameParts = fieldValue.split(' ');
-              transformedLead.first_name = nameParts[0] || '';
-              transformedLead.last_name = nameParts.slice(1).join(' ') || '';
-            }
-            break;
-          case 'phone':
-          case 'phone_number':
-          case 'mobile':
-          case 'telephone':
-            transformedLead.phone = fieldValue;
-            break;
-          case 'company':
-          case 'company_name':
-            transformedLead.company = fieldValue;
-            break;
-          case 'job_title':
-          case 'title':
-          case 'jobtitle':
-            transformedLead.job_title = fieldValue;
-            break;
-          case 'website':
-          case 'url':
-            transformedLead.website = fieldValue;
-            break;
-          case 'city':
-            transformedLead.city = fieldValue;
-            break;
-          case 'state':
-          case 'province':
-            transformedLead.state = fieldValue;
-            break;
-          case 'country':
-            transformedLead.country = fieldValue;
-            break;
-          case 'zip':
-          case 'postal_code':
-          case 'zipcode':
-            transformedLead.zip = fieldValue;
-            break;
-        }
-      }
-    }
-  }
-
-  // Generate full name if not provided but first/last names are available
-  if (!transformedLead.full_name && (transformedLead.first_name || transformedLead.last_name)) {
-    transformedLead.full_name = `${transformedLead.first_name} ${transformedLead.last_name}`.trim();
-  }
-
-  logger.logLeadProcessing(trackingId, 'facebook_lead_transformed_to_hubspot_format', {
-    facebookLeadId: facebookLead.id,
-    email: transformedLead.email ? hashForLogging(transformedLead.email) : '[MISSING]',
-    firstName: transformedLead.first_name ? '[PROVIDED]' : '[MISSING]',
-    lastName: transformedLead.last_name ? '[PROVIDED]' : '[MISSING]',
-    phone: transformedLead.phone ? '[PROVIDED]' : '[MISSING]',
-    fieldCount: Object.keys(transformedLead.fields).length
   });
 
   return transformedLead;

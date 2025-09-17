@@ -34,7 +34,7 @@ class CalendlyEmailService {
             <h2 style="color: #2c3e50; margin-top: 0;">Hello ${leadData.full_name || 'there'}! 👋</h2>
             <p style="color: #34495e; line-height: 1.6;">Thank you for your interest in our services. We're excited to connect with you and learn more about your needs.</p>
             
-            <p style="color: #34495e; line-height: 1.6;">We've received your information from our Facebook campaign <strong>"${leadData.facebook_campaign_name || 'Lead Generation Campaign'}"</strong> and would love to schedule a personalized consultation to discuss:</p>
+            <p style="color: #34495e; line-height: 1.6;">We've received your information from our HubSpot CRM and would love to schedule a personalized consultation to discuss:</p>
             
             <ul style="color: #34495e; line-height: 1.8; padding-left: 20px;">
               <li>Your specific goals and challenges</li>
@@ -86,7 +86,7 @@ class CalendlyEmailService {
               <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Email:</td><td style="padding: 12px; color: #34495e;">${leadData.email || 'Not provided'}</td></tr>
               ${leadData.phone ? `<tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Phone:</td><td style="padding: 12px; color: #34495e;">${leadData.phone}</td></tr>` : ''}
               ${leadData.company ? `<tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Company:</td><td style="padding: 12px; color: #34495e;">${leadData.company}</td></tr>` : ''}
-              <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Source:</td><td style="padding: 12px; color: #34495e;">Facebook Lead Ad</td></tr>
+              <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Source:</td><td style="padding: 12px; color: #34495e;">HubSpot CRM</td></tr>
               <tr><td style="padding: 12px; font-weight: bold; color: #2c3e50;">Received:</td><td style="padding: 12px; color: #34495e;">${new Date().toLocaleDateString()}</td></tr>
             </table>
           </div>
@@ -124,7 +124,7 @@ What to expect:
 Your Information:
 Name: ${leadData.full_name || 'Not provided'}
 Email: ${leadData.email || 'Not provided'}
-${leadData.phone ? `Phone: ${leadData.phone}\n` : ''}${leadData.company ? `Company: ${leadData.company}\n` : ''}Source: Facebook Lead Ad
+${leadData.phone ? `Phone: ${leadData.phone}\n` : ''}${leadData.company ? `Company: ${leadData.company}\n` : ''}Source: HubSpot CRM
 Received: ${new Date().toLocaleDateString()}
 
 Questions? Reply to this email or contact our support team.
