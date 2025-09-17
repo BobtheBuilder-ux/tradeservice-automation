@@ -320,7 +320,7 @@ async function handleInviteeCreated(payload, trackingId, results) {
         location: event.location || {}
       };
       
-      const meeting = await meetingService.createMeeting(meetingData, trackingId);
+      const meeting = await meetingService.createMeeting(meetingData, lead.id, trackingId);
       results.meetingCreated = true;
       
       // Update lead with scheduling information (legacy fields for compatibility)
@@ -330,7 +330,8 @@ async function handleInviteeCreated(payload, trackingId, results) {
         calendly_invitee_uri: invitee.uri,
         scheduled_at: event.start_time,
         meeting_end_time: event.end_time,
-        meeting_location: event.location?.join(', ') || null,
+        meeting_location: Array.isArray(event.location) ? event.location.join(', ') : 
+                          (typeof event.location === 'object' ? event.location.location || JSON.stringify(event.location) : event.location) || null,
         calendly_event_type: payload.event_type?.name,
         calendly_questions: invitee.questions_and_answers || [],
         calendly_tracking_data: {
@@ -686,7 +687,8 @@ async function createLeadFromCalendlyEvent(payload, trackingId) {
       calendlyInviteeUri: invitee.uri,
       calendlyStartTime: new Date(event.start_time),
       calendlyEndTime: new Date(event.end_time),
-      meetingLocation: event.location?.join(', ') || null,
+      meetingLocation: Array.isArray(event.location) ? event.location.join(', ') : 
+                       (typeof event.location === 'object' ? event.location.location || JSON.stringify(event.location) : event.location) || null,
       calendlyEventType: payload.event_type?.name,
       calendlyQuestions: invitee.questions_and_answers || [],
       calendlyTrackingData: {

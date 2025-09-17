@@ -1,5 +1,5 @@
 import express from 'express';
-import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+// Rate limiting imports removed
 import { 
   verifyCalendlySignature, 
   generateTrackingId, 
@@ -98,54 +98,9 @@ const validateRequest = (req, res, next) => {
 
 const router = express.Router();
 
-// Rate limiting for webhook endpoints
-const webhookRateLimit = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
-  message: {
-    error: 'Too many webhook requests from this IP, please try again later.',
-    code: 'RATE_LIMIT_EXCEEDED'
-  },
-  standardHeaders: true,
-  legacyHeaders: false,
-  skip: (req) => {
-    // Skip rate limiting for requests from Calendly's known IP ranges
-    // This is a basic implementation - in production, you'd want to verify actual Calendly IPs
-    const calendlyIPs = process.env.CALENDLY_WEBHOOK_IPS?.split(',') || [];
-    return calendlyIPs.includes(req.ip);
-  },
-  keyGenerator: (req) => {
-    // Use ipKeyGenerator for proper IPv6 handling, combined with User-Agent
-    const ipKey = ipKeyGenerator(req.ip);
-    return `${ipKey}-${req.get('User-Agent') || 'unknown'}`;
-  },
-  handler: (req, res) => {
-    const trackingId = generateTrackingId();
-    logger.logSecurityEvent('rate_limit_exceeded', 'warn', {
-      trackingId,
-      ip: req.ip,
-      userAgent: req.get('User-Agent'),
-      path: req.path
-    });
-    res.status(429).json({
-      error: 'Too many requests',
-      code: 'RATE_LIMIT_EXCEEDED',
-      trackingId
-    });
-  }
-});
+// Rate limiting removed for simplified configuration
 
-// Stricter rate limiting for test endpoints
-const testRateLimit = rateLimit({
-  windowMs: 5 * 60 * 1000, // 5 minutes
-  max: 10, // Limit each IP to 10 test requests per 5 minutes
-  message: {
-    error: 'Too many test requests from this IP, please try again later.',
-    code: 'TEST_RATE_LIMIT_EXCEEDED'
-  },
-  standardHeaders: true,
-  legacyHeaders: false
-});
+// Test rate limiting removed for simplified configuration
 
 /**
  * Calendly webhook event handler
@@ -154,7 +109,6 @@ const testRateLimit = rateLimit({
 router.post('/', 
   ipWhitelist,
   validateRequest,
-  webhookRateLimit, 
   express.raw({ type: 'application/json', limit: '1mb' }), 
   async (req, res) => {
   const signature = req.get('Calendly-Webhook-Signature');
@@ -263,7 +217,6 @@ router.post('/',
  */
 router.post('/test', 
   validateRequest,
-  testRateLimit, 
   requestSizeLimit, 
   async (req, res) => {
   const { eventData, skipAuth } = req.body;
