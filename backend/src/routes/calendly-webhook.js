@@ -52,8 +52,8 @@ const ipWhitelist = (req, res, next) => {
 const validateRequest = (req, res, next) => {
   const trackingId = generateTrackingId();
   
-  // Check for required headers
-  const requiredHeaders = ['user-agent', 'content-type'];
+  // Check for required headers - only user-agent is required for all requests
+  const requiredHeaders = ['user-agent'];
   const missingHeaders = requiredHeaders.filter(header => !req.get(header));
   
   if (missingHeaders.length > 0) {
@@ -74,8 +74,8 @@ const validateRequest = (req, res, next) => {
     });
   }
   
-  // Validate content type for webhook requests
-  if (req.path.includes('/webhook') && !req.get('content-type')?.includes('application/json')) {
+  // Validate content type only for POST requests to webhook endpoints
+  if (req.method === 'POST' && req.path.includes('/webhook') && !req.get('content-type')?.includes('application/json')) {
     logger.logValidation('content_type', {
       isValid: false,
       errors: ['Invalid content type for webhook request']
