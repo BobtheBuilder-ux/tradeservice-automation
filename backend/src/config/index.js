@@ -39,7 +39,11 @@ export const calendlyConfig = {
   clientId: process.env.CALENDLY_CLIENT_ID,
   clientSecret: process.env.CALENDLY_CLIENT_SECRET,
   webhookSecret: process.env.CALENDLY_WEBHOOK_SECRET,
-  apiToken: process.env.CALENDLY_API_TOKEN
+  apiToken: process.env.CALENDLY_API_TOKEN,
+  // API configuration for webhook registration
+  personalAccessToken: process.env.CALENDLY_PERSONAL_ACCESS_TOKEN,
+  organizationUri: process.env.CALENDLY_ORGANIZATION_URI,
+  webhookSigningKey: process.env.CALENDLY_WEBHOOK_SIGNING_KEY
 };
 
 // Application configuration

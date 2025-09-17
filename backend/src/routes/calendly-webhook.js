@@ -1,5 +1,5 @@
 import express from 'express';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { 
   verifyCalendlySignature, 
   generateTrackingId, 
@@ -115,8 +115,9 @@ const webhookRateLimit = rateLimit({
     return calendlyIPs.includes(req.ip);
   },
   keyGenerator: (req) => {
-    // Use a combination of IP and User-Agent for more granular rate limiting
-    return `${req.ip}-${req.get('User-Agent') || 'unknown'}`;
+    // Use ipKeyGenerator for proper IPv6 handling, combined with User-Agent
+    const ipKey = ipKeyGenerator(req.ip);
+    return `${ipKey}-${req.get('User-Agent') || 'unknown'}`;
   },
   handler: (req, res) => {
     const trackingId = generateTrackingId();
