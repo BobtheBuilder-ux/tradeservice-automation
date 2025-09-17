@@ -23,30 +23,7 @@ const requestSizeLimit = express.json({
   }
 });
 
-// IP whitelist middleware for enhanced security
-const ipWhitelist = (req, res, next) => {
-  const clientIP = req.ip || req.connection.remoteAddress;
-  const allowedIPs = process.env.CALENDLY_ALLOWED_IPS?.split(',') || [];
-  
-  // If whitelist is configured, enforce it
-  if (allowedIPs.length > 0 && !allowedIPs.includes(clientIP)) {
-    const trackingId = generateTrackingId();
-    logger.logSecurityEvent('unauthorized_ip_access', 'warn', {
-      trackingId,
-      clientIP,
-      userAgent: req.get('User-Agent'),
-      path: req.path
-    });
-    
-    return res.status(403).json({
-      error: 'Access denied from this IP address',
-      code: 'IP_NOT_WHITELISTED',
-      trackingId
-    });
-  }
-  
-  next();
-};
+
 
 // Request validation middleware
 const validateRequest = (req, res, next) => {
@@ -107,7 +84,6 @@ const router = express.Router();
  * POST /webhook/calendly
  */
 router.post('/', 
-  ipWhitelist,
   validateRequest,
   express.raw({ type: 'application/json', limit: '1mb' }), 
   async (req, res) => {
