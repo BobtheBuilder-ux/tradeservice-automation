@@ -110,4 +110,81 @@ logger.logLeadProcessing = (leadId, step, data = {}) => {
   });
 };
 
+// Add webhook processing logging helper
+logger.logWebhookProcessing = (trackingId, event, step, data = {}) => {
+  logger.info('Webhook Processing', {
+    trackingId,
+    event,
+    step,
+    timestamp: new Date().toISOString(),
+    ...data
+  });
+};
+
+// Add meeting operations logging helper
+logger.logMeetingOperation = (operation, meetingId, data = {}) => {
+  logger.info('Meeting Operation', {
+    operation,
+    meetingId,
+    timestamp: new Date().toISOString(),
+    ...data
+  });
+};
+
+// Add security event logging helper
+logger.logSecurityEvent = (event, severity = 'warn', data = {}) => {
+  logger[severity]('Security Event', {
+    event,
+    timestamp: new Date().toISOString(),
+    severity,
+    ...data
+  });
+};
+
+// Add database operation logging helper
+logger.logDatabaseOperation = (operation, table, data = {}) => {
+  logger.debug('Database Operation', {
+    operation,
+    table,
+    timestamp: new Date().toISOString(),
+    ...data
+  });
+};
+
+// Add performance logging helper
+logger.logPerformance = (operation, duration, data = {}) => {
+  const level = duration > 5000 ? 'warn' : duration > 1000 ? 'info' : 'debug';
+  logger[level]('Performance Metric', {
+    operation,
+    duration: `${duration}ms`,
+    timestamp: new Date().toISOString(),
+    ...data
+  });
+};
+
+// Add validation logging helper
+logger.logValidation = (type, result, data = {}) => {
+  const level = result.isValid ? 'debug' : 'warn';
+  logger[level]('Validation Result', {
+    type,
+    isValid: result.isValid,
+    errors: result.errors || [],
+    warnings: result.warnings || [],
+    timestamp: new Date().toISOString(),
+    ...data
+  });
+};
+
+// Add transaction logging helper
+logger.logTransaction = (transactionId, operation, status, data = {}) => {
+  const level = status === 'failed' ? 'error' : status === 'rollback' ? 'warn' : 'info';
+  logger[level]('Database Transaction', {
+    transactionId,
+    operation,
+    status,
+    timestamp: new Date().toISOString(),
+    ...data
+  });
+};
+
 export default logger;

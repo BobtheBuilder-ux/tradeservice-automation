@@ -36,6 +36,8 @@ export const hubspotClient = process.env.HUBSPOT_ACCESS_TOKEN
 
 // Calendly configuration
 export const calendlyConfig = {
+  clientId: process.env.CALENDLY_CLIENT_ID,
+  clientSecret: process.env.CALENDLY_CLIENT_SECRET,
   webhookSecret: process.env.CALENDLY_WEBHOOK_SECRET,
   apiToken: process.env.CALENDLY_API_TOKEN
 };

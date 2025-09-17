@@ -6,128 +6,536 @@ import { hashForLogging } from '../utils/crypto.js';
 import TwilioSmsService from './twilio-sms-service.js';
 import EmailTemplateService from './email-template-service.js';
 
+// Retry configuration
+const RETRY_CONFIG = {
+  maxRetries: 3,
+  baseDelay: 1000, // 1 second
+  maxDelay: 10000, // 10 seconds
+  backoffMultiplier: 2
+};
+
+// Database error types that should be retried
+const RETRYABLE_ERROR_CODES = [
+  'ECONNRESET',
+  'ENOTFOUND',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  '40001', // PostgreSQL serialization failure
+  '40P01', // PostgreSQL deadlock detected
+  '53300', // PostgreSQL too many connections
+  '08006', // PostgreSQL connection failure
+  '08001', // PostgreSQL unable to connect
+  '08004'  // PostgreSQL connection rejected
+];
+
 /**
  * Meeting Service - Handles all meeting-related database operations
  */
 class MeetingService {
+  /**
+   * Execute database operation with retry logic
+   * @param {Function} operation - Database operation to execute
+   * @param {string} operationName - Name of the operation for logging
+   * @param {string} trackingId - Tracking ID for logging
+   * @param {Object} retryConfig - Retry configuration override
+   * @returns {Promise<any>} - Operation result
+   */
+  async executeWithRetry(operation, operationName, trackingId, retryConfig = RETRY_CONFIG) {
+    let lastError;
+    
+    for (let attempt = 1; attempt <= retryConfig.maxRetries; attempt++) {
+      try {
+        const startTime = Date.now();
+        const result = await operation();
+        const duration = Date.now() - startTime;
+        
+        if (attempt > 1) {
+          logger.info(`Database operation succeeded after retry`, {
+            trackingId,
+            operation: operationName,
+            attempt,
+            duration
+          });
+        }
+        
+        return result;
+      } catch (error) {
+        lastError = error;
+        const isRetryable = this.isRetryableError(error);
+        const isLastAttempt = attempt === retryConfig.maxRetries;
+        
+        logger.warn(`Database operation failed`, {
+          trackingId,
+          operation: operationName,
+          attempt,
+          error: error.message,
+          errorCode: error.code,
+          isRetryable,
+          isLastAttempt
+        });
+        
+        if (!isRetryable || isLastAttempt) {
+          break;
+        }
+        
+        // Calculate delay with exponential backoff
+        const delay = Math.min(
+          retryConfig.baseDelay * Math.pow(retryConfig.backoffMultiplier, attempt - 1),
+          retryConfig.maxDelay
+        );
+        
+        logger.info(`Retrying database operation after delay`, {
+          trackingId,
+          operation: operationName,
+          attempt: attempt + 1,
+          delay
+        });
+        
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+    
+    // If we get here, all retries failed
+    logger.error(`Database operation failed after all retries`, {
+      trackingId,
+      operation: operationName,
+      maxRetries: retryConfig.maxRetries,
+      finalError: lastError.message
+    });
+    
+    throw lastError;
+  }
   
   /**
-   * Create a new meeting record
+   * Check if an error is retryable
+   * @param {Error} error - Error to check
+   * @returns {boolean} - True if error is retryable
+   */
+  isRetryableError(error) {
+    if (!error) return false;
+    
+    // Check error code
+    if (error.code && RETRYABLE_ERROR_CODES.includes(error.code)) {
+      return true;
+    }
+    
+    // Check error message for common retryable patterns
+    const errorMessage = error.message?.toLowerCase() || '';
+    const retryablePatterns = [
+      'connection',
+      'timeout',
+      'network',
+      'temporary',
+      'deadlock',
+      'serialization',
+      'lock wait timeout'
+    ];
+    
+    return retryablePatterns.some(pattern => errorMessage.includes(pattern));
+  }
+  
+  /**
+   * Execute database transaction with retry logic
+   * @param {Function} transactionFn - Transaction function
+   * @param {string} operationName - Name of the operation for logging
+   * @param {string} trackingId - Tracking ID for logging
+   * @returns {Promise<any>} - Transaction result
+   */
+  async executeTransaction(transactionFn, operationName, trackingId) {
+    return this.executeWithRetry(async () => {
+      return await db.transaction(async (tx) => {
+        logger.info(`Starting database transaction`, {
+          trackingId,
+          operation: operationName
+        });
+        
+        try {
+          const result = await transactionFn(tx);
+          
+          logger.info(`Database transaction completed successfully`, {
+            trackingId,
+            operation: operationName
+          });
+          
+          return result;
+        } catch (error) {
+          logger.error(`Database transaction failed, rolling back`, {
+            trackingId,
+            operation: operationName,
+            error: error.message
+          });
+          throw error;
+        }
+      });
+    }, `transaction_${operationName}`, trackingId);
+  }
+  
+  /**
+   * Create a new meeting record with comprehensive error handling
    * @param {Object} meetingData - Meeting information from Calendly
    * @param {string} leadId - Associated lead ID
    * @param {string} trackingId - Tracking ID for logging
    * @returns {Object} Created meeting record
    */
   async createMeeting(meetingData, leadId, trackingId) {
-    try {
-      logger.logLeadProcessing(trackingId, 'creating_meeting_record', {
+    // Validate input data
+    if (!meetingData || !leadId) {
+      const error = new Error('Missing required parameters: meetingData and leadId are required');
+      logger.logError(error, { context: 'create_meeting_validation', trackingId, leadId });
+      throw error;
+    }
+
+    if (!meetingData.start_time || !meetingData.end_time) {
+      const error = new Error('Missing required meeting times: start_time and end_time are required');
+      logger.logError(error, { context: 'create_meeting_validation', trackingId, leadId });
+      throw error;
+    }
+
+    return this.executeTransaction(async (tx) => {
+      logger.logMeetingOperation('create_meeting_start', null, {
+        trackingId,
         leadId,
         calendlyEventId: meetingData.uri,
         startTime: meetingData.start_time
       });
 
-      const meetingUpdate = {
-        calendlyEventUri: meetingData.uri,
-        scheduledAt: new Date(meetingData.start_time),
-        meetingEndTime: new Date(meetingData.end_time),
-        meetingLocation: meetingData.location?.location || 'Online',
+      // Extract Calendly event ID from URI
+      const calendlyEventId = meetingData.uri ? meetingData.uri.split('/').pop() : null;
+      
+      // Check for existing meeting with same Calendly event ID
+      if (calendlyEventId) {
+        const existingMeeting = await tx
+          .select({ id: meetings.id })
+          .from(meetings)
+          .where(eq(meetings.calendlyEventId, calendlyEventId))
+          .limit(1);
+          
+        if (existingMeeting.length > 0) {
+          logger.warn('Meeting with Calendly event ID already exists', {
+            trackingId,
+            calendlyEventId,
+            existingMeetingId: existingMeeting[0].id
+          });
+          // Return existing meeting instead of creating duplicate
+          const [existing] = await tx
+            .select()
+            .from(meetings)
+            .where(eq(meetings.id, existingMeeting[0].id));
+          return existing;
+        }
+      }
+      
+      // Prepare meeting data for the meetings table
+      const meetingRecord = {
+        leadId: leadId,
+        calendlyEventId: calendlyEventId,
+        meetingType: meetingData.event_type?.name || 'consultation',
+        title: meetingData.name || meetingData.event_type?.name || 'Meeting',
+        description: meetingData.description || meetingData.event_type?.description || '',
+        startTime: new Date(meetingData.start_time),
+        endTime: new Date(meetingData.end_time),
+        timezone: meetingData.timezone || 'UTC',
         status: 'scheduled',
+        meetingUrl: meetingData.location?.join_url || null,
+        location: Array.isArray(meetingData.location) ? meetingData.location.join(', ') : 
+                 (typeof meetingData.location === 'object' ? meetingData.location.location : meetingData.location) || 'Online',
+        attendeeEmail: meetingData.invitee?.email || null,
+        attendeeName: meetingData.invitee?.name || null,
+        attendeePhone: meetingData.invitee?.phone || null,
+        metadata: {
+          calendly_event_uri: meetingData.uri,
+          calendly_invitee_uri: meetingData.invitee?.uri,
+          event_type_uri: meetingData.event_type?.uri,
+          questions_and_answers: meetingData.invitee?.questions_and_answers || [],
+          tracking: meetingData.invitee?.tracking || {},
+          payment: meetingData.invitee?.payment || null,
+          created_via: 'webhook',
+          processing_attempt: 1
+        }
+      };
+
+      // Create meeting record in meetings table
+      const [meeting] = await tx
+        .insert(meetings)
+        .values(meetingRecord)
+        .returning();
+
+      if (!meeting) {
+        throw new Error('Failed to create meeting record - no data returned');
+      }
+
+      // Update lead with Calendly data for backward compatibility
+      await this.updateLeadWithCalendlyDataTransaction(tx, leadId, {
+        calendly_event_uri: meetingData.uri,
+        calendly_invitee_uri: meetingData.invitee?.uri,
+        scheduled_at: meetingData.start_time,
+        meeting_end_time: meetingData.end_time,
+        meeting_location: meetingRecord.location,
+        calendly_event_type: meetingData.event_type?.name,
+        status: 'scheduled'
+      }, trackingId);
+
+      logger.logMeetingOperation('create_meeting_success', meeting.id, {
+        trackingId,
+        leadId: leadId,
+        calendlyEventId: meeting.calendlyEventId
+      });
+
+      return meeting;
+    }, 'create_meeting', trackingId).then(async (meeting) => {
+      // Schedule reminders outside of transaction to avoid blocking
+      try {
+        await this.scheduleReminders(meeting.id, meeting.startTime, trackingId);
+      } catch (reminderError) {
+        logger.warn('Failed to schedule reminders, but meeting was created successfully', {
+          trackingId,
+          meetingId: meeting.id,
+          error: reminderError.message
+        });
+        // Don't throw here - meeting creation was successful
+      }
+      
+      return meeting;
+    });
+  }
+
+  /**
+   * Helper method to update lead with Calendly data
+   * @param {string} leadId - Lead ID
+   * @param {Object} calendlyData - Calendly data
+   * @param {string} trackingId - Tracking ID for logging
+   */
+  async updateLeadWithCalendlyData(leadId, calendlyData, trackingId) {
+    return this.executeWithRetry(async () => {
+      const updateFields = {
+        calendlyEventUri: calendlyData.calendly_event_uri,
+        calendlyInviteeUri: calendlyData.calendly_invitee_uri,
+        scheduledAt: calendlyData.scheduled_at ? new Date(calendlyData.scheduled_at) : null,
+        meetingEndTime: calendlyData.meeting_end_time ? new Date(calendlyData.meeting_end_time) : null,
+        meetingLocation: calendlyData.meeting_location,
+        calendlyEventType: calendlyData.calendly_event_type,
+        status: calendlyData.status || 'scheduled',
         lastCalendlyUpdate: new Date(),
         updatedAt: new Date()
       };
 
-      const [meeting] = await db
+      const [updatedLead] = await db
         .update(leads)
-        .set(meetingUpdate)
+        .set(updateFields)
         .where(eq(leads.id, leadId))
         .returning();
 
-      if (!meeting) {
-        const error = new Error('Failed to update lead with meeting data');
-        logger.logError(error, { context: 'create_meeting', trackingId, leadId });
-        throw error;
+      if (!updatedLead) {
+        throw new Error(`Lead not found or update failed for leadId: ${leadId}`);
       }
 
-      // Update lead with meeting reference
-      await this.updateLeadMeetingStatus(leadId, meeting.id, true, trackingId);
-
-      // Schedule automatic reminders
-      await this.scheduleReminders(meeting.id, meeting.start_time, trackingId);
-
-      logger.logLeadProcessing(trackingId, 'meeting_created_successfully', {
-        leadId: meeting.id,
-        calendlyEventId: meeting.calendlyEventUri
+      logger.logLeadProcessing(trackingId, 'lead_updated_with_calendly_data', {
+        leadId,
+        status: updateFields.status
       });
 
-      return meeting;
-    } catch (error) {
-      logger.logError(error, { context: 'create_meeting', trackingId, leadId });
-      throw error;
-    }
+      return updatedLead;
+    }, 'update_lead_with_calendly_data', trackingId);
   }
 
   /**
-   * Update meeting status (canceled, completed, no-show, etc.)
+   * Update lead with Calendly data within a transaction
+   * @param {Object} tx - Database transaction object
+   * @param {string} leadId - Lead ID
+   * @param {Object} calendlyData - Calendly data
+   * @param {string} trackingId - Tracking ID for logging
+   */
+  async updateLeadWithCalendlyDataTransaction(tx, leadId, calendlyData, trackingId) {
+    const updateFields = {
+      calendlyEventUri: calendlyData.calendly_event_uri,
+      calendlyInviteeUri: calendlyData.calendly_invitee_uri,
+      scheduledAt: calendlyData.scheduled_at ? new Date(calendlyData.scheduled_at) : null,
+      meetingEndTime: calendlyData.meeting_end_time ? new Date(calendlyData.meeting_end_time) : null,
+      meetingLocation: calendlyData.meeting_location,
+      calendlyEventType: calendlyData.calendly_event_type,
+      status: calendlyData.status || 'scheduled',
+      lastCalendlyUpdate: new Date(),
+      updatedAt: new Date()
+    };
+
+    const [updatedLead] = await tx
+      .update(leads)
+      .set(updateFields)
+      .where(eq(leads.id, leadId))
+      .returning();
+
+    if (!updatedLead) {
+      throw new Error(`Lead not found or update failed for leadId: ${leadId}`);
+    }
+
+    logger.logLeadProcessing(trackingId, 'lead_updated_with_calendly_data_transaction', {
+      leadId,
+      status: updateFields.status
+    });
+
+    return updatedLead;
+  }
+
+  /**
+   * Update meeting status (canceled, completed, no-show, etc.) with comprehensive error handling
    * @param {string} calendlyEventId - Calendly event ID
    * @param {string} status - New meeting status
    * @param {Object} updateData - Additional update data
    * @param {string} trackingId - Tracking ID for logging
-   * @returns {Object} Updated lead record
+   * @returns {Object} Updated meeting record
    */
   async updateMeetingStatus(calendlyEventId, status, updateData = {}, trackingId) {
-    try {
-      logger.logLeadProcessing(trackingId, 'updating_meeting_status', {
+    // Validate input
+    if (!calendlyEventId || !status) {
+      const error = new Error('Missing required parameters: calendlyEventId and status are required');
+      logger.logError(error, { context: 'update_meeting_status_validation', trackingId });
+      throw error;
+    }
+
+    const validStatuses = ['scheduled', 'canceled', 'completed', 'rescheduled', 'no_show'];
+    if (!validStatuses.includes(status)) {
+      const error = new Error(`Invalid status: ${status}. Valid statuses are: ${validStatuses.join(', ')}`);
+      logger.logError(error, { context: 'update_meeting_status_validation', trackingId });
+      throw error;
+    }
+
+    return this.executeTransaction(async (tx) => {
+      logger.logMeetingOperation('update_status_start', null, {
+        trackingId,
         calendlyEventId,
         newStatus: status
       });
 
+      // Extract event ID from URI if needed
+      const eventId = calendlyEventId.includes('/') ? calendlyEventId.split('/').pop() : calendlyEventId;
+
+      // First, find the meeting to get current status
+      const existingMeeting = await tx
+        .select()
+        .from(meetings)
+        .where(eq(meetings.calendlyEventId, eventId))
+        .limit(1);
+
+      if (existingMeeting.length === 0) {
+        logger.warn('No meeting found for Calendly event', {
+          trackingId,
+          calendlyEventId,
+          eventId
+        });
+        
+        // Try to find by URI in leads table for backward compatibility
+        const leadWithEvent = await tx
+          .select()
+          .from(leads)
+          .where(eq(leads.calendlyEventUri, calendlyEventId))
+          .limit(1);
+          
+        if (leadWithEvent.length > 0) {
+          logger.info('Found lead with Calendly event, updating lead status only', {
+            trackingId,
+            leadId: leadWithEvent[0].id,
+            calendlyEventId
+          });
+          
+          const [updatedLead] = await tx
+            .update(leads)
+            .set({
+              status: status === 'canceled' ? 'canceled' : 
+                     status === 'completed' ? 'completed' : 'scheduled',
+              updatedAt: new Date()
+            })
+            .where(eq(leads.id, leadWithEvent[0].id))
+            .returning();
+            
+          return { leadOnly: true, lead: updatedLead };
+        }
+        
+        throw new Error(`No meeting or lead found for Calendly event: ${calendlyEventId}`);
+      }
+
+      const currentMeeting = existingMeeting[0];
+      const oldStatus = currentMeeting.status;
+
       const updateFields = {
         status,
         updatedAt: new Date(),
-        lastCalendlyUpdate: new Date(),
         ...updateData
       };
 
       // Add specific fields based on status
       if (status === 'canceled') {
         updateFields.canceledAt = new Date();
-        updateFields.canceledBy = updateData.canceled_by || 'system';
-        updateFields.cancellationReason = updateData.reason || '';
+        updateFields.metadata = {
+          ...currentMeeting.metadata,
+          ...updateData.metadata,
+          canceled_at: new Date().toISOString(),
+          canceled_by: updateData.canceled_by || 'system',
+          cancellation_reason: updateData.reason || ''
+        };
       } else if (status === 'no_show') {
-        updateFields.noShow = true;
-        updateFields.attended = false;
+        updateFields.metadata = {
+          ...currentMeeting.metadata,
+          ...updateData.metadata,
+          no_show_at: new Date().toISOString(),
+          attended: false
+        };
       } else if (status === 'completed') {
-        updateFields.attended = true;
-        updateFields.noShow = false;
+        updateFields.completedAt = new Date();
+        updateFields.metadata = {
+          ...currentMeeting.metadata,
+          ...updateData.metadata,
+          completed_at: new Date().toISOString(),
+          attended: true
+        };
+      } else if (status === 'rescheduled') {
+        updateFields.rescheduledAt = new Date();
       }
 
-      const [lead] = await db
-        .update(leads)
+      // Update meeting record in meetings table
+      const [meeting] = await tx
+        .update(meetings)
         .set(updateFields)
-        .where(eq(leads.calendlyEventUri, calendlyEventId))
+        .where(eq(meetings.calendlyEventId, eventId))
         .returning();
 
-      if (!lead) {
-        const error = new Error(`Lead not found for Calendly event: ${calendlyEventId}`);
-        logger.logError(error, { context: 'update_meeting_status', trackingId, calendlyEventId });
-        throw error;
+      if (!meeting) {
+        throw new Error(`Failed to update meeting status for event: ${eventId}`);
       }
 
-      // Update lead status if meeting is canceled or completed
+      // Also update lead record for backward compatibility
+      const leadStatus = status === 'canceled' ? 'canceled' : 
+                        status === 'completed' ? 'completed' : 
+                        status === 'no_show' ? 'no_show' : 'scheduled';
+                        
+      const leadUpdateFields = {
+        status: leadStatus,
+        lastCalendlyUpdate: new Date(),
+        updatedAt: new Date()
+      };
+
       if (status === 'canceled') {
-        await this.updateLeadMeetingStatus(lead.id, null, false, trackingId);
+        leadUpdateFields.canceledAt = new Date();
+        leadUpdateFields.cancellationReason = updateData.reason || '';
+      } else if (status === 'no_show') {
+        leadUpdateFields.noShowAt = new Date();
       }
 
-      logger.logLeadProcessing(trackingId, 'meeting_status_updated', {
-        leadId: lead.id,
-        newStatus: status
+      const [updatedLead] = await tx
+        .update(leads)
+        .set(leadUpdateFields)
+        .where(eq(leads.id, meeting.leadId))
+        .returning();
+
+      logger.logMeetingOperation('update_status_success', meeting.id, {
+        trackingId,
+        leadId: meeting.leadId,
+        oldStatus,
+        newStatus: status,
+        leadStatus: updatedLead?.status
       });
 
-      return lead;
-    } catch (error) {
-      logger.logError(error, { context: 'update_meeting_status', trackingId, calendlyEventId });
-      throw error;
-    }
+      return { meeting, lead: updatedLead };
+    }, 'update_meeting_status', trackingId);
   }
 
   /**
@@ -299,18 +707,28 @@ class MeetingService {
   }
 
   /**
-   * Schedule reminder records for a meeting
+   * Schedule reminder records for a meeting with comprehensive error handling
    * @param {string} meetingId - Meeting ID
    * @param {string} startTime - Meeting start time
    * @param {string} trackingId - Tracking ID for logging
    */
   async scheduleReminders(meetingId, startTime, trackingId) {
-    try {
+    // Validate input parameters
+    if (!meetingId || !startTime) {
+      const error = new Error('Missing required parameters: meetingId and startTime are required');
+      logger.logError(error, { context: 'schedule_reminders_validation', trackingId });
+      throw error;
+    }
+
+    return this.executeWithRetry(async () => {
       // Get meeting details with lead information
-      const meetingResult = await this.db.select({
+      const meetingResult = await db.select({
         id: meetings.id,
         leadId: meetings.leadId,
         calendlyEventId: meetings.calendlyEventId,
+        title: meetings.title,
+        meetingUrl: meetings.meetingUrl,
+        location: meetings.location,
         startTime: meetings.startTime,
         endTime: meetings.endTime,
         status: meetings.status,
@@ -337,55 +755,80 @@ class MeetingService {
       }
 
       const meeting = meetingResult[0];
-
       const meetingDate = new Date(startTime);
+      const currentTime = new Date();
+      
       const reminder24h = new Date(meetingDate);
       reminder24h.setHours(reminder24h.getHours() - 24);
       
       const reminder1h = new Date(meetingDate);
       reminder1h.setHours(reminder1h.getHours() - 1);
 
-      const leadData = meeting.leads;
+      const leadData = meeting.lead;
       
-      // Queue 24-hour reminder email if meeting is more than 24 hours away
-      if (reminder24h > new Date()) {
-        await EmailTemplateService.queueMeetingReminderEmail(
-          leadData.id,
-          leadData.email,
-          leadData.full_name || leadData.first_name || 'Valued Customer',
-          '24h',
-          {
-            meeting_time: startTime,
-            meeting_title: meeting.meeting_title,
-            meeting_url: meeting.meeting_url,
-            location: meeting.location
-          },
-          reminder24h.toISOString(),
-          trackingId
-        );
+      // Check for existing reminders to avoid duplicates
+      const existingReminders = await db
+        .select({ reminderType: meetingReminders.reminderType })
+        .from(meetingReminders)
+        .where(eq(meetingReminders.meetingId, meetingId));
+      
+      const existingTypes = existingReminders.map(r => r.reminderType);
+      
+      // Queue 24-hour reminder email if meeting is more than 24 hours away and not already scheduled
+      if (reminder24h > currentTime && !existingTypes.includes('24_hour')) {
+        try {
+          await EmailTemplateService.queueMeetingReminderEmail(
+            leadData.id,
+            leadData.email,
+            leadData.fullName || leadData.firstName || 'Valued Customer',
+            '24h',
+            {
+              meeting_time: startTime,
+              meeting_title: meeting.title,
+              meeting_url: meeting.meetingUrl,
+              location: meeting.location
+            },
+            reminder24h.toISOString(),
+            trackingId
+          );
+        } catch (emailError) {
+          logger.warn('Failed to queue 24h email reminder, continuing with reminder record creation', {
+            trackingId,
+            meetingId,
+            error: emailError.message
+          });
+        }
       }
 
-      // Queue 1-hour reminder email if meeting is more than 1 hour away
-      if (reminder1h > new Date()) {
-        await EmailTemplateService.queueMeetingReminderEmail(
-          leadData.id,
-          leadData.email,
-          leadData.full_name || leadData.first_name || 'Valued Customer',
-          '1h',
-          {
-            meeting_time: startTime,
-            meeting_title: meeting.meeting_title,
-            meeting_url: meeting.meeting_url,
-            location: meeting.location
-          },
-          reminder1h.toISOString(),
-          trackingId
-        );
+      // Queue 1-hour reminder email if meeting is more than 1 hour away and not already scheduled
+      if (reminder1h > currentTime && !existingTypes.includes('1_hour')) {
+        try {
+          await EmailTemplateService.queueMeetingReminderEmail(
+            leadData.id,
+            leadData.email,
+            leadData.fullName || leadData.firstName || 'Valued Customer',
+            '1h',
+            {
+              meeting_time: startTime,
+              meeting_title: meeting.title,
+              meeting_url: meeting.meetingUrl,
+              location: meeting.location
+            },
+            reminder1h.toISOString(),
+            trackingId
+          );
+        } catch (emailError) {
+          logger.warn('Failed to queue 1h email reminder, continuing with reminder record creation', {
+            trackingId,
+            meetingId,
+            error: emailError.message
+          });
+        }
       }
 
-      // Still create reminder records for tracking
+      // Create reminder records for tracking
       const reminders = [];
-      if (reminder24h > new Date()) {
+      if (reminder24h > currentTime && !existingTypes.includes('24_hour')) {
         reminders.push({
           meetingId,
           reminderType: '24_hour',
@@ -395,7 +838,7 @@ class MeetingService {
           updatedAt: new Date()
         });
       }
-      if (reminder1h > new Date()) {
+      if (reminder1h > currentTime && !existingTypes.includes('1_hour')) {
         reminders.push({
           meetingId,
           reminderType: '1_hour',
@@ -406,21 +849,24 @@ class MeetingService {
         });
       }
 
+      let createdReminders = [];
       if (reminders.length > 0) {
-        await this.db.insert(meetingReminders)
-          .values(reminders);
+        createdReminders = await db.insert(meetingReminders)
+          .values(reminders)
+          .returning();
       }
 
-      logger.logLeadProcessing(trackingId, 'meeting_reminders_queued', {
-        meetingId,
+      logger.logMeetingOperation('schedule_reminders_success', meetingId, {
+        trackingId,
         leadId: leadData.id,
-        reminder24h: reminder24h > new Date() ? reminder24h.toISOString() : 'skipped',
-        reminder1h: reminder1h > new Date() ? reminder1h.toISOString() : 'skipped'
+        reminder24h: reminder24h > currentTime ? reminder24h.toISOString() : 'skipped',
+        reminder1h: reminder1h > currentTime ? reminder1h.toISOString() : 'skipped',
+        createdCount: createdReminders.length,
+        existingCount: existingReminders.length
       });
-    } catch (error) {
-      logger.logError(error, { context: 'schedule_reminders', trackingId, meetingId });
-      throw error;
-    }
+
+      return createdReminders;
+    }, 'schedule_reminders', trackingId);
   }
 
   /**
@@ -811,7 +1257,7 @@ class MeetingService {
       const threeDaysAgo = new Date();
       threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
 
-      const leadsResult = await this.db.select()
+      const leadsResult = await db.select()
         .from(leads)
         .where(
           and(
@@ -842,25 +1288,42 @@ class MeetingService {
         limit
       });
 
-      const upcomingLeads = await db
-         .select()
-         .from(leads)
+      const upcomingMeetings = await db
+         .select({
+           id: meetings.id,
+           leadId: meetings.leadId,
+           calendlyEventId: meetings.calendlyEventId,
+           title: meetings.title,
+           startTime: meetings.startTime,
+           endTime: meetings.endTime,
+           status: meetings.status,
+           meetingUrl: meetings.meetingUrl,
+           location: meetings.location,
+           lead: {
+             id: leads.id,
+             email: leads.email,
+             fullName: leads.fullName,
+             firstName: leads.firstName,
+             lastName: leads.lastName
+           }
+         })
+         .from(meetings)
+         .innerJoin(leads, eq(meetings.leadId, leads.id))
          .where(
            and(
-             gte(leads.calendlyStartTime, new Date()),
-             eq(leads.status, 'scheduled'),
-             isNull(leads.canceledAt)
+             gte(meetings.startTime, new Date()),
+             eq(meetings.status, 'scheduled')
            )
          )
-         .orderBy(asc(leads.calendlyStartTime))
+         .orderBy(asc(meetings.startTime))
          .limit(limit);
 
       logger.logLeadProcessing(trackingId, 'upcoming_meetings_fetched', {
-        count: upcomingLeads?.length || 0,
+        count: upcomingMeetings?.length || 0,
         limit
       });
 
-      return upcomingLeads || [];
+      return upcomingMeetings || [];
 
     } catch (error) {
       logger.logError(error, {

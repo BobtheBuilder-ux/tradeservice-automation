@@ -533,7 +533,7 @@ class EmailTemplateService {
           leadId: emailData.lead_id,
           trackingId: emailData.tracking_id,
           metadata: emailData.metadata,
-          status: 'pending',
+          status: 'scheduled',
           priority: emailData.priority || 'normal',
           scheduledFor: emailData.scheduled_for || new Date().toISOString()
         })

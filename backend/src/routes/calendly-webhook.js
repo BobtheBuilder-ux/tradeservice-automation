@@ -1,38 +1,201 @@
 import express from 'express';
-import { verifyCalendlySignature, generateTrackingId } from '../utils/crypto.js';
+import rateLimit from 'express-rate-limit';
+import { 
+  verifyCalendlySignature, 
+  generateTrackingId, 
+  enhancedWebhookVerification,
+  verifyCalendlyApiToken 
+} from '../utils/crypto.js';
 import { calendlyConfig } from '../config/index.js';
 import logger from '../utils/logger.js';
 import { processCalendlyEvent } from '../services/calendly-service.js';
 
+// Security middleware for request size limiting
+const requestSizeLimit = express.json({ 
+  limit: '1mb',
+  verify: (req, res, buf, encoding) => {
+    // Additional verification for JSON payloads
+    if (buf.length > 1024 * 1024) { // 1MB limit
+      const error = new Error('Request payload too large');
+      error.status = 413;
+      throw error;
+    }
+  }
+});
+
+// IP whitelist middleware for enhanced security
+const ipWhitelist = (req, res, next) => {
+  const clientIP = req.ip || req.connection.remoteAddress;
+  const allowedIPs = process.env.CALENDLY_ALLOWED_IPS?.split(',') || [];
+  
+  // If whitelist is configured, enforce it
+  if (allowedIPs.length > 0 && !allowedIPs.includes(clientIP)) {
+    const trackingId = generateTrackingId();
+    logger.logSecurityEvent('unauthorized_ip_access', 'warn', {
+      trackingId,
+      clientIP,
+      userAgent: req.get('User-Agent'),
+      path: req.path
+    });
+    
+    return res.status(403).json({
+      error: 'Access denied from this IP address',
+      code: 'IP_NOT_WHITELISTED',
+      trackingId
+    });
+  }
+  
+  next();
+};
+
+// Request validation middleware
+const validateRequest = (req, res, next) => {
+  const trackingId = generateTrackingId();
+  
+  // Check for required headers
+  const requiredHeaders = ['user-agent', 'content-type'];
+  const missingHeaders = requiredHeaders.filter(header => !req.get(header));
+  
+  if (missingHeaders.length > 0) {
+    logger.logValidation('request_headers', {
+      isValid: false,
+      errors: [`Missing headers: ${missingHeaders.join(', ')}`]
+    }, {
+      trackingId,
+      ip: req.ip,
+      path: req.path
+    });
+    
+    return res.status(400).json({
+      error: 'Missing required headers',
+      code: 'MISSING_HEADERS',
+      missingHeaders,
+      trackingId
+    });
+  }
+  
+  // Validate content type for webhook requests
+  if (req.path.includes('/webhook') && !req.get('content-type')?.includes('application/json')) {
+    logger.logValidation('content_type', {
+      isValid: false,
+      errors: ['Invalid content type for webhook request']
+    }, {
+      trackingId,
+      contentType: req.get('content-type'),
+      ip: req.ip
+    });
+    
+    return res.status(400).json({
+      error: 'Invalid content type. Expected application/json',
+      code: 'INVALID_CONTENT_TYPE',
+      trackingId
+    });
+  }
+  
+  req.trackingId = trackingId;
+  next();
+};
+
 const router = express.Router();
+
+// Rate limiting for webhook endpoints
+const webhookRateLimit = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  message: {
+    error: 'Too many webhook requests from this IP, please try again later.',
+    code: 'RATE_LIMIT_EXCEEDED'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => {
+    // Skip rate limiting for requests from Calendly's known IP ranges
+    // This is a basic implementation - in production, you'd want to verify actual Calendly IPs
+    const calendlyIPs = process.env.CALENDLY_WEBHOOK_IPS?.split(',') || [];
+    return calendlyIPs.includes(req.ip);
+  },
+  keyGenerator: (req) => {
+    // Use a combination of IP and User-Agent for more granular rate limiting
+    return `${req.ip}-${req.get('User-Agent') || 'unknown'}`;
+  },
+  handler: (req, res) => {
+    const trackingId = generateTrackingId();
+    logger.logSecurityEvent('rate_limit_exceeded', 'warn', {
+      trackingId,
+      ip: req.ip,
+      userAgent: req.get('User-Agent'),
+      path: req.path
+    });
+    res.status(429).json({
+      error: 'Too many requests',
+      code: 'RATE_LIMIT_EXCEEDED',
+      trackingId
+    });
+  }
+});
+
+// Stricter rate limiting for test endpoints
+const testRateLimit = rateLimit({
+  windowMs: 5 * 60 * 1000, // 5 minutes
+  max: 10, // Limit each IP to 10 test requests per 5 minutes
+  message: {
+    error: 'Too many test requests from this IP, please try again later.',
+    code: 'TEST_RATE_LIMIT_EXCEEDED'
+  },
+  standardHeaders: true,
+  legacyHeaders: false
+});
 
 /**
  * Calendly webhook event handler
  * POST /webhook/calendly
  */
-router.post('/', express.raw({ type: 'application/json' }), async (req, res) => {
+router.post('/', 
+  ipWhitelist,
+  validateRequest,
+  webhookRateLimit, 
+  express.raw({ type: 'application/json', limit: '1mb' }), 
+  async (req, res) => {
   const signature = req.get('Calendly-Webhook-Signature');
   const body = req.body;
   const trackingId = generateTrackingId();
 
-  logger.logRequest(req, { trackingId, hasSignature: !!signature });
+  const startTime = Date.now();
+  
+  logger.logWebhookProcessing(trackingId, 'unknown', 'received', {
+    hasSignature: !!signature,
+    bodyLength: body?.length || 0,
+    userAgent: req.get('User-Agent'),
+    ip: req.ip
+  });
 
   try {
-    // Verify the webhook signature if secret is configured
-    if (calendlyConfig.webhookSecret) {
-      if (!verifyCalendlySignature(body, signature, calendlyConfig.webhookSecret)) {
-        logger.warn('Calendly webhook signature verification failed', {
-          trackingId,
-          signature: signature ? 'provided' : 'missing'
-        });
-        return res.sendStatus(401);
-      }
-      logger.info('Calendly webhook signature verified', { trackingId });
-    } else {
-      logger.warn('Calendly webhook secret not configured, skipping signature verification', {
-        trackingId
+    // Enhanced webhook verification with additional security checks
+    const verificationResult = enhancedWebhookVerification(req, calendlyConfig.webhookSecret, trackingId);
+    
+    if (!verificationResult.isValid) {
+      logger.warn('Calendly webhook verification failed', {
+        trackingId,
+        errors: verificationResult.errors,
+        warnings: verificationResult.warnings
+      });
+      return res.status(401).json({
+        error: 'Webhook verification failed',
+        details: verificationResult.errors
       });
     }
+
+    // Log any warnings from verification
+    if (verificationResult.warnings.length > 0) {
+      logger.warn('Calendly webhook verification warnings', {
+        trackingId,
+        warnings: verificationResult.warnings
+      });
+    }
+
+    logger.logWebhookProcessing(trackingId, webhookData.event, 'verification_success', {
+      inviteeEmail: webhookData.payload?.invitee?.email ? 'present' : 'missing'
+    });
 
     // Parse the webhook payload
     let webhookData;
@@ -55,8 +218,20 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
 
     // Process the webhook event
     try {
-      await processCalendlyEvent(webhookData, trackingId);
-      logger.logLeadProcessing(trackingId, 'calendly_processing_completed');
+      const results = await processCalendlyEvent(webhookData, trackingId);
+      const processingTime = Date.now() - startTime;
+      
+      logger.logWebhookProcessing(trackingId, results.event, 'processing_completed', {
+        processed: results.processed,
+        leadUpdated: results.leadUpdated,
+        meetingCreated: results.meetingCreated,
+        meetingUpdated: results.meetingUpdated
+      });
+      
+      logger.logPerformance('webhook_processing', processingTime, {
+        trackingId,
+        event: results.event
+      });
     } catch (processingError) {
       logger.logError(processingError, {
         context: 'calendly_event_processing',
@@ -85,8 +260,12 @@ router.post('/', express.raw({ type: 'application/json' }), async (req, res) => 
  * Test endpoint for manual Calendly event processing
  * POST /webhook/calendly/test
  */
-router.post('/test', express.json(), async (req, res) => {
-  const { eventData } = req.body;
+router.post('/test', 
+  validateRequest,
+  testRateLimit, 
+  requestSizeLimit, 
+  async (req, res) => {
+  const { eventData, skipAuth } = req.body;
   const trackingId = generateTrackingId();
 
   if (!eventData) {
@@ -95,9 +274,21 @@ router.post('/test', express.json(), async (req, res) => {
     });
   }
 
+  // Validate API token unless explicitly skipped
+  if (!skipAuth && calendlyConfig.apiToken) {
+    const tokenValid = await verifyCalendlyApiToken(calendlyConfig.apiToken, trackingId);
+    if (!tokenValid) {
+      return res.status(401).json({
+        error: 'Invalid Calendly API token',
+        trackingId
+      });
+    }
+  }
+
   logger.info('Manual Calendly event processing test initiated', {
     trackingId,
-    event: eventData.event
+    event: eventData.event,
+    authSkipped: !!skipAuth
   });
 
   try {
@@ -107,7 +298,10 @@ router.post('/test', express.json(), async (req, res) => {
       success: true,
       trackingId,
       event: eventData.event,
-      result
+      result,
+      authentication: {
+        apiTokenValidated: !skipAuth && !!calendlyConfig.apiToken
+      }
     });
 
   } catch (error) {
@@ -130,16 +324,46 @@ router.post('/test', express.json(), async (req, res) => {
  * Health check endpoint for Calendly webhook
  * GET /webhook/calendly/health
  */
-router.get('/health', (req, res) => {
-  res.json({
+router.get('/health', validateRequest, async (req, res) => {
+  const trackingId = generateTrackingId();
+  
+  const healthStatus = {
     status: 'ok',
     service: 'calendly-webhook',
     timestamp: new Date().toISOString(),
     configuration: {
       webhookSecretConfigured: !!calendlyConfig.webhookSecret,
       apiTokenConfigured: !!calendlyConfig.apiToken
+    },
+    authentication: {
+      webhookSecretValid: !!calendlyConfig.webhookSecret,
+      apiTokenValid: false
     }
-  });
+  };
+
+  // Test API token if configured
+  if (calendlyConfig.apiToken) {
+    try {
+      healthStatus.authentication.apiTokenValid = await verifyCalendlyApiToken(
+        calendlyConfig.apiToken, 
+        trackingId
+      );
+    } catch (error) {
+      logger.error('Error testing Calendly API token in health check', {
+        trackingId,
+        error: error.message
+      });
+      healthStatus.authentication.apiTokenValid = false;
+    }
+  }
+
+  // Set overall status based on authentication
+  if (!healthStatus.authentication.webhookSecretValid || !healthStatus.authentication.apiTokenValid) {
+    healthStatus.status = 'degraded';
+  }
+
+  const statusCode = healthStatus.status === 'ok' ? 200 : 503;
+  res.status(statusCode).json(healthStatus);
 });
 
 export default router;
