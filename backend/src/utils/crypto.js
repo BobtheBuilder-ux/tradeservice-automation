@@ -14,15 +14,30 @@ export function verifyCalendlySignature(payload, signature, webhookSecret) {
     return false;
   }
 
+  // Convert payload to string if it's a Buffer or Object
+  let payloadString;
+  if (Buffer.isBuffer(payload)) {
+    payloadString = payload.toString('utf8');
+  } else if (typeof payload === 'object') {
+    payloadString = JSON.stringify(payload);
+  } else {
+    payloadString = payload;
+  }
+
   const expectedSignature = crypto
     .createHmac('sha256', webhookSecret)
-    .update(payload, 'utf8')
+    .update(payloadString, 'utf8')
     .digest('base64');
 
-  return crypto.timingSafeEqual(
-    Buffer.from(expectedSignature),
-    Buffer.from(signature)
-  );
+  // Ensure both buffers have the same length for comparison
+  const expectedBuffer = Buffer.from(expectedSignature);
+  const signatureBuffer = Buffer.from(signature);
+  
+  if (expectedBuffer.length !== signatureBuffer.length) {
+    return false;
+  }
+  
+  return crypto.timingSafeEqual(expectedBuffer, signatureBuffer);
 }
 
 /**

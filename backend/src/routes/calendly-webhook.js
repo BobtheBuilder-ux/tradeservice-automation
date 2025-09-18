@@ -102,7 +102,7 @@ router.post('/',
 
   try {
     // Enhanced webhook verification with additional security checks
-    const verificationResult = enhancedWebhookVerification(req, calendlyConfig.webhookSecret, trackingId);
+    const verificationResult = enhancedWebhookVerification(req, calendlyConfig.webhookSigningKey, trackingId);
     
     if (!verificationResult.isValid) {
       logger.warn('Calendly webhook verification failed', {
@@ -262,11 +262,11 @@ router.get('/health', validateRequest, async (req, res) => {
     service: 'calendly-webhook',
     timestamp: new Date().toISOString(),
     configuration: {
-      webhookSecretConfigured: !!calendlyConfig.webhookSecret,
+      webhookSigningKeyConfigured: !!calendlyConfig.webhookSigningKey,
       apiTokenConfigured: !!calendlyConfig.apiToken
     },
     authentication: {
-      webhookSecretValid: !!calendlyConfig.webhookSecret,
+      webhookSigningKeyValid: !!calendlyConfig.webhookSigningKey,
       apiTokenValid: false
     }
   };
@@ -288,7 +288,7 @@ router.get('/health', validateRequest, async (req, res) => {
   }
 
   // Set overall status based on authentication
-  if (!healthStatus.authentication.webhookSecretValid || !healthStatus.authentication.apiTokenValid) {
+  if (!healthStatus.authentication.webhookSigningKeyValid || !healthStatus.authentication.apiTokenValid) {
     healthStatus.status = 'degraded';
   }
 

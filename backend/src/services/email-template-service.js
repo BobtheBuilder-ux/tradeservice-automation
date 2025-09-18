@@ -594,7 +594,7 @@ class EmailTemplateService {
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}" 
+          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&trackingId=${trackingId}" 
              style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -665,7 +665,7 @@ Tracking ID: ${trackingId}
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}}" 
+          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&trackingId=${trackingId}}" 
              style="background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -751,7 +751,7 @@ Tracking ID: ${trackingId}
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}}" 
+          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&trackingId=${trackingId}}" 
              style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -812,7 +812,7 @@ We'd love to schedule a personalized consultation to discuss:
 - Next steps for getting started
 - Any questions you might have
 
-Schedule your appointment here: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}}
+Schedule your appointment here: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&trackingId=${trackingId}}
 
 What to expect:
 - Duration: 30-45 minutes
@@ -848,7 +848,7 @@ Tracking ID: ${trackingId}
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}" 
+          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&trackingId=${trackingId}" 
              style="background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%); 
                     color: white; 
                     padding: 18px 35px; 
