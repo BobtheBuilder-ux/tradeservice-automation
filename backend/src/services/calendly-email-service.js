@@ -580,7 +580,7 @@ Tracking ID: ${trackingId}
           </div>
           
           <div style="text-align: center; margin: 40px 0;">
-            <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}" 
+            <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&email=${encodeURIComponent(email)}&trackingId=${trackingId}" 
                style="background: linear-gradient(135deg, ${config.color} 0%, ${config.urgency === 'urgent' ? '#c0392b' : '#764ba2'} 100%); 
                       color: white; 
                       padding: 18px 35px; 

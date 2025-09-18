@@ -35,7 +35,7 @@ class EmailTemplateService {
 
       const subject = `Schedule Your Consultation - ${leadData.full_name || 'Valued Lead'}`;
       
-      const html = this.generateAppointmentEmailTemplate(leadData, calendlyLink);
+      const html = this.generateAppointmentEmailTemplate(leadData, calendlyLink, trackingId);
       const text = this.generateAppointmentEmailText(leadData, calendlyLink, trackingId);
 
       const result = await this.queueEmail({
@@ -158,8 +158,8 @@ class EmailTemplateService {
 
       const config = reminderConfig[reminderType] || reminderConfig.first;
       
-      const html = this.generateSchedulingReminderTemplate(name, reminderType, trackingId);
-      const text = this.generateSchedulingReminderText(name, reminderType, trackingId);
+      const html = this.generateSchedulingReminderTemplate(name, email, reminderType, trackingId);
+      const text = this.generateSchedulingReminderText(name, email, reminderType, trackingId);
 
       const result = await this.queueEmail({
         to: email,
@@ -271,8 +271,8 @@ class EmailTemplateService {
       });
 
       const subject = `Welcome - Let's Schedule Your Call`;
-      const html = this.generateWelcomeEmailTemplate(name, metadata.trackingId);
-      const text = this.generateWelcomeEmailText(name, metadata.trackingId);
+      const html = this.generateWelcomeEmailTemplate(name, email, metadata.trackingId);
+      const text = this.generateWelcomeEmailText(name, email, metadata.trackingId);
 
       const result = await this.queueEmail({
         to: email,
@@ -571,7 +571,7 @@ class EmailTemplateService {
   }
 
   // Template generation methods
-  generateWelcomeEmailTemplate(name, trackingId) {
+  generateWelcomeEmailTemplate(name, email, trackingId) {
     return `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         <div style="text-align: center; margin-bottom: 30px;">
@@ -594,7 +594,7 @@ class EmailTemplateService {
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&trackingId=${trackingId}" 
+          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&email=${encodeURIComponent(email)}&trackingId=${trackingId}" 
              style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -616,7 +616,7 @@ class EmailTemplateService {
     `;
   }
 
-  generateWelcomeEmailText(name, trackingId) {
+  generateWelcomeEmailText(name, email, trackingId) {
     return `
 Welcome!
 
@@ -626,7 +626,7 @@ Welcome to our lead automation system! We're excited to help you achieve your go
 
 Our team will be in touch soon to schedule your free consultation.
 
-Schedule your call: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}
+Schedule your call: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&email=${encodeURIComponent(email)}&trackingId=${trackingId}
 
 What we'll discuss:
 - Your specific needs and objectives
@@ -665,7 +665,7 @@ Tracking ID: ${trackingId}
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&trackingId=${trackingId}}" 
+          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&email=${encodeURIComponent(leadData.email || '')}&trackingId=${trackingId}" 
              style="background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -706,7 +706,7 @@ Hi ${name}!
 
 It's time to take the next step! We're ready to schedule your personalized consultation.
 
-Schedule your call: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}
+Schedule your call: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}}
 
 What we'll cover:
 - Your current challenges and goals
@@ -751,7 +751,7 @@ Tracking ID: ${trackingId}
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&trackingId=${trackingId}}" 
+          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&email=${encodeURIComponent(leadData.email || '')}&trackingId=${trackingId}" 
              style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -812,7 +812,7 @@ We'd love to schedule a personalized consultation to discuss:
 - Next steps for getting started
 - Any questions you might have
 
-Schedule your appointment here: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&trackingId=${trackingId}
+Schedule your appointment here: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&trackingId=${trackingId}}
 
 What to expect:
 - Duration: 30-45 minutes
@@ -848,7 +848,7 @@ Tracking ID: ${trackingId}
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&trackingId=${trackingId}" 
+          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&email=${encodeURIComponent(leadData.email || '')}&trackingId=${trackingId}" 
              style="background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -893,7 +893,7 @@ Tracking ID: ${trackingId}
     `;
   }
 
-  generateSchedulingReminderTemplate(name, reminderType, trackingId) {
+  generateSchedulingReminderTemplate(name, email, reminderType, trackingId) {
     const reminderConfig = {
       first: {
         urgency: 'gentle',
@@ -935,7 +935,7 @@ Tracking ID: ${trackingId}
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}" 
+          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&email=${encodeURIComponent(email)}&trackingId=${trackingId}" 
              style="background: linear-gradient(135deg, ${config.color} 0%, ${config.urgency === 'urgent' ? '#c0392b' : '#764ba2'} 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -958,7 +958,7 @@ Tracking ID: ${trackingId}
     `;
   }
 
-  generateSchedulingReminderText(name, reminderType, trackingId) {
+  generateSchedulingReminderText(name, email, reminderType, trackingId) {
     return `
 ${reminderType === 'final' ? 'FINAL REMINDER' : 'Friendly Reminder'}
 
@@ -968,7 +968,7 @@ ${reminderType === 'final' ?
   'This is your final reminder - don\'t miss out on this valuable opportunity!' :
   'We noticed you haven\'t scheduled your free consultation yet.'}
 
-Schedule now: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}
+Schedule now: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&email=${encodeURIComponent(email)}&trackingId=${trackingId}
 
 ${reminderType === 'final' ? 'Limited availability - Schedule before we\'re fully booked!' : ''}
 
