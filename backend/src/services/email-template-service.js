@@ -706,7 +706,7 @@ Hi ${name}!
 
 It's time to take the next step! We're ready to schedule your personalized consultation.
 
-Schedule your call: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}}
+Schedule your call: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}
 
 What we'll cover:
 - Your current challenges and goals
@@ -812,7 +812,7 @@ We'd love to schedule a personalized consultation to discuss:
 - Next steps for getting started
 - Any questions you might have
 
-Schedule your appointment here: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&trackingId=${trackingId}}
+Schedule your appointment here: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(leadData.full_name || leadData.first_name || 'Guest')}&trackingId=${trackingId}
 
 What to expect:
 - Duration: 30-45 minutes
