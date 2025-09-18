@@ -419,9 +419,68 @@ async function handleInviteeCreated(payload, trackingId, results) {
         inviteeEmail: invitee.email ? hashForLogging(invitee.email) : '[MISSING]'
       });
       
-      // Optionally create a new lead record for the scheduled meeting
-      await createLeadFromCalendlyEvent(payload, trackingId);
+      // Create a new lead record for the scheduled meeting
+      const newLead = await createLeadFromCalendlyEvent(payload, trackingId);
       results.leadUpdated = true;
+      
+      // Create meeting record for the new lead
+      const meetingData = {
+        uri: event.uri,
+        name: payload.event_type?.name || 'Consultation Meeting',
+        description: payload.event_type?.description || '',
+        start_time: event.start_time,
+        end_time: event.end_time,
+        timezone: invitee.timezone || 'UTC',
+        location: event.location || {},
+        event_type: payload.event_type,
+        invitee: {
+          ...invitee,
+          uri: invitee.uri || `${event.uri}/invitees/${invitee.email ? hashForLogging(invitee.email) : 'unknown'}`
+        }
+      };
+      
+      const meeting = await meetingService.createMeeting(meetingData, newLead.id, trackingId);
+      results.meetingCreated = true;
+      
+      // Send meeting confirmation email
+      try {
+        logger.info('Sending meeting confirmation email for new lead', {
+          trackingId,
+          leadId: newLead.id,
+          email: hashForLogging(invitee.email)
+        });
+        
+        await EmailService.sendMeetingConfirmationEmail(
+          invitee.email,
+          invitee.name || `${invitee.first_name || ''} ${invitee.last_name || ''}`.trim(),
+          {
+            title: payload.event_type?.name || 'Consultation Meeting',
+            startTime: event.start_time,
+            endTime: event.end_time,
+            location: Array.isArray(event.location) ? event.location.join(', ') : 
+                     (typeof event.location === 'object' ? event.location.location || JSON.stringify(event.location) : event.location) || 'Online Meeting'
+          }
+        );
+        
+        logger.info('Meeting confirmation email sent successfully for new lead', {
+          trackingId,
+          leadId: newLead.id
+        });
+      } catch (emailError) {
+        logger.warn('Failed to send meeting confirmation email for new lead', {
+          trackingId,
+          leadId: newLead.id,
+          error: emailError.message
+        });
+        // Don't fail the entire process if email fails
+      }
+      
+      logger.logLeadProcessing(trackingId, 'new_lead_created_with_meeting', {
+        leadId: newLead.id,
+        meetingId: meeting.id,
+        scheduledAt: event.start_time
+      });
+      
       return true;
     }
 
