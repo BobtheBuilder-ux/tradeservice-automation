@@ -24,20 +24,22 @@ export function verifyCalendlySignature(payload, signature, webhookSecret) {
     payloadString = payload;
   }
 
+  // Calendly uses hex format for signatures, not base64
   const expectedSignature = crypto
     .createHmac('sha256', webhookSecret)
     .update(payloadString, 'utf8')
-    .digest('base64');
+    .digest('hex');
 
-  // Ensure both buffers have the same length for comparison
-  const expectedBuffer = Buffer.from(expectedSignature);
-  const signatureBuffer = Buffer.from(signature);
-  
-  if (expectedBuffer.length !== signatureBuffer.length) {
+  // Compare signatures using timing-safe comparison
+  try {
+    return crypto.timingSafeEqual(
+      Buffer.from(expectedSignature, 'hex'),
+      Buffer.from(signature, 'hex')
+    );
+  } catch (error) {
+    // If signature format is invalid, return false
     return false;
   }
-  
-  return crypto.timingSafeEqual(expectedBuffer, signatureBuffer);
 }
 
 /**
@@ -111,7 +113,7 @@ export function enhancedWebhookVerification(req, webhookSecret, trackingId) {
   const signature = req.get('Calendly-Webhook-Signature');
   const timestamp = req.get('Calendly-Webhook-Timestamp');
   const userAgent = req.get('User-Agent');
-  const body = req.body;
+  const body = req.rawBody || req.body;
 
   const result = {
     isValid: false,

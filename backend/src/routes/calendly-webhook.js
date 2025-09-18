@@ -83,26 +83,62 @@ const router = express.Router();
  * Calendly webhook event handler
  * POST /webhook/calendly
  */
+// Custom middleware to capture raw body for signature verification
+const captureRawBody = (req, res, next) => {
+  let data = '';
+  req.setEncoding('utf8');
+  req.on('data', chunk => {
+    data += chunk;
+  });
+  req.on('end', () => {
+    req.rawBody = data;
+    try {
+      req.body = JSON.parse(data);
+    } catch (err) {
+      req.body = {};
+    }
+    next();
+  });
+};
+
 router.post('/', 
   validateRequest,
-  express.raw({ type: 'application/json', limit: '1mb' }), 
+  captureRawBody,
   async (req, res) => {
   const signature = req.get('Calendly-Webhook-Signature');
-  const body = req.body;
+  const rawBody = req.rawBody;
   const trackingId = generateTrackingId();
 
   const startTime = Date.now();
   
   logger.logWebhookProcessing(trackingId, 'unknown', 'received', {
     hasSignature: !!signature,
-    bodyLength: body?.length || 0,
+    bodyLength: rawBody?.length || 0,
     userAgent: req.get('User-Agent'),
     ip: req.ip
   });
 
   try {
+    // Parse the webhook payload first
+    let webhookData;
+    try {
+      webhookData = req.body;
+      if (!webhookData || Object.keys(webhookData).length === 0) {
+        throw new Error('Empty or invalid JSON payload');
+      }
+    } catch (parseError) {
+      logger.error('Failed to parse Calendly webhook payload', {
+        trackingId,
+        error: parseError.message,
+        rawBody: rawBody?.substring(0, 200) // Log first 200 chars for debugging
+      });
+      return res.sendStatus(400);
+    }
+
     // Enhanced webhook verification with additional security checks
-    const verificationResult = enhancedWebhookVerification(req, calendlyConfig.webhookSigningKey, trackingId);
+    // Use webhookSigningKey for signature verification (not webhookSecret)
+    const signingKey = calendlyConfig.webhookSigningKey || calendlyConfig.webhookSecret;
+    const verificationResult = enhancedWebhookVerification(req, signingKey, trackingId);
     
     if (!verificationResult.isValid) {
       logger.warn('Calendly webhook verification failed', {
@@ -127,18 +163,6 @@ router.post('/',
     logger.logWebhookProcessing(trackingId, webhookData.event, 'verification_success', {
       inviteeEmail: webhookData.payload?.invitee?.email ? 'present' : 'missing'
     });
-
-    // Parse the webhook payload
-    let webhookData;
-    try {
-      webhookData = JSON.parse(body.toString());
-    } catch (parseError) {
-      logger.error('Failed to parse Calendly webhook payload', {
-        trackingId,
-        error: parseError.message
-      });
-      return res.sendStatus(400);
-    }
 
     logger.info('Calendly webhook payload received', {
       trackingId,
