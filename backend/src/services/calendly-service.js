@@ -205,7 +205,7 @@ async function performDataConsistencyChecks(payload, results, trackingId) {
       const existingMeeting = await db
         .select({ id: meetings.id, status: meetings.status })
         .from(meetings)
-        .where(eq(meetings.calendly_event_id, eventId))
+        .where(eq(meetings.calendlyEventId, eventId))
         .limit(1);
         
       results.dataConsistencyChecks.meetingExists = existingMeeting.length > 0;
@@ -258,7 +258,7 @@ async function validatePostProcessingState(payload, results, trackingId) {
       const meeting = await db
         .select({ id: meetings.id })
         .from(meetings)
-        .where(eq(meetings.calendly_event_id, eventId))
+        .where(eq(meetings.calendlyEventId, eventId))
         .limit(1);
         
       if (meeting.length === 0) {
@@ -310,6 +310,30 @@ async function handleInviteeCreated(payload, trackingId, results) {
         return true;
       }
 
+      // Ensure invitee.uri is available - fetch if missing
+      let inviteeUri = invitee.uri;
+      if (!inviteeUri && event.uri) {
+        try {
+          // Extract event ID from event URI and construct invitee URI
+          const eventId = event.uri.split('/').pop();
+          // For now, we'll use the event URI as fallback since we don't have the actual invitee URI
+          // In a real implementation, you would call Calendly API to get the invitee details
+          inviteeUri = `${event.uri}/invitees/${invitee.email ? hashForLogging(invitee.email) : 'unknown'}`;
+          
+          logger.info('Generated fallback invitee URI', {
+            trackingId,
+            eventUri: event.uri,
+            generatedInviteeUri: inviteeUri
+          });
+        } catch (error) {
+          logger.warn('Failed to generate invitee URI', {
+            trackingId,
+            error: error.message,
+            eventUri: event.uri
+          });
+        }
+      }
+
       // Create meeting record in the new meetings table
       const meetingData = {
         uri: event.uri,
@@ -318,7 +342,12 @@ async function handleInviteeCreated(payload, trackingId, results) {
         start_time: event.start_time,
         end_time: event.end_time,
         timezone: invitee.timezone || 'UTC',
-        location: event.location || {}
+        location: event.location || {},
+        event_type: payload.event_type,
+        invitee: {
+          ...invitee,
+          uri: inviteeUri
+        }
       };
       
       const meeting = await meetingService.createMeeting(meetingData, lead.id, trackingId);
@@ -328,7 +357,7 @@ async function handleInviteeCreated(payload, trackingId, results) {
       await updateLeadWithCalendlyData(lead.id, {
         status: 'scheduled',
         calendly_event_uri: event.uri,
-        calendly_invitee_uri: invitee.uri,
+        calendly_invitee_uri: inviteeUri,
         scheduled_at: event.start_time,
         meeting_end_time: event.end_time,
         meeting_location: Array.isArray(event.location) ? event.location.join(', ') : 
