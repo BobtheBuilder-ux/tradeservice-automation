@@ -199,6 +199,26 @@ class MeetingService {
         startTime: meetingData.start_time
       });
 
+      // Fetch lead data to populate attendee fields
+      const [leadData] = await tx
+        .select({
+          email: leads.email,
+          firstName: leads.firstName,
+          lastName: leads.lastName,
+          fullName: leads.fullName,
+          phone: leads.phone
+        })
+        .from(leads)
+        .where(eq(leads.id, leadId))
+        .limit(1);
+
+      if (!leadData) {
+        throw new Error(`Lead not found with ID: ${leadId}`);
+      }
+
+      // Use firstName/lastName if available, otherwise use fullName
+      const attendeeName = [leadData.firstName, leadData.lastName].filter(Boolean).join(' ') || leadData.fullName || null;
+      
       // Extract Calendly event ID from URI
       const calendlyEventId = meetingData.uri ? meetingData.uri.split('/').pop() : null;
       
@@ -239,9 +259,9 @@ class MeetingService {
         meetingUrl: meetingData.location?.join_url || null,
         location: Array.isArray(meetingData.location) ? meetingData.location.join(', ') : 
                  (typeof meetingData.location === 'object' ? meetingData.location.location : meetingData.location) || 'Online',
-        attendeeEmail: meetingData.invitee?.email || null,
-        attendeeName: meetingData.invitee?.name || null,
-        attendeePhone: meetingData.invitee?.phone || null,
+        attendeeEmail: leadData.email,
+        attendeeName: attendeeName,
+        attendeePhone: leadData.phone,
         metadata: {
           calendly_event_uri: meetingData.uri,
           calendly_invitee_uri: meetingData.invitee?.uri,
