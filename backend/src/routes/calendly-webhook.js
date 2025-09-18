@@ -119,13 +119,62 @@ router.post('/',
   });
 
   try {
-    // Parse the webhook payload first
+    // Parse and normalize the webhook payload to handle both test and real Calendly formats
     let webhookData;
     try {
-      webhookData = req.body;
-      if (!webhookData || Object.keys(webhookData).length === 0) {
+      const raw = req.body;
+      
+      // Log the raw payload for debugging
+      logger.info('📥 Raw Calendly Payload:', {
+        trackingId,
+        payload: JSON.stringify(raw, null, 2)
+      });
+      
+      if (!raw || Object.keys(raw).length === 0) {
         throw new Error('Empty or invalid JSON payload');
       }
+      
+      // 🔧 Normalize payload format - support both test format and real Calendly format
+      const payload = 
+        raw?.eventData?.payload ||  // <-- Test curl format (eventData wrapper)
+        raw?.payload ||             // <-- Real Calendly webhook format
+        null;
+      
+      const event = 
+        raw?.eventData?.event ||    // <-- Test format event field
+        raw?.event ||               // <-- Real Calendly format event field
+        null;
+      
+      if (!payload || !payload.event || !payload.invitee) {
+        logger.error('❌ Invalid Calendly payload structure received:', {
+          trackingId,
+          hasPayload: !!payload,
+          hasEvent: !!(payload?.event),
+          hasInvitee: !!(payload?.invitee),
+          rawStructure: Object.keys(raw)
+        });
+        return res.status(400).json({ 
+          success: false, 
+          error: 'invalid_payload',
+          trackingId
+        });
+      }
+      
+      // Construct normalized webhook data
+      webhookData = {
+        event: event || payload.event?.uri?.includes('invitee') ? 'invitee.created' : 'unknown',
+        time: raw.time || new Date().toISOString(),
+        payload: payload
+      };
+      
+      logger.info('✅ Normalized webhook payload:', {
+        trackingId,
+        originalFormat: raw?.eventData ? 'test_format' : 'calendly_format',
+        event: webhookData.event,
+        hasInvitee: !!webhookData.payload.invitee,
+        hasEvent: !!webhookData.payload.event
+      });
+      
     } catch (parseError) {
       logger.error('Failed to parse Calendly webhook payload', {
         trackingId,
