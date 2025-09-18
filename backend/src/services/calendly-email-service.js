@@ -6,6 +6,16 @@ import { hashForLogging } from '../utils/crypto.js';
  * Service for sending Calendly appointment scheduling emails to leads
  */
 class CalendlyEmailService {
+  // Generate redirect link with tracking parameters
+  generateCalendlyRedirectLink(leadData, trackingId) {
+    const params = new URLSearchParams({
+      name: leadData?.name || leadData?.firstName || '',
+      email: leadData?.email || '',
+      trackingId: trackingId || ''
+    });
+    
+    return `${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?${params.toString()}`;
+  }
   /**
    * Send appointment scheduling email to a lead
    * @param {Object} leadData - Lead information
@@ -437,7 +447,7 @@ Tracking ID: ${trackingId}
           </div>
           
           <div style="text-align: center; margin: 40px 0;">
-            <a href="${process.env.CALENDLY_LINK || '#'}" 
+            <a href="${this.generateCalendlyRedirectLink({name, email: leadData?.email}, trackingId)}" 
                style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                       color: white; 
                       padding: 18px 35px; 
@@ -474,7 +484,7 @@ Hello ${name}!
 
 Thank you for your interest in our services. We'd love to schedule a personalized consultation with you.
 
-Schedule your appointment here: ${process.env.CALENDLY_LINK || 'Contact us for scheduling'}
+Schedule your appointment here: ${this.generateCalendlyRedirectLink({name, email: leadData?.email}, trackingId)}
 
 What to expect:
 - Duration: 30-45 minutes
@@ -570,7 +580,7 @@ Tracking ID: ${trackingId}
           </div>
           
           <div style="text-align: center; margin: 40px 0;">
-            <a href="${process.env.CALENDLY_LINK || '#'}" 
+            <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}" 
                style="background: linear-gradient(135deg, ${config.color} 0%, ${config.urgency === 'urgent' ? '#c0392b' : '#764ba2'} 100%); 
                       color: white; 
                       padding: 18px 35px; 
@@ -601,7 +611,7 @@ ${reminderType === 'final' ?
   'This is your final reminder - don\'t miss out on this valuable opportunity!' :
   'We noticed you haven\'t scheduled your free consultation yet.'}
 
-Schedule now: ${process.env.CALENDLY_LINK || 'Contact us for scheduling'}
+Schedule now: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}
 
 ${reminderType === 'final' ? 'Limited availability - Schedule before we\'re fully booked!' : ''}
 

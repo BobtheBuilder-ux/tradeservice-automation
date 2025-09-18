@@ -25,6 +25,8 @@ import hubspotPollingService from './src/services/hubspot-polling-service.js';
 import emailQueueProcessor from './src/services/email-queue-processor.js';
 import followUpAutomationService from './src/services/follow-up-automation-service.js';
 import automatedEmailWorkflowService from './src/services/automated-email-workflow-service.js';
+import { calendlyConfig, db } from './src/config/index.js';
+import { leadProcessingLogs } from './src/db/schema.js';
 import logger from './utils/logger.js';
 
 // Load environment variables
@@ -119,6 +121,72 @@ app.use('/webhook/calendly', calendlyWebhookRoutes);
 app.use('/webhook/zapier', zapierWebhookRoutes);
 app.use('/webhook/n8n', n8nWebhookRoutes);
 app.use('/health', healthRoutes);
+
+// Calendly booking redirect route
+app.get('/book-now', async (req, res) => {
+  const { name, email, trackingId } = req.query;
+  const calendlyLink = calendlyConfig.schedulingUrl;
+  
+  if (!calendlyLink) {
+    logWithTimestamp('error', '❌ Calendly scheduling URL not configured');
+    return res.status(500).json({ error: 'Calendly scheduling URL not configured' });
+  }
+  
+  // Log click event to database if trackingId is provided
+  if (trackingId) {
+    try {
+      await db.insert(leadProcessingLogs).values({
+        trackingId,
+        eventType: 'calendly_link_clicked',
+        eventData: {
+          email: email || null,
+          name: name || null,
+          ip: req.ip,
+          userAgent: req.get('User-Agent'),
+          timestamp: new Date().toISOString()
+        },
+        success: true
+      });
+      
+      // Set tracking cookie with 7-day expiration
+      res.cookie('calendly_tracking_id', trackingId, {
+        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in milliseconds
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax'
+      });
+      
+      logWithTimestamp('info', '✅ Click event logged successfully', {
+        trackingId,
+        email: email || 'not provided',
+        name: name || 'not provided'
+      });
+    } catch (error) {
+      logWithTimestamp('error', '❌ Error logging click event', {
+        trackingId,
+        error: error.message
+      });
+    }
+  }
+  
+  // Extract query parameters for prefilling
+  const params = new URLSearchParams({
+    name: name || '',
+    email: email || ''
+  });
+  
+  const redirectUrl = `${calendlyLink}?${params.toString()}`;
+  
+  logWithTimestamp('info', `🔗 Redirecting to Calendly: ${redirectUrl}`, {
+    name: name || 'not provided',
+    email: email || 'not provided',
+    trackingId: trackingId || 'not provided',
+    ip: req.ip,
+    userAgent: req.get('User-Agent')
+  });
+  
+  res.redirect(redirectUrl);
+});
 
 // Workflow Management Routes
 app.post('/api/workflow/init/:leadId', async (req, res) => {

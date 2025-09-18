@@ -12,7 +12,7 @@ Add these to your `.env` file:
 # Calendly Configuration
 CALENDLY_WEBHOOK_SECRET=your_calendly_webhook_secret_here
 CALENDLY_API_TOKEN=your_calendly_api_token_here
-CALENDLY_ALLOWED_IPS=calendly_ip1,calendly_ip2  # Optional: IP whitelist
+# CALENDLY_ALLOWED_IPS removed - no longer using IP whitelist
 
 # Database Configuration
 DATABASE_URL=your_supabase_database_url
@@ -60,7 +60,7 @@ npm install express-rate-limit
 POST /webhook/calendly
 ```
 - **Purpose**: Receives real Calendly webhook events
-- **Security**: Signature verification, rate limiting, IP whitelisting
+- **Security**: Signature verification, rate limiting
 - **Rate Limit**: 100 requests per 15 minutes per IP
 
 #### Test Endpoint
@@ -107,10 +107,10 @@ GET /webhook/calendly/health
 - **Test Endpoint**: 10 requests per 5 minutes per IP
 - **Bypass**: Calendly IPs automatically bypass rate limits
 
-### 2. IP Whitelisting
-- Configure `CALENDLY_ALLOWED_IPS` environment variable
-- Format: Comma-separated list of IP addresses
-- Example: `192.168.1.1,10.0.0.1`
+### 2. Request Validation
+- Content-Type validation for webhook requests
+- Required headers verification
+- Payload size limits (1MB)
 
 ### 3. Signature Verification
 - All webhook requests verified using Calendly signing key
@@ -272,7 +272,7 @@ CREATE TABLE meeting_reminders (
 ### 1. Environment Setup
 - Set `NODE_ENV=production`
 - Configure proper `CALENDLY_WEBHOOK_SECRET`
-- Set up IP whitelisting if needed
+- Configure request validation settings
 - Configure database connection
 
 ### 2. SSL/HTTPS
@@ -308,7 +308,7 @@ Ensure your webhook endpoint uses HTTPS in production:
 - **Verify**: Signature header is present
 
 #### 3. Rate Limiting Issues
-- **Check**: IP is not in whitelist when it should be
+- **Check**: Request headers and content type are valid
 - **Monitor**: Rate limiting logs for patterns
 - **Adjust**: Rate limits if legitimate traffic is blocked
 
@@ -350,4 +350,4 @@ For issues or questions:
 
 ---
 
-**Note**: This integration includes enterprise-level features like rate limiting, IP whitelisting, comprehensive logging, and transaction handling for production use.
+**Note**: This integration includes enterprise-level features like rate limiting, comprehensive logging, and transaction handling for production use.

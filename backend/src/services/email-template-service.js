@@ -8,6 +8,16 @@ import { emailQueue } from '../db/schema.js';
  * Integrates with the email_queue system for automated email processing
  */
 class EmailTemplateService {
+  // Generate redirect link with tracking parameters
+  generateCalendlyRedirectLink(leadData, trackingId) {
+    const params = new URLSearchParams({
+      name: leadData?.name || leadData?.firstName || '',
+      email: leadData?.email || '',
+      trackingId: trackingId || ''
+    });
+    
+    return `${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?${params.toString()}`;
+  }
   /**
    * Queue appointment scheduling email
    * @param {Object} leadData - Lead information
@@ -584,7 +594,7 @@ class EmailTemplateService {
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.CALENDLY_LINK || '#'}" 
+          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}" 
              style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -616,7 +626,7 @@ Welcome to our lead automation system! We're excited to help you achieve your go
 
 Our team will be in touch soon to schedule your free consultation.
 
-Schedule your call: ${process.env.CALENDLY_LINK || 'Contact us for scheduling'}
+Schedule your call: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}
 
 What we'll discuss:
 - Your specific needs and objectives
@@ -631,7 +641,8 @@ Tracking ID: ${trackingId}
     `;
   }
 
-  generateSchedulingEmailTemplate(name, trackingId) {
+  generateSchedulingEmailTemplate(name, trackingId, leadData = null) {
+    const bookingLink = leadData ? this.generateCalendlyRedirectLink(leadData, trackingId) : `${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}`;
     return `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         <div style="text-align: center; margin-bottom: 30px;">
@@ -654,7 +665,7 @@ Tracking ID: ${trackingId}
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.CALENDLY_LINK}" 
+          <a href="${bookingLink}" 
              style="background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -686,7 +697,8 @@ Tracking ID: ${trackingId}
     `;
   }
 
-  generateSchedulingEmailText(name, trackingId) {
+  generateSchedulingEmailText(name, trackingId, leadData = null) {
+    const bookingLink = leadData ? this.generateCalendlyRedirectLink(leadData, trackingId) : `${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}`;
     return `
 Ready to Schedule?
 
@@ -694,7 +706,7 @@ Hi ${name}!
 
 It's time to take the next step! We're ready to schedule your personalized consultation.
 
-Schedule your call: ${process.env.CALENDLY_LINK || 'Contact us for scheduling'}
+Schedule your call: ${bookingLink}
 
 What we'll cover:
 - Your current challenges and goals
@@ -715,7 +727,8 @@ Tracking ID: ${trackingId}
     `;
   }
 
-  generateAppointmentEmailTemplate(leadData, calendlyLink) {
+  generateAppointmentEmailTemplate(leadData, calendlyLink, trackingId) {
+    const bookingLink = this.generateCalendlyRedirectLink(leadData, trackingId);
     return `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         <div style="text-align: center; margin-bottom: 30px;">
@@ -738,7 +751,7 @@ Tracking ID: ${trackingId}
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.CALENDLY_LINK}" 
+          <a href="${bookingLink}" 
              style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -796,6 +809,7 @@ Tracking ID: ${trackingId}
   }
 
   generateAppointmentEmailText(leadData, calendlyLink, trackingId) {
+    const bookingLink = this.generateCalendlyRedirectLink(leadData, trackingId);
     return `
 Schedule Your Free Consultation
 
@@ -809,7 +823,7 @@ We'd love to schedule a personalized consultation to discuss:
 - Next steps for getting started
 - Any questions you might have
 
-Schedule your appointment here: ${process.env.CALENDLY_LINK}
+Schedule your appointment here: ${bookingLink}
 
 What to expect:
 - Duration: 30-45 minutes
@@ -829,6 +843,7 @@ Tracking ID: ${trackingId}
   }
 
   generateFollowUpEmailTemplate(leadData, calendlyLink, trackingId) {
+    const bookingLink = this.generateCalendlyRedirectLink(leadData, trackingId);
     return `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         <div style="text-align: center; margin-bottom: 30px;">
@@ -844,7 +859,7 @@ Tracking ID: ${trackingId}
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.CALENDLY_LINK}" 
+          <a href="${bookingLink}" 
              style="background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -872,14 +887,13 @@ Tracking ID: ${trackingId}
   }
 
   generateFollowUpEmailText(leadData, calendlyLink, trackingId) {
+    const bookingLink = this.generateCalendlyRedirectLink(leadData, trackingId);
     return `
-Don't Miss Your Opportunity!
-
-Hi ${leadData.full_name || 'there'},
+Hi ${leadData.name || leadData.firstName || 'there'},
 
 We noticed you haven't scheduled your free consultation yet. Don't miss out on this valuable opportunity!
 
-Schedule now: ${process.env.CALENDLY_LINK}
+Schedule now: ${bookingLink}
 
 Limited time: Schedule within 48 hours for a bonus strategy guide!
 
@@ -932,7 +946,7 @@ Tracking ID: ${trackingId}
         </div>
         
         <div style="text-align: center; margin: 40px 0;">
-          <a href="${process.env.CALENDLY_LINK || '#'}" 
+          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}" 
              style="background: linear-gradient(135deg, ${config.color} 0%, ${config.urgency === 'urgent' ? '#c0392b' : '#764ba2'} 100%); 
                     color: white; 
                     padding: 18px 35px; 
@@ -965,7 +979,7 @@ ${reminderType === 'final' ?
   'This is your final reminder - don\'t miss out on this valuable opportunity!' :
   'We noticed you haven\'t scheduled your free consultation yet.'}
 
-Schedule now: ${process.env.CALENDLY_LINK || 'Contact us for scheduling'}
+Schedule now: ${process.env.BACKEND_URL || 'http://localhost:3001'}/book-now?name=${encodeURIComponent(name)}&trackingId=${trackingId}
 
 ${reminderType === 'final' ? 'Limited availability - Schedule before we\'re fully booked!' : ''}
 

@@ -1,0 +1,375 @@
+
+Got it ✅ — you basically want to:
+
+* **Use your existing server webhook URL** as the entry point.
+* When a user clicks it, **redirect them straight to your Calendly scheduling page** (no custom UI).
+* Then, when they actually schedule/reschedule/cancel a meeting on Calendly, your **webhook handler** should receive the event and update your database.
+
+### **Step 1 – Redirect to Calendly Scheduling Page**
+
+In your Express route, instead of serving HTML or JSON, just send a `302 Redirect` to Calendly:
+
+```js
+// routes/booking.js
+import express from 'express';
+const router = express.Router();
+
+router.get('/book-now', (req, res) => {
+  // Your public Calendly scheduling link
+  const calendlyLink = '';
+  
+  // Optionally, pass prefill params (name, email)
+  const params = new URLSearchParams({
+    name: req.query.name || '',
+    email: req.query.email || ''
+  });
+
+  res.redirect(`${calendlyLink}?${params.toString()}`);
+});
+
+export default router;
+```
+
+This way, when users click your "Book Now" button, they hit your server → immediately redirected to Calendly → no extra page.
+
+---
+
+### **Step 2 – Register Calendly Webhook**
+
+You already have a webhook URL:
+``
+
+You just need to tell Calendly to send events to it.
+
+Run this **once** (can use Postman or cURL):
+
+```bash
+curl -X POST "" \
+  -H "Authorization: Bearer YOUR_PERSONAL_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "",
+    "events": [
+      "invitee.created",
+      "invitee.canceled"
+    ],
+    "organization": "",
+    "scope": "organization"
+  }'
+```
+
+✅ **After this step, Calendly will POST to your server every time a booking is created/canceled.**
+
+---
+
+### **Step 3 – Handle Webhook on Your Server**
+
+Your existing webhook route should parse the incoming payload and update your database:
+
+```js
+// routes/webhook.js
+import express from 'express';
+import { db } from '../config/index.js';
+import { meetings, leads } from '../db/schema.js';
+import { eq } from 'drizzle-orm';
+
+const router = express.Router();
+
+router.post('/calendly', express.json(), async (req, res) => {
+  try {
+    const event = req.body;
+
+    console.log('Calendly webhook received:', event);
+
+    if (event.event === 'invitee.created') {
+      const { email, name, start_time, end_time } = event.payload;
+      
+      // upsert lead + meeting
+      await db.insert(leads).values({
+        email,
+        fullName: name,
+        scheduledAt: new Date(start_time),
+        meetingEndTime: new Date(end_time),
+        status: 'scheduled',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }).onConflictDoUpdate({
+        target: leads.email,
+        set: { scheduledAt: new Date(start_time), meetingEndTime: new Date(end_time), updatedAt: new Date().toISOString() }
+      });
+
+    } else if (event.event === 'invitee.canceled') {
+      const { email } = event.payload;
+
+      await db.update(leads)
+        .set({ status: 'cancelled', updatedAt: new Date().toISOString() })
+        .where(eq(leads.email, email));
+    }
+
+    res.status(200).json({ received: true });
+  } catch (err) {
+    console.error('Error processing Calendly webhook:', err);
+    res.status(500).json({ error: 'Failed to process webhook' });
+  }
+});
+
+export default router;
+```
+
+---
+
+### **Step 4 – Keep It in the Same Page**
+
+If you want this Calendly experience to **open inside your page (not a new tab)** you can embed it using Calendly’s widget instead of redirecting:
+
+```html
+<!-- Put this in your frontend -->
+<div id="calendly-embed" style="min-width:320px;height:700px;"></div>
+<script src="" type="text/javascript"></script>
+<script type="text/javascript">
+  Calendly.initInlineWidget({
+    url: "",
+    parentElement: document.getElementById("calendly-embed"),
+    prefill: {
+      name: "John Doe",
+      email: "john@example.com"
+    }
+  });
+</script>
+```
+
+But since you said **no extra routing/page**, just use the **redirect approach** (Step 1).
+
+---
+
+✅ **Result:**
+
+* User clicks → your server → Calendly page opens
+* Calendly sends webhook → your backend updates DB
+* No custom scheduling UI needed
+
+---
+
+Do you want me to show you how to **test this flow locally** (simulate a Calendly webhook without waiting for a real booking)? That will save you time debugging.
+
+
+```js
+import nodemailer from "nodemailer";
+
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: process.env.SMTP_PORT,
+  secure: false, // true if using port 465
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+});
+
+// Function to generate the Calendly link with prefilled data
+const generateCalendlyRedirectLink = (lead) => {
+  const params = new URLSearchParams({
+    name: lead.name || "",
+    email: lead.email || "",
+  });
+
+  return `${process.env.BACKEND_URL}/book-now?${params.toString()}`;
+};
+
+// F';
+  const params = new URLSearchParams({
+    name: req.query.name || '',
+    email: req.query.email || '',
+  });
+
+  return res.redirect(`${calendlyLink}?${params.toString()}`);
+});
+```
+
+---
+
+### **Flow After This Change**
+
+✅ **Database Trigger** → calls `sendBookingEmail(lead)`
+✅ **Email Sent** → contains a prefilled Calendly link
+✅ **Lead Clicks Link** → instantly redirected to Calendly (with name/email filled)
+✅ **Calendly Webhook Fires** → `/webhook/calendly` updates your DB
+
+Ahh — got it now ✅
+So the **email itself** will contain a link, and when they click it:
+
+1. They should be taken **straight to the Calendly scheduling page** (no extra routing, no frontend page).
+2. After they schedule/cancel, your webhook listener should catch the event and update the database.
+
+Perfect — this is actually simpler. Here’s how to do it cleanly:
+
+---
+
+### **1️⃣ Generate a Direct Link for the Email**
+
+In your `email_service.js`, instead of sending users your `/webhook/calendly` endpoint, send them your **redirect endpoint** from Step 1 earlier:
+
+```js
+const generateCalendlyLink = (lead) => {
+  const calendlyLink = 'https://calendly.com/your-username/meeting-type';
+
+  // Optional prefill with their info
+  const params = new URLSearchParams({
+    name: lead.name || '',
+    email: lead.email || '',
+  });
+
+  return `${process.env.BACKEND_URL}/book-now?${params.toString()}`;
+};
+```
+
+This means when you send your email, the button will point to something like:
+
+```
+https://tradeservice-automation.onrender.com/book-now?name=John+Doe&email=john@example.com
+```
+
+---
+
+### **2️⃣ Redirect Endpoint in Your Backend**
+
+Add this to your Express app:
+
+```js
+app.get('/book-now', (req, res) => {
+  const calendlyLink = 'https://calendly.com/your-username/meeting-type';
+
+  const params = new URLSearchParams({
+    name: req.query.name || '',
+    email: req.query.email || ''
+  });
+
+  res.redirect(`${calendlyLink}?${params.toString()}`);
+});
+```
+
+✅ **Effect:**
+When they click the link in the email → your server receives it → immediately sends them to Calendly.
+
+---
+
+### **3️⃣ Webhook Listener (Already Working)**
+
+You keep your webhook route exactly as you have now:
+
+```js
+app.post('/webhook/calendly', express.json(), async (req, res) => {
+  const event = req.body;
+
+  if (event.event === 'invitee.created') {
+    // ✅ Update database with scheduledAt, meetingEndTime
+  } else if (event.event === 'invitee.canceled') {
+    // ✅ Mark as cancelled
+  }
+
+  res.status(200).json({ received: true });
+});
+```
+
+This way, once they complete the scheduling flow, Calendly **automatically POSTs to your webhook**, so you update your database in real-time.
+
+---
+
+### **4️⃣ No Extra Pages Needed**
+
+You don’t need to build a separate booking page or embed Calendly on your site.
+Just use the redirect route as the link in your emails, and Calendly handles the UI.
+
+---
+
+✅ **So the full flow is now:**
+
+**Email → Redirect Endpoint → Calendly Page → Webhook → Database Updated**
+
+Perfect ✅ — here’s how you can update your `email_service.js` so every email automatically includes the right Calendly link with prefilled name/email, and points to your `/book-now` redirect route.
+
+---
+
+### **Updated `email_service.js`**
+
+```js
+import nodemailer from "nodemailer";
+
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: process.env.SMTP_PORT,
+  secure: false, // true if using port 465
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+});
+
+// Function to generate the Calendly link with prefilled data
+const generateCalendlyRedirectLink = (lead) => {
+  const params = new URLSearchParams({
+    name: lead.name || "",
+    email: lead.email || "",
+  });
+
+  return `${process.env.BACKEND_URL}/book-now?${params.toString()}`;
+};
+
+// Function to send email
+export async function sendBookingEmail(lead) {
+  const bookingLink = generateCalendlyRedirectLink(lead);
+
+  const html = `
+    <h2>Hi ${lead.name || "there"},</h2>
+    <p>It's time to schedule your session!</p>
+    <p>Click the button below to pick a time that works for you:</p>
+    <p>
+      <a href="${bookingLink}" 
+         style="background-color:#4CAF50;color:white;padding:10px 20px;text-decoration:none;border-radius:5px;">
+        Schedule Now
+      </a>
+    </p>
+    <p>If you can't click the button, copy and paste this link into your browser:</p>
+    <p>${bookingLink}</p>
+  `;
+
+  await transporter.sendMail({
+    from: `"TradeService" <${process.env.SMTP_USER}>`,
+    to: lead.email,
+    subject: "Book Your Meeting",
+    html,
+  });
+}
+```
+
+---
+
+### **Backend Route for Redirect**
+
+Add this to your `server.js` (or wherever you define routes):
+
+```js
+app.get('/book-now', (req, res) => {
+  const calendlyLink = 'https://calendly.com/your-username/meeting-type';
+  const params = new URLSearchParams({
+    name: req.query.name || '',
+    email: req.query.email || '',
+  });
+
+  return res.redirect(`${calendlyLink}?${params.toString()}`);
+});
+```
+
+---
+
+### **Flow After This Change**
+
+✅ **Database Trigger** → calls `sendBookingEmail(lead)`
+✅ **Email Sent** → contains a prefilled Calendly link
+✅ **Lead Clicks Link** → instantly redirected to Calendly (with name/email filled)
+✅ **Calendly Webhook Fires** → `/webhook/calendly` updates your DB
+
+---
+
+This way, everything stays on your backend — no extra page, no frontend routing.
+Would you like me to also include **tracking logic** (e.g., saving in DB that they clicked the link before they even schedule)? This can help you see who clicked but didn’t finish booking.

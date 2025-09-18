@@ -11,7 +11,7 @@ This guide will help you obtain the missing Calendly configuration variables for
 ❌ **Missing Variables:**
 - `CALENDLY_WEBHOOK_SECRET`
 - `CALENDLY_API_TOKEN` 
-- `CALENDLY_ALLOWED_IPS`
+
 - `CALENDLY_WEBHOOK_SIGNING_KEY`
 
 ## How to Get Missing Variables
@@ -45,22 +45,15 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 
 **For now:** You can use the same value as `CALENDLY_PERSONAL_ACCESS_TOKEN` or leave as placeholder if only using webhooks.
 
-### 3. CALENDLY_ALLOWED_IPS
+### 3. Request Validation
 
-**What it is:** List of IP addresses that Calendly uses to send webhook requests.
+**What it is:** The webhook endpoint validates incoming requests for proper headers and content type.
 
-**Current Calendly IP ranges:**
-```
-54.84.12.0/24
-54.84.13.0/24
-54.173.12.0/24
-54.173.13.0/24
-```
-
-**Recommended value:**
-```
-CALENDLY_ALLOWED_IPS=54.84.12.0/24,54.84.13.0/24,54.173.12.0/24,54.173.13.0/24
-```
+**Security features:**
+- Content-Type validation for JSON requests
+- Required headers verification (User-Agent)
+- Payload size limits (1MB)
+- Signature verification for authenticity
 
 ### 4. CALENDLY_WEBHOOK_SIGNING_KEY
 
@@ -90,8 +83,7 @@ node scripts/list-calendly-webhooks.js
 # Navigate to backend directory
 cd /Users/Bobbieberry/automation/backend
 
-# Update .env file with Calendly IPs
-sed -i '' 's/CALENDLY_ALLOWED_IPS=calendly_ip1,calendly_ip2/CALENDLY_ALLOWED_IPS=54.84.12.0\/24,54.84.13.0\/24,54.173.12.0\/24,54.173.13.0\/24/' .env
+# No IP whitelist configuration needed - removed for security simplification
 ```
 
 ### Step 2: Generate webhook secret (if needed)
