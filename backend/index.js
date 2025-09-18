@@ -72,6 +72,14 @@ logWithTimestamp('info', '🚀 Email Queue Processor initialized');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Trust proxy for production deployment (Render, Heroku, etc.)
+// This allows express-rate-limit to properly identify users behind proxies
+if (process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1); // Trust first proxy
+} else {
+  app.set('trust proxy', false); // Don't trust proxy in development
+}
+
 // Middleware
 app.use(helmet());
 app.use(cors({
