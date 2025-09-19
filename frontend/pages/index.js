@@ -134,13 +134,13 @@ export default function Dashboard() {
     try {
       // Clear the auth token from localStorage
       localStorage.removeItem('auth_token');
-      // Redirect to login page
-      router.push('/login');
+      // Redirect to main page
+      router.push('/');
     } catch (err) {
       console.error('Logout error:', err);
       // Even if there's an error, clear token and redirect
       localStorage.removeItem('auth_token');
-      router.push('/login');
+      router.push('/');
     }
   };
 

@@ -2,9 +2,10 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { db } from '../config/index.js';
-import { agents, leads } from '../db/schema.js';
-import { eq, count, or, inArray } from 'drizzle-orm';
+import { agents, leads, meetings } from '../db/schema.js';
+import { eq, count, or, inArray, and, gte, desc } from 'drizzle-orm';
 import emailService from '../services/email-service.js';
+import meetingService from '../services/meeting-service.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -86,6 +87,7 @@ router.get('/agents', verifyAdmin, async (req, res) => {
       email: agents.email,
       role: agents.role,
       email_verified: agents.emailVerified,
+      is_active: agents.isActive,
       created_at: agents.createdAt,
       last_login: agents.lastLogin
     })
@@ -414,6 +416,66 @@ router.get('/stats', verifyAdmin, async (req, res) => {
   } catch (error) {
     console.error('Error in get stats route:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// MEETINGS MANAGEMENT ENDPOINTS
+
+// Get confirmed meetings
+router.get('/meetings', verifyAdmin, async (req, res) => {
+  try {
+    const { limit = 50, status = 'scheduled' } = req.query;
+    
+    const meetingsResult = await db
+      .select({
+        id: meetings.id,
+        title: meetings.title,
+        description: meetings.description,
+        startTime: meetings.startTime,
+        endTime: meetings.endTime,
+        timezone: meetings.timezone,
+        status: meetings.status,
+        meetingUrl: meetings.meetingUrl,
+        location: meetings.location,
+        attendeeEmail: meetings.attendeeEmail,
+        attendeeName: meetings.attendeeName,
+        attendeePhone: meetings.attendeePhone,
+        meetingType: meetings.meetingType,
+        createdAt: meetings.createdAt,
+        lead: {
+          id: leads.id,
+          email: leads.email,
+          fullName: leads.fullName,
+          firstName: leads.firstName,
+          lastName: leads.lastName,
+          assignedAgentId: leads.assignedAgentId
+        },
+        agent: {
+          id: agents.id,
+          fullName: agents.fullName,
+          email: agents.email
+        }
+      })
+      .from(meetings)
+      .innerJoin(leads, eq(meetings.leadId, leads.id))
+      .leftJoin(agents, eq(leads.assignedAgentId, agents.id))
+      .where(
+        and(
+          eq(meetings.status, status),
+          gte(meetings.startTime, new Date())
+        )
+      )
+      .orderBy(meetings.startTime)
+      .limit(parseInt(limit));
+
+    res.json({ 
+      success: true, 
+      meetings: meetingsResult,
+      total: meetingsResult.length
+    });
+  } catch (error) {
+    console.error('Error fetching meetings:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch meetings' });
   }
 });
 

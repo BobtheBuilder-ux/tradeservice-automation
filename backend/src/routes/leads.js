@@ -47,12 +47,23 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-// GET /api/leads - Get all leads
+// GET /api/leads - Get leads based on user role
 router.get('/', verifyToken, async (req, res) => {
   try {
-    const leadsData = await db.select()
-      .from(leads)
-      .orderBy(desc(leads.createdAt));
+    let leadsData;
+    
+    if (req.user.role === 'admin') {
+      // Admins can see all leads
+      leadsData = await db.select()
+        .from(leads)
+        .orderBy(desc(leads.createdAt));
+    } else {
+      // Agents can only see leads assigned to them
+      leadsData = await db.select()
+        .from(leads)
+        .where(eq(leads.assignedAgentId, req.user.id))
+        .orderBy(desc(leads.createdAt));
+    }
 
     res.json({ leads: leadsData || [] });
   } catch (error) {
