@@ -1,0 +1,12 @@
+This project only uses a supabase remote database
+Do not create or start a docker in this project
+When there are multiple issue, fix it one at a time
+Always check for errors before complete project
+Ensure your todo list has been completed and executed properly
+Do not assume that the user wants something, only do what the user want you to do without going over what isn't expected of you
+You can make suggestions on some fixes that would help the user
+Always check the schema or migration file if there is a database error
+Always write drizzle schema and push the schema to the remote database
+Test endpoint to ensure they are working by using curl and once the endpoints are working, ensure to update the frontend
+Always console the backend
+Always use | jq . to check the response from the backend

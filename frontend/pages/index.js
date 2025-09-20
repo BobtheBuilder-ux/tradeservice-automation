@@ -134,13 +134,13 @@ export default function Dashboard() {
     try {
       // Clear the auth token from localStorage
       localStorage.removeItem('auth_token');
-      // Redirect to main page
-      router.push('/');
+      // Redirect to login page
+      router.push('/login');
     } catch (err) {
       console.error('Logout error:', err);
       // Even if there's an error, clear token and redirect
       localStorage.removeItem('auth_token');
-      router.push('/');
+      router.push('/login');
     }
   };
 
@@ -150,8 +150,8 @@ export default function Dashboard() {
         .from('leads')
         .update({
           ...updates,
-          last_updated_by: user?.id,
-          updated_at: new Date().toISOString()
+          lastUpdatedBy: user?.id,
+          updatedAt: new Date().toISOString()
         })
         .eq('id', leadId);
       
@@ -166,7 +166,7 @@ export default function Dashboard() {
   // Filter leads based on search and filters
   const filteredLeads = leads.filter(lead => {
     const matchesSearch = !searchTerm || 
-      lead.full_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      lead.fullName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       lead.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       lead.phone?.includes(searchTerm);
     
@@ -373,7 +373,7 @@ export default function Dashboard() {
                         </div>
                         <div className="ml-4">
                           <div className="text-sm font-medium text-gray-900">
-                            {lead.full_name || 'Unknown'}
+                            {lead.fullName || 'Unknown'}
                           </div>
                           <div className="text-sm text-gray-500 flex items-center mt-1">
                             <Mail className="w-3 h-3 mr-1" />
@@ -419,10 +419,10 @@ export default function Dashboard() {
                     {/* Follow-up */}
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="text-sm text-gray-900">
-                        {lead.follow_up_date ? (
+                        {lead.followUpDate ? (
                           <div className="flex items-center">
                             <Calendar className="w-4 h-4 mr-1 text-gray-400" />
-                            {format(new Date(lead.follow_up_date), 'MMM dd, yyyy')}
+                            {format(new Date(lead.followUpDate), 'MMM dd, yyyy')}
                           </div>
                         ) : (
                           <span className="text-gray-400">Not scheduled</span>
@@ -433,10 +433,10 @@ export default function Dashboard() {
                     {/* Last Updated */}
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="text-sm text-gray-900">
-                        <div>{format(new Date(lead.updated_at), 'MMM dd, yyyy')}</div>
-                        {lead.updated_by_agent && (
-                          <div className="text-xs text-gray-500">
-                            by {lead.updated_by_agent.agent_id}
+                        <div>{format(new Date(lead.updatedAt), 'MMM dd, yyyy')}</div>
+                        {lead.updatedByAgent && (
+                           <div className="text-xs text-gray-500">
+                             by {lead.updatedByAgent.agentId}
                           </div>
                         )}
                       </div>
@@ -505,16 +505,16 @@ function EditLeadModal({ lead, agents, onClose, onSave }) {
   const [formData, setFormData] = useState({
     status: lead.status || 'new',
     priority: lead.priority || 'medium',
-    assigned_agent_id: lead.assigned_agent_id || '',
-    agent_notes: lead.agent_notes || '',
-    follow_up_date: lead.follow_up_date ? lead.follow_up_date.split('T')[0] : ''
+    assignedAgentId: lead.assignedAgentId || '',
+    agentNotes: lead.agentNotes || '',
+      followUpDate: lead.followUpDate ? lead.followUpDate.split('T')[0] : ''
   });
 
   const handleSubmit = (e) => {
     e.preventDefault();
     const updates = {
       ...formData,
-      follow_up_date: formData.follow_up_date ? new Date(formData.follow_up_date).toISOString() : null
+      followUpDate: formData.followUpDate ? new Date(formData.followUpDate).toISOString() : null
     };
     onSave(lead.id, updates);
   };
@@ -536,7 +536,7 @@ function EditLeadModal({ lead, agents, onClose, onSave }) {
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Lead Info Display */}
             <div className="bg-gray-50 p-4 rounded-md">
-              <h4 className="font-medium text-gray-900">{lead.full_name}</h4>
+              <h4 className="font-medium text-gray-900">{lead.fullName}</h4>
               <p className="text-sm text-gray-600">{lead.email}</p>
               {lead.phone && <p className="text-sm text-gray-600">{lead.phone}</p>}
             </div>
@@ -583,8 +583,8 @@ function EditLeadModal({ lead, agents, onClose, onSave }) {
                 Assigned Agent
               </label>
               <select
-                value={formData.assigned_agent_id}
-                onChange={(e) => setFormData({ ...formData, assigned_agent_id: e.target.value })}
+                value={formData.assignedAgentId}
+                    onChange={(e) => setFormData({ ...formData, assignedAgentId: e.target.value })}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-gray-500 focus:border-transparent"
               >
                 <option value="">Unassigned</option>
@@ -603,8 +603,8 @@ function EditLeadModal({ lead, agents, onClose, onSave }) {
               </label>
               <input
                 type="date"
-                value={formData.follow_up_date}
-                onChange={(e) => setFormData({ ...formData, follow_up_date: e.target.value })}
+                value={formData.followUpDate}
+                    onChange={(e) => setFormData({ ...formData, followUpDate: e.target.value })}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-gray-500 focus:border-transparent"
               />
             </div>
@@ -615,8 +615,8 @@ function EditLeadModal({ lead, agents, onClose, onSave }) {
                 Agent Notes
               </label>
               <textarea
-                value={formData.agent_notes}
-                onChange={(e) => setFormData({ ...formData, agent_notes: e.target.value })}
+                value={formData.agentNotes}
+                  onChange={(e) => setFormData({ ...formData, agentNotes: e.target.value })}
                 rows={3}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-gray-500 focus:border-transparent"
                 placeholder="Add notes about this lead..."

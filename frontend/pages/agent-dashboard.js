@@ -109,7 +109,7 @@ export default function AgentDashboard() {
 
   const filteredLeads = leads.filter(lead => {
     const matchesSearch = !searchTerm || 
-      lead.full_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      lead.fullName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       lead.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       lead.phone?.includes(searchTerm);
     
@@ -121,30 +121,30 @@ export default function AgentDashboard() {
 
   const getStatusIcon = (status) => {
     switch (status) {
-      case 'new': return <AlertCircle className="w-5 h-5 text-orange-500 drop-shadow-sm" />;
-      case 'contacted': return <Phone className="w-5 h-5 text-teal-500 drop-shadow-sm" />;
-      case 'scheduled': return <Calendar className="w-5 h-5 text-emerald-500 drop-shadow-sm" />;
-      case 'completed': return <CheckCircle className="w-5 h-5 text-green-600 drop-shadow-sm" />;
-      case 'cancelled': return <XCircle className="w-5 h-5 text-red-500 drop-shadow-sm" />;
-      default: return <AlertCircle className="w-5 h-5 text-gray-500 drop-shadow-sm" />;
+      case 'new': return <AlertCircle className="w-4 h-4 text-blue-500" />;
+      case 'contacted': return <Phone className="w-4 h-4 text-yellow-500" />;
+      case 'scheduled': return <Calendar className="w-4 h-4 text-green-500" />;
+      case 'completed': return <CheckCircle className="w-4 h-4 text-green-600" />;
+      case 'cancelled': return <XCircle className="w-4 h-4 text-red-500" />;
+      default: return <AlertCircle className="w-4 h-4 text-gray-500" />;
     }
   };
 
   const getPriorityColor = (priority) => {
     switch (priority) {
-      case 'high': return 'bg-gradient-to-r from-red-100 to-pink-100 text-red-800 border border-red-200 shadow-sm';
-      case 'medium': return 'bg-gradient-to-r from-orange-100 to-yellow-100 text-orange-800 border border-orange-200 shadow-sm';
-      case 'low': return 'bg-gradient-to-r from-emerald-100 to-green-100 text-emerald-800 border border-emerald-200 shadow-sm';
-      default: return 'bg-gradient-to-r from-gray-100 to-slate-100 text-gray-800 border border-gray-200 shadow-sm';
+      case 'high': return 'bg-red-100 text-red-800';
+      case 'medium': return 'bg-yellow-100 text-yellow-800';
+      case 'low': return 'bg-green-100 text-green-800';
+      default: return 'bg-gray-100 text-gray-800';
     }
   };
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-orange-50 via-red-50 to-pink-50 flex items-center justify-center">
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-16 w-16 border-4 border-orange-200 border-t-orange-600 mx-auto shadow-lg"></div>
-          <p className="mt-6 text-orange-700 font-bold text-lg">🚀 Loading your dashboard...</p>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
+          <p className="mt-4 text-gray-600">Loading dashboard...</p>
         </div>
       </div>
     );
@@ -157,22 +157,22 @@ export default function AgentDashboard() {
         <meta name="description" content="Agent Dashboard for Lead Management" />
       </Head>
       
-      <div className="min-h-screen bg-gradient-to-br from-orange-50 via-red-50 to-pink-50">
+      <div className="min-h-screen bg-gray-50">
         {/* Header */}
-        <header className="bg-gradient-to-r from-orange-600 via-red-600 to-pink-600 shadow-xl border-b border-orange-300">
+        <header className="bg-white shadow-sm border-b border-gray-200">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="flex justify-between items-center h-16">
               <div className="flex items-center">
-                <h1 className="text-2xl font-bold text-white drop-shadow-lg">🚀 Agent Dashboard</h1>
+                <h1 className="text-xl font-semibold text-gray-900">Agent Dashboard</h1>
               </div>
               <div className="flex items-center space-x-4">
-                <span className="text-orange-100 font-medium">Welcome, {user?.name || user?.email}</span>
+                <span className="text-sm text-gray-600">Welcome, {user?.name || user?.email}</span>
                 <button
                   onClick={handleSignOut}
-                  className="flex items-center space-x-2 bg-white/20 text-white hover:bg-white/30 transition-all duration-200 px-4 py-2 rounded-lg backdrop-blur-sm border border-white/20 hover:border-white/40"
+                  className="flex items-center space-x-2 text-gray-600 hover:text-gray-900 transition-colors"
                 >
                   <LogOut className="w-4 h-4" />
-                  <span className="font-medium">Sign Out</span>
+                  <span>Sign Out</span>
                 </button>
               </div>
             </div>
@@ -182,11 +182,11 @@ export default function AgentDashboard() {
         {/* Main Content */}
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           {error && (
-            <div className="mb-6 bg-gradient-to-r from-red-100 to-pink-100 border-2 border-red-300 rounded-xl p-6 shadow-lg">
+            <div className="mb-6 bg-red-50 border border-red-200 rounded-md p-4">
               <div className="flex">
-                <AlertCircle className="h-6 w-6 text-red-500 drop-shadow-sm" />
-                <div className="ml-4">
-                  <p className="text-sm font-bold text-red-800">⚠️ {error}</p>
+                <AlertCircle className="h-5 w-5 text-red-400" />
+                <div className="ml-3">
+                  <p className="text-sm text-red-800">{error}</p>
                 </div>
               </div>
             </div>
@@ -194,29 +194,29 @@ export default function AgentDashboard() {
 
           {/* Stats Cards */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-            <div className="bg-gradient-to-br from-teal-500 to-cyan-600 rounded-xl shadow-xl p-6 transform hover:scale-105 transition-all duration-200">
+            <div className="bg-white rounded-lg shadow p-6">
               <div className="flex items-center">
                 <div className="flex-shrink-0">
-                  <User className="h-10 w-10 text-white drop-shadow-lg" />
+                  <User className="h-8 w-8 text-blue-600" />
                 </div>
                 <div className="ml-5 w-0 flex-1">
                   <dl>
-                    <dt className="text-sm font-bold text-teal-100 truncate">Total Leads</dt>
-                    <dd className="text-2xl font-bold text-white drop-shadow-lg">{leads.length}</dd>
+                    <dt className="text-sm font-medium text-gray-500 truncate">Total Leads</dt>
+                    <dd className="text-lg font-medium text-gray-900">{leads.length}</dd>
                   </dl>
                 </div>
               </div>
             </div>
             
-            <div className="bg-gradient-to-br from-orange-500 to-red-600 rounded-xl shadow-xl p-6 transform hover:scale-105 transition-all duration-200">
+            <div className="bg-white rounded-lg shadow p-6">
               <div className="flex items-center">
                 <div className="flex-shrink-0">
-                  <AlertCircle className="h-10 w-10 text-white drop-shadow-lg" />
+                  <AlertCircle className="h-8 w-8 text-yellow-600" />
                 </div>
                 <div className="ml-5 w-0 flex-1">
                   <dl>
-                    <dt className="text-sm font-bold text-orange-100 truncate">New Leads</dt>
-                    <dd className="text-2xl font-bold text-white drop-shadow-lg">
+                    <dt className="text-sm font-medium text-gray-500 truncate">New Leads</dt>
+                    <dd className="text-lg font-medium text-gray-900">
                       {leads.filter(lead => lead.status === 'new').length}
                     </dd>
                   </dl>
@@ -224,15 +224,15 @@ export default function AgentDashboard() {
               </div>
             </div>
             
-            <div className="bg-gradient-to-br from-emerald-500 to-green-600 rounded-xl shadow-xl p-6 transform hover:scale-105 transition-all duration-200">
+            <div className="bg-white rounded-lg shadow p-6">
               <div className="flex items-center">
                 <div className="flex-shrink-0">
-                  <Calendar className="h-10 w-10 text-white drop-shadow-lg" />
+                  <Calendar className="h-8 w-8 text-green-600" />
                 </div>
                 <div className="ml-5 w-0 flex-1">
                   <dl>
-                    <dt className="text-sm font-bold text-emerald-100 truncate">Scheduled</dt>
-                    <dd className="text-2xl font-bold text-white drop-shadow-lg">
+                    <dt className="text-sm font-medium text-gray-500 truncate">Scheduled</dt>
+                    <dd className="text-lg font-medium text-gray-900">
                       {leads.filter(lead => lead.status === 'scheduled').length}
                     </dd>
                   </dl>
@@ -240,15 +240,15 @@ export default function AgentDashboard() {
               </div>
             </div>
             
-            <div className="bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl shadow-xl p-6 transform hover:scale-105 transition-all duration-200">
+            <div className="bg-white rounded-lg shadow p-6">
               <div className="flex items-center">
                 <div className="flex-shrink-0">
-                  <CheckCircle className="h-10 w-10 text-white drop-shadow-lg" />
+                  <CheckCircle className="h-8 w-8 text-green-600" />
                 </div>
                 <div className="ml-5 w-0 flex-1">
                   <dl>
-                    <dt className="text-sm font-bold text-indigo-100 truncate">Completed</dt>
-                    <dd className="text-2xl font-bold text-white drop-shadow-lg">
+                    <dt className="text-sm font-medium text-gray-500 truncate">Completed</dt>
+                    <dd className="text-lg font-medium text-gray-900">
                       {leads.filter(lead => lead.status === 'completed').length}
                     </dd>
                   </dl>
@@ -258,18 +258,18 @@ export default function AgentDashboard() {
           </div>
 
           {/* Filters and Search */}
-          <div className="bg-white rounded-xl shadow-xl mb-6 border border-orange-200">
+          <div className="bg-white rounded-lg shadow mb-6">
             <div className="p-6">
               <div className="flex flex-col sm:flex-row gap-4">
                 <div className="flex-1">
                   <div className="relative">
-                    <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-orange-400 w-5 h-5" />
+                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
                     <input
                       type="text"
-                      placeholder="🔍 Search leads by name, email, or phone..."
+                      placeholder="Search leads by name, email, or phone..."
                       value={searchTerm}
                       onChange={(e) => setSearchTerm(e.target.value)}
-                      className="pl-12 pr-4 py-3 w-full border-2 border-orange-200 rounded-xl focus:ring-4 focus:ring-orange-200 focus:border-orange-400 transition-all duration-200 bg-orange-50 focus:bg-white font-medium"
+                      className="pl-10 pr-4 py-2 w-full border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     />
                   </div>
                 </div>
@@ -278,25 +278,25 @@ export default function AgentDashboard() {
                   <select
                     value={statusFilter}
                     onChange={(e) => setStatusFilter(e.target.value)}
-                    className="px-4 py-3 border-2 border-orange-200 rounded-xl focus:ring-4 focus:ring-orange-200 focus:border-orange-400 transition-all duration-200 bg-orange-50 focus:bg-white font-medium"
+                    className="px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   >
-                    <option value="all">📊 All Status</option>
-                    <option value="new">🆕 New</option>
-                    <option value="contacted">📞 Contacted</option>
-                    <option value="scheduled">📅 Scheduled</option>
-                    <option value="completed">✅ Completed</option>
-                    <option value="cancelled">❌ Cancelled</option>
+                    <option value="all">All Status</option>
+                    <option value="new">New</option>
+                    <option value="contacted">Contacted</option>
+                    <option value="scheduled">Scheduled</option>
+                    <option value="completed">Completed</option>
+                    <option value="cancelled">Cancelled</option>
                   </select>
                   
                   <select
                     value={priorityFilter}
                     onChange={(e) => setPriorityFilter(e.target.value)}
-                    className="px-4 py-3 border-2 border-orange-200 rounded-xl focus:ring-4 focus:ring-orange-200 focus:border-orange-400 transition-all duration-200 bg-orange-50 focus:bg-white font-medium"
+                    className="px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   >
-                    <option value="all">🎯 All Priority</option>
-                    <option value="high">🔥 High</option>
-                    <option value="medium">⚡ Medium</option>
-                    <option value="low">💚 Low</option>
+                    <option value="all">All Priority</option>
+                    <option value="high">High</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
                   </select>
                 </div>
               </div>
@@ -304,73 +304,67 @@ export default function AgentDashboard() {
           </div>
 
           {/* Leads Table */}
-          <div className="bg-white rounded-xl shadow-xl overflow-hidden border border-orange-200">
-            <div className="px-6 py-4 border-b border-orange-200 bg-gradient-to-r from-orange-500 to-red-500">
-              <h3 className="text-xl font-bold text-white drop-shadow-lg">🎯 Your Assigned Leads</h3>
+          <div className="bg-white rounded-lg shadow overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-200">
+              <h3 className="text-lg font-medium text-gray-900">Your Assigned Leads</h3>
             </div>
             
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gradient-to-r from-orange-100 to-red-100">
+                <thead className="bg-gray-50">
                   <tr>
-                    <th className="px-6 py-4 text-left text-sm font-bold text-orange-800 uppercase tracking-wider">
-                      👤 Contact
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Contact
                     </th>
-                    <th className="px-6 py-4 text-left text-sm font-bold text-orange-800 uppercase tracking-wider">
-                      📊 Status
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Status
                     </th>
-                    <th className="px-6 py-4 text-left text-sm font-bold text-orange-800 uppercase tracking-wider">
-                      🎯 Priority
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Priority
                     </th>
-                    <th className="px-6 py-4 text-left text-sm font-bold text-orange-800 uppercase tracking-wider">
-                      📅 Created
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Created
                     </th>
-                    <th className="px-6 py-4 text-left text-sm font-bold text-orange-800 uppercase tracking-wider">
-                      ⚡ Actions
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      Actions
                     </th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
                   {filteredLeads.length === 0 ? (
                     <tr>
-                      <td colSpan="5" className="px-6 py-16 text-center">
-                        <div className="text-center">
-                          <div className="text-6xl mb-4">📭</div>
-                          <p className="text-lg font-bold text-gray-700">
-                            {searchTerm || statusFilter !== 'all' || priorityFilter !== 'all' 
-                              ? '🔍 No leads match your current filters.' 
-                              : '🎯 No leads assigned to you yet.'}
-                          </p>
-                          <p className="text-sm text-gray-500 mt-2">Check back later or adjust your filters!</p>
-                        </div>
+                      <td colSpan="5" className="px-6 py-12 text-center text-gray-500">
+                        {searchTerm || statusFilter !== 'all' || priorityFilter !== 'all' 
+                          ? 'No leads match your current filters.' 
+                          : 'No leads assigned to you yet.'}
                       </td>
                     </tr>
                   ) : (
                     filteredLeads.map((lead) => (
                       <tr key={lead.id} className="hover:bg-gradient-to-r hover:from-orange-50 hover:to-red-50 transition-all duration-200">
-                        <td className="px-6 py-5 whitespace-nowrap">
+                        <td className="px-6 py-4 whitespace-nowrap">
                           <div className="flex items-center">
                             <div>
-                              <div className="text-sm font-bold text-gray-900">
+                              <div className="text-sm font-medium text-gray-900">
                                 {lead.fullName || 'No name'}
                               </div>
-                              <div className="text-sm text-teal-600 flex items-center mt-1 font-medium">
-                                <Mail className="w-4 h-4 mr-1" />
+                              <div className="text-sm text-gray-500 flex items-center mt-1">
+                                <Mail className="w-3 h-3 mr-1" />
                                 {lead.email}
                               </div>
                               {lead.phone && (
-                                <div className="text-sm text-orange-600 flex items-center mt-1 font-medium">
-                                  <Phone className="w-4 h-4 mr-1" />
+                                <div className="text-sm text-gray-500 flex items-center mt-1">
+                                  <Phone className="w-3 h-3 mr-1" />
                                   {lead.phone}
                                 </div>
                               )}
                             </div>
                           </div>
                         </td>
-                        <td className="px-6 py-5 whitespace-nowrap">
+                        <td className="px-6 py-4 whitespace-nowrap">
                           <div className="flex items-center">
                             {getStatusIcon(lead.status)}
-                            <span className="ml-3 text-sm font-bold text-gray-900 capitalize">
+                            <span className="ml-2 text-sm text-gray-900 capitalize">
                               {lead.status}
                             </span>
                           </div>

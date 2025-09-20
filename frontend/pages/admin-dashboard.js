@@ -242,7 +242,7 @@ export default function AdminDashboard() {
   const handleSignOut = async () => {
     try {
       localStorage.removeItem('auth_token');
-      router.push('/');
+      router.push('/login');
     } catch (err) {
       console.error('Sign out error:', err);
     }
@@ -285,7 +285,7 @@ export default function AdminDashboard() {
 
   const filteredLeads = leads.filter(lead => {
     const matchesSearch = !searchTerm || 
-      lead.full_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      lead.fullName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       lead.email?.toLowerCase().includes(searchTerm.toLowerCase());
     
     const matchesStatus = statusFilter === 'all' || lead.status === statusFilter;
@@ -465,11 +465,11 @@ export default function AdminDashboard() {
                       <div className="space-y-2">
                         <div className="flex justify-between text-sm">
                           <span className="text-gray-600">Active Agents</span>
-                          <span className="font-medium">{agents.filter(a => a.is_active).length}</span>
+                          <span className="font-medium">{agents.filter(a => a.isActive).length}</span>
                         </div>
                         <div className="flex justify-between text-sm">
                           <span className="text-gray-600">Inactive Agents</span>
-                          <span className="font-medium">{agents.filter(a => !a.is_active).length}</span>
+                          <span className="font-medium">{agents.filter(a => !a.isActive).length}</span>
                         </div>
                       </div>
                     </div>
@@ -512,67 +512,28 @@ export default function AdminDashboard() {
                 </div>
               </div>
 
-              {/* Agent Status Overview Cards */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="bg-gradient-to-br from-emerald-500 to-green-600 rounded-xl shadow-lg p-6 text-white transform hover:scale-105 transition-all duration-300">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-emerald-100 text-sm font-medium">Active Agents</p>
-                      <p className="text-3xl font-bold">{agents.filter(a => a.is_active).length}</p>
-                    </div>
-                    <div className="bg-white/20 p-3 rounded-lg">
-                      <Users className="w-8 h-8" />
-                    </div>
-                  </div>
-                </div>
-                
-                <div className="bg-gradient-to-br from-red-500 to-pink-600 rounded-xl shadow-lg p-6 text-white transform hover:scale-105 transition-all duration-300">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-red-100 text-sm font-medium">Inactive Agents</p>
-                      <p className="text-3xl font-bold">{agents.filter(a => !a.is_active).length}</p>
-                    </div>
-                    <div className="bg-white/20 p-3 rounded-lg">
-                      <UserMinus className="w-8 h-8" />
-                    </div>
-                  </div>
-                </div>
-                
-                <div className="bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl shadow-lg p-6 text-white transform hover:scale-105 transition-all duration-300">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-blue-100 text-sm font-medium">Total Agents</p>
-                      <p className="text-3xl font-bold">{agents.length}</p>
-                    </div>
-                    <div className="bg-white/20 p-3 rounded-lg">
-                      <Building2 className="w-8 h-8" />
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="bg-white rounded-xl shadow-lg overflow-hidden border border-gray-100">
+              <div className="bg-white rounded-xl shadow-xl overflow-hidden border border-gray-100">
                 <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-200">
+                  <table className="min-w-full divide-y divide-gray-100">
                     <thead className="bg-gradient-to-r from-gray-50 to-gray-100">
                       <tr>
                         <th className="px-6 py-4 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
-                          Agent Information
+                          👤 Agent Details
                         </th>
                         <th className="px-6 py-4 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
-                          Role & Permissions
+                          🎭 Role
                         </th>
                         <th className="px-6 py-4 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
-                          Status
+                          ⚡ Status
                         </th>
                         <th className="px-6 py-4 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
-                          Last Activity
+                          🕒 Last Activity
                         </th>
                         <th className="px-6 py-4 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
-                          Lead Count
+                          📊 Lead Count
                         </th>
                         <th className="px-6 py-4 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
-                          Actions
+                          🔧 Actions
                         </th>
                       </tr>
                     </thead>
@@ -597,7 +558,6 @@ export default function AdminDashboard() {
                                   }`}>
                                     <User className="h-6 w-6 text-white" />
                                   </div>
-                                  {/* Status indicator dot */}
                                   <div className={`absolute -top-1 -right-1 h-4 w-4 rounded-full border-2 border-white ${
                                     isActive ? 'bg-green-400' : 'bg-red-400'
                                   }`}></div>
@@ -608,84 +568,81 @@ export default function AdminDashboard() {
                                   }`}>
                                     {agent.name || 'No name'}
                                   </div>
-                                  <div className="text-sm text-gray-500 flex items-center">
+                                  <div className={`text-sm ${
+                                    isActive ? 'text-teal-600' : 'text-gray-500'
+                                  } flex items-center mt-1`}>
                                     <Mail className="w-3 h-3 mr-1" />
                                     {agent.email}
                                   </div>
-                                  {agent.email_verified && (
-                                    <div className="flex items-center mt-1">
-                                      <Check className="w-3 h-3 text-green-500 mr-1" />
-                                      <span className="text-xs text-green-600 font-medium">Verified</span>
-                                    </div>
-                                  )}
                                 </div>
                               </div>
                             </td>
                             <td className="px-6 py-5 whitespace-nowrap">
-                              <span className={`inline-flex items-center px-3 py-1 text-xs font-bold rounded-full shadow-sm ${
+                              <span className={`inline-flex px-3 py-2 text-xs font-bold rounded-xl shadow-sm ${
                                 agent.role === 'admin' 
-                                  ? 'bg-gradient-to-r from-purple-100 to-indigo-100 text-purple-800 border border-purple-200' 
+                                  ? 'bg-gradient-to-r from-purple-100 to-pink-100 text-purple-800 border border-purple-200'
                                   : 'bg-gradient-to-r from-blue-100 to-cyan-100 text-blue-800 border border-blue-200'
                               }`}>
-                                {agent.role === 'admin' && <Settings className="w-3 h-3 mr-1" />}
-                                {agent.role === 'agent' && <User className="w-3 h-3 mr-1" />}
-                                {agent.role.charAt(0).toUpperCase() + agent.role.slice(1)}
+                                {agent.role === 'admin' ? '👑 Admin' : '🎯 Agent'}
                               </span>
                             </td>
                             <td className="px-6 py-5 whitespace-nowrap">
                               <div className="flex items-center">
-                                <span className={`inline-flex items-center px-3 py-2 text-sm font-bold rounded-lg shadow-sm ${
+                                <div className={`h-3 w-3 rounded-full mr-2 ${
+                                  isActive ? 'bg-green-400 animate-pulse' : 'bg-red-400'
+                                }`}></div>
+                                <span className={`inline-flex px-3 py-2 text-xs font-bold rounded-xl shadow-sm ${
                                   isActive 
                                     ? 'bg-gradient-to-r from-green-100 to-emerald-100 text-green-800 border border-green-200' 
                                     : 'bg-gradient-to-r from-red-100 to-pink-100 text-red-800 border border-red-200'
                                 }`}>
-                                  <div className={`w-2 h-2 rounded-full mr-2 ${
-                                    isActive ? 'bg-green-500 animate-pulse' : 'bg-red-500'
-                                  }`}></div>
-                                  {isActive ? 'Active' : 'Inactive'}
+                                  {isActive ? '✅ Active' : '❌ Inactive'}
                                 </span>
                               </div>
                             </td>
                             <td className="px-6 py-5 whitespace-nowrap">
-                              <div className="text-sm text-gray-900 font-medium flex items-center">
-                                <Calendar className="w-4 h-4 mr-2 text-gray-400" />
-                                {agent.last_login 
-                                  ? format(new Date(agent.last_login), 'MMM d, yyyy')
+                              <div className="text-sm font-medium text-gray-900">
+                                {agent.lastLogin
+                                  ? format(new Date(agent.lastLogin), 'MMM d, yyyy')
                                   : 'Never logged in'
                                 }
                               </div>
-                              {agent.last_login && (
-                                <div className="text-xs text-gray-500">
-                                  {format(new Date(agent.last_login), 'HH:mm')}
-                                </div>
-                              )}
+                              <div className="text-xs text-gray-500 mt-1">
+                                {agent.lastLogin
+                                  ? `${Math.floor((new Date() - new Date(agent.lastLogin)) / (1000 * 60 * 60 * 24))} days ago`
+                                  : 'No activity'
+                                }
+                              </div>
                             </td>
                             <td className="px-6 py-5 whitespace-nowrap">
-                              <div className="flex items-center">
-                                <div className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-bold ${
-                                  agentLeadCount > 0 
-                                    ? 'bg-gradient-to-r from-blue-100 to-indigo-100 text-blue-800 border border-blue-200' 
-                                    : 'bg-gray-100 text-gray-600 border border-gray-200'
+                              <div className="flex items-center space-x-1">
+                                <div className={`px-3 py-2 rounded-lg text-sm font-bold ${
+                                  agentLeadCount === 0 
+                                    ? 'bg-gray-100 text-gray-600'
+                                    : agentLeadCount <= 5 
+                                      ? 'bg-green-100 text-green-700'
+                                      : agentLeadCount <= 10
+                                        ? 'bg-yellow-100 text-yellow-700'
+                                        : 'bg-red-100 text-red-700'
                                 }`}>
-                                  <Target className="w-3 h-3 mr-1" />
-                                  {agentLeadCount} leads
+                                  📊 {agentLeadCount} leads
                                 </div>
                               </div>
                             </td>
                             <td className="px-6 py-5 whitespace-nowrap text-sm font-medium">
-                              <div className="flex space-x-3">
+                              <div className="flex space-x-2">
                                 <button
                                   onClick={() => setShowDeleteConfirm(agent.id)}
-                                  className="inline-flex items-center px-3 py-2 text-sm font-medium text-red-600 bg-red-50 rounded-lg hover:bg-red-100 hover:text-red-700 transition-all duration-200 border border-red-200 hover:border-red-300"
+                                  className="bg-gradient-to-r from-red-500 to-pink-600 text-white hover:from-red-600 hover:to-pink-700 flex items-center px-3 py-2 rounded-lg transition-all duration-200 shadow-md hover:shadow-lg transform hover:scale-105 text-xs font-bold"
                                 >
-                                  <Trash2 className="w-4 h-4 mr-1" />
+                                  <Trash2 className="w-3 h-3 mr-1" />
                                   Delete
                                 </button>
                               </div>
-                             </td>
-                           </tr>
-                         );
-                        })}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -693,44 +650,34 @@ export default function AdminDashboard() {
             </div>
           )}
 
-          {/* Enhanced Lead Assignment Tab */}
+          {/* Lead Assignment Tab */}
           {activeTab === 'leads' && (
             <div className="space-y-6">
-              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-                <div>
-                  <h2 className="text-3xl font-bold bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent">Lead Assignment</h2>
-                  <p className="text-gray-600 mt-1">Manage and assign leads to your sales agents</p>
-                </div>
+              <div className="flex justify-between items-center">
+                <h2 className="text-2xl font-bold text-gray-900">Lead Assignment</h2>
                 {selectedLeads.length > 0 && (
-                  <div className="flex items-center space-x-3">
-                    <div className="bg-gradient-to-r from-purple-100 to-pink-100 px-4 py-2 rounded-lg border border-purple-200">
-                      <span className="text-sm font-medium text-purple-800">
-                        {selectedLeads.length} lead{selectedLeads.length !== 1 ? 's' : ''} selected
-                      </span>
-                    </div>
-                    <button
-                      onClick={() => setShowAssignModal(true)}
-                      className="flex items-center space-x-2 bg-gradient-to-r from-purple-600 to-pink-600 text-white px-6 py-3 rounded-xl hover:from-purple-700 hover:to-pink-700 transition-all duration-200 shadow-lg hover:shadow-xl transform hover:scale-105"
-                    >
-                      <Target className="w-5 h-5" />
-                      <span className="font-semibold">Assign Selected</span>
-                    </button>
-                  </div>
+                  <button
+                    onClick={() => setShowAssignModal(true)}
+                    className="flex items-center space-x-2 bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 transition-colors"
+                  >
+                    <Target className="w-4 h-4" />
+                    <span>Assign Selected ({selectedLeads.length})</span>
+                  </button>
                 )}
               </div>
 
-              {/* Enhanced Filters */}
-              <div className="bg-white rounded-xl shadow-lg border border-gray-100 p-6">
+              {/* Filters */}
+              <div className="bg-white rounded-lg shadow p-6">
                 <div className="flex flex-col sm:flex-row gap-4">
                   <div className="flex-1">
                     <div className="relative">
-                      <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-purple-400 w-5 h-5" />
+                      <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
                       <input
                         type="text"
                         placeholder="Search leads by name or email..."
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
-                        className="pl-12 pr-4 py-3 w-full border-2 border-gray-200 rounded-xl focus:ring-4 focus:ring-purple-200 focus:border-purple-400 transition-all duration-200 bg-gray-50 focus:bg-white"
+                        className="pl-10 pr-4 py-2 w-full border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                       />
                     </div>
                   </div>
@@ -738,7 +685,7 @@ export default function AdminDashboard() {
                   <select
                     value={statusFilter}
                     onChange={(e) => setStatusFilter(e.target.value)}
-                    className="px-4 py-3 border-2 border-gray-200 rounded-xl focus:ring-4 focus:ring-purple-200 focus:border-purple-400 transition-all duration-200 bg-gray-50 focus:bg-white font-medium"
+                    className="px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   >
                     <option value="all">All Status</option>
                     <option value="new">New</option>
@@ -787,11 +734,11 @@ export default function AdminDashboard() {
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
                       {filteredLeads.map((lead) => {
-                        const assignedAgent = agents.find(agent => agent.id === lead.assigned_agent_id);
+                        const assignedAgent = agents.find(agent => agent.id === lead.assignedAgentId);
                         return (
                           <tr key={lead.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => handleViewLead(lead)}>
                             <td className="px-6 py-4 whitespace-nowrap">
-                              {!lead.assigned_agent_id && (
+                              {!lead.assignedAgentId && (
                                 <input
                                   type="checkbox"
                                   checked={selectedLeads.includes(lead.id)}
@@ -811,7 +758,7 @@ export default function AdminDashboard() {
                             <td className="px-6 py-4 whitespace-nowrap">
                               <div>
                                 <div className="text-sm font-medium text-gray-900">
-                                  {lead.full_name || 'No name'}
+                                  {lead.fullName || 'No name'}
                                 </div>
                                 <div className="text-sm text-gray-500 flex items-center mt-1">
                                   <Mail className="w-3 h-3 mr-1" />
@@ -849,7 +796,7 @@ export default function AdminDashboard() {
                               )}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                              {lead.created_at ? format(new Date(lead.created_at), 'MMM d, yyyy') : 'N/A'}
+                              {lead.createdAt ? format(new Date(lead.createdAt), 'MMM d, yyyy') : 'N/A'}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
                               <button
@@ -1222,7 +1169,7 @@ export default function AdminDashboard() {
                 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-96 overflow-y-auto">
                   {agents.filter(agent => agent.is_active).map((agent) => {
-                    const agentLeadCount = leads.filter(lead => lead.assigned_agent_id === agent.id).length;
+                    const agentLeadCount = leads.filter(lead => lead.assignedAgentId === agent.id).length;
                     return (
                       <button
                         key={agent.id}
@@ -1296,7 +1243,7 @@ export default function AdminDashboard() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-sm font-medium text-gray-700">Full Name</label>
-                      <p className="mt-1 text-sm text-gray-900">{selectedLead.full_name || 'Not provided'}</p>
+                      <p className="mt-1 text-sm text-gray-900">{selectedLead.fullName || 'Not provided'}</p>
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700">Email</label>
@@ -1345,8 +1292,8 @@ export default function AdminDashboard() {
                     <div>
                       <label className="block text-sm font-medium text-gray-700">Assigned Agent</label>
                       <p className="mt-1 text-sm text-gray-900">
-                        {selectedLead.assigned_agent_id ? 
-                          agents.find(agent => agent.id === selectedLead.assigned_agent_id)?.name || 'Unknown Agent'
+                        {selectedLead.assignedAgentId ?
+                      agents.find(agent => agent.id === selectedLead.assignedAgentId)?.name || 'Unknown Agent'
                           : 'Unassigned'
                         }
                       </p>
@@ -1354,7 +1301,7 @@ export default function AdminDashboard() {
                     <div>
                       <label className="block text-sm font-medium text-gray-700">Created Date</label>
                       <p className="mt-1 text-sm text-gray-900">
-                        {selectedLead.created_at ? format(new Date(selectedLead.created_at), 'MMM d, yyyy HH:mm') : 'N/A'}
+                        {selectedLead.createdAt ? format(new Date(selectedLead.createdAt), 'MMM d, yyyy HH:mm') : 'N/A'}
                       </p>
                     </div>
                   </div>
