@@ -570,6 +570,10 @@ class MeetingService {
       const tomorrowEnd = new Date(tomorrowStart);
       tomorrowEnd.setDate(tomorrowEnd.getDate() + 1);
 
+      // Calculate 24 hours ago to ensure we don't send duplicate reminders
+      const twentyFourHoursAgo = new Date();
+      twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
+
       const meetingsData = await db
         .select({
           id: meetings.id,
@@ -592,6 +596,8 @@ class MeetingService {
           followUpSent: meetings.followUpSent,
           reminder24hSent: meetings.reminder24hSent,
           reminder1hSent: meetings.reminder1hSent,
+          reminder24hSentAt: meetings.reminder24hSentAt,
+          reminder1hSentAt: meetings.reminder1hSentAt,
           notes: meetings.notes,
           metadata: meetings.metadata,
           createdAt: meetings.createdAt,
@@ -609,14 +615,28 @@ class MeetingService {
         .where(
           and(
             eq(meetings.status, 'scheduled'),
-            eq(meetings.reminder24hSent, false),
             gte(meetings.startTime, tomorrowStart),
             lt(meetings.startTime, tomorrowEnd)
           )
         );
 
-      logger.info(`Found ${meetingsData.length} meetings needing 24-hour reminders`);
-      return meetingsData;
+      // Filter meetings to ensure we don't send duplicate reminders within 24 hours
+      const eligibleMeetings = meetingsData.filter(meeting => {
+        // If no 24h reminder has been sent yet, it's eligible
+        if (!meeting.reminder24hSent || !meeting.reminder24hSentAt) {
+          return true;
+        }
+        
+        // If a reminder was sent, check if 24 hours have passed since the last one
+        const lastReminderTime = new Date(meeting.reminder24hSentAt);
+        const hoursSinceLastReminder = (new Date() - lastReminderTime) / (1000 * 60 * 60);
+        
+        // Only send if more than 24 hours have passed since the last reminder
+        return hoursSinceLastReminder >= 24;
+      });
+
+      logger.info(`Found ${meetingsData.length} total meetings for tomorrow, ${eligibleMeetings.length} eligible for 24-hour reminders after duplicate check`);
+      return eligibleMeetings;
     } catch (error) {
       logger.logError(error, { context: 'get_meetings_needing_daily_reminders' });
       throw error;
@@ -656,6 +676,8 @@ class MeetingService {
           followUpSent: meetings.followUpSent,
           reminder24hSent: meetings.reminder24hSent,
           reminder1hSent: meetings.reminder1hSent,
+          reminder24hSentAt: meetings.reminder24hSentAt,
+          reminder1hSentAt: meetings.reminder1hSentAt,
           notes: meetings.notes,
           metadata: meetings.metadata,
           createdAt: meetings.createdAt,
@@ -673,14 +695,28 @@ class MeetingService {
         .where(
           and(
             eq(meetings.status, 'scheduled'),
-            eq(meetings.reminder1hSent, false),
             gte(meetings.startTime, oneHourFromNow),
             lte(meetings.startTime, reminderWindow)
           )
         );
 
-      logger.info(`Found ${meetingsData.length} meetings needing 1-hour reminders`);
-      return meetingsData;
+      // Filter meetings to ensure we don't send duplicate reminders within 24 hours
+      const eligibleMeetings = meetingsData.filter(meeting => {
+        // If no 1h reminder has been sent yet, it's eligible
+        if (!meeting.reminder1hSent || !meeting.reminder1hSentAt) {
+          return true;
+        }
+        
+        // If a reminder was sent, check if 24 hours have passed since the last one
+        const lastReminderTime = new Date(meeting.reminder1hSentAt);
+        const hoursSinceLastReminder = (new Date() - lastReminderTime) / (1000 * 60 * 60);
+        
+        // Only send if more than 24 hours have passed since the last reminder
+        return hoursSinceLastReminder >= 24;
+      });
+
+      logger.info(`Found ${meetingsData.length} total meetings in 1-hour window, ${eligibleMeetings.length} eligible for 1-hour reminders after duplicate check`);
+      return eligibleMeetings;
     } catch (error) {
       logger.logError(error, { context: 'get_meetings_needing_hourly_reminders' });
       throw error;
@@ -929,9 +965,14 @@ class MeetingService {
   async updateLeadMeetingStatus(leadId, meetingId, hasScheduledMeeting, trackingId) {
     try {
       const updateData = {
-        hasMeeting: hasScheduledMeeting,
+        meetingScheduled: hasScheduledMeeting,
         updatedAt: new Date()
       };
+      
+      // If this is a follow-up reminder being sent, update the timestamp
+      if (!hasScheduledMeeting) {
+        updateData.lastMeetingReminderSent = new Date();
+      }
 
       const [lead] = await db
         .update(leads)
@@ -948,7 +989,8 @@ class MeetingService {
       logger.logLeadProcessing(trackingId, 'lead_meeting_status_updated', {
         leadId,
         meetingId,
-        hasScheduledMeeting
+        hasScheduledMeeting,
+        lastMeetingReminderSent: updateData.lastMeetingReminderSent
       });
     } catch (error) {
       logger.logError(error, { context: 'update_lead_meeting_status', trackingId, leadId });
@@ -1276,20 +1318,56 @@ class MeetingService {
     try {
       const threeDaysAgo = new Date();
       threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+      
+      // Calculate 24 hours ago to ensure we don't send duplicate follow-up reminders
+      const twentyFourHoursAgo = new Date();
+      twentyFourHoursAgo.setHours(twentyFourHoursAgo.getHours() - 24);
 
-      const leadsResult = await db.select()
+      const leadsData = await db.select({
+        id: leads.id,
+        email: leads.email,
+        firstName: leads.firstName,
+        lastName: leads.lastName,
+        fullName: leads.fullName,
+        phone: leads.phone,
+        source: leads.source,
+        status: leads.status,
+        customFields: leads.customFields,
+        hubspotContactId: leads.hubspotContactId,
+        assignedAgentId: leads.assignedAgentId,
+        agentNotes: leads.agentNotes,
+        followUpDate: leads.followUpDate,
+        priority: leads.priority,
+        scheduledAt: leads.scheduledAt,
+        meetingEndTime: leads.meetingEndTime,
+        meetingLocation: leads.meetingLocation,
+        processingStatus: leads.processingStatus,
+        trackingId: leads.trackingId,
+        createdAt: leads.createdAt,
+        updatedAt: leads.updatedAt,
+        lastMeetingReminderSent: leads.lastMeetingReminderSent
+      })
         .from(leads)
         .where(
           and(
             eq(leads.meetingScheduled, false),
-            gte(leads.createdAt, threeDaysAgo),
-            isNull(leads.lastMeetingReminderSent)
+            gte(leads.createdAt, threeDaysAgo)
           )
         )
         .orderBy(asc(leads.createdAt));
 
-      logger.info(`Found ${leadsResult.length} leads needing meeting scheduling reminders`);
-      return leadsResult;
+      // Filter out leads that have received a follow-up reminder within the last 24 hours
+      const eligibleLeads = leadsData.filter(lead => {
+        if (!lead.lastMeetingReminderSent) {
+          return true; // Never sent a reminder, eligible
+        }
+        
+        const lastReminderTime = new Date(lead.lastMeetingReminderSent);
+        return lastReminderTime < twentyFourHoursAgo;
+      });
+
+      logger.info(`Found ${leadsData.length} total leads in follow-up window, ${eligibleLeads.length} eligible for follow-up reminders after duplicate check`);
+      return eligibleLeads;
     } catch (error) {
       logger.logError(error, { context: 'get_leads_needing_meeting_reminders' });
       throw error;

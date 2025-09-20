@@ -17,6 +17,7 @@ import authRoutes from './src/routes/auth.js';
 import analyticsRoutes from './src/routes/analytics.js';
 import leadsRoutes from './src/routes/leads.js';
 import adminRoutes from './src/routes/admin.js';
+import feedbackRoutes from './src/routes/feedback.js';
 
 import { WorkflowOrchestrator } from './workflow-orchestrator.js';
 import reminderScheduler from './src/services/reminder-scheduler.js';
@@ -119,11 +120,12 @@ app.use((req, res, next) => {
   next();
 });
 
-// Route handlers
+// Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/leads', leadsRoutes);
+app.use('/api/feedback', feedbackRoutes);
 app.use('/webhook/hubspot', hubspotWebhookRoutes);
 app.use('/webhook/calendly', calendlyWebhookRoutes);
 app.use('/webhook/zapier', zapierWebhookRoutes);

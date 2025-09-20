@@ -183,13 +183,15 @@ export const validatePermissions = (user) => {
 
 // React hook for authentication
 export const useAuth = () => {
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState(authManager.getUser());
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Initialize auth state
+    // Initialize auth state only if not already initialized
     const initAuth = async () => {
-      await authManager.initialize();
+      if (!authManager.getUser()) {
+        await authManager.initialize();
+      }
       setUser(authManager.getUser());
       setLoading(false);
     };
@@ -203,7 +205,7 @@ export const useAuth = () => {
     });
 
     return unsubscribe;
-  }, []);
+  }, []); // Empty dependency array to prevent re-initialization
 
   return { user, loading, isAuthenticated: !!user };
 };

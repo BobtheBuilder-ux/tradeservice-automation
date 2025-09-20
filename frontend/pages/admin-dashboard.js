@@ -24,7 +24,8 @@ import {
   Calendar,
   User,
   Eye,
-  CalendarDays
+  CalendarDays,
+  MessageSquare
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { useAuth } from '../lib/auth';
@@ -67,6 +68,19 @@ export default function AdminDashboard() {
     totalLeads: 0
   });
 
+  // Feedback Management State
+  const [feedbackList, setFeedbackList] = useState([]);
+  const [feedbackLoading, setFeedbackLoading] = useState(false);
+  const [feedbackStats, setFeedbackStats] = useState({
+    total: 0,
+    pending: 0,
+    inReview: 0,
+    responded: 0
+  });
+  const [selectedFeedback, setSelectedFeedback] = useState(null);
+  const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+  const [feedbackResponse, setFeedbackResponse] = useState('');
+
   useEffect(() => {
     // Wait for auth to finish loading before making redirect decisions
     if (authLoading) return;
@@ -91,7 +105,8 @@ export default function AdminDashboard() {
       await Promise.all([
         fetchAgents(),
         fetchLeads(),
-        fetchCampaigns()
+        fetchCampaigns(),
+        fetchFeedback()
       ]);
     } catch (err) {
       console.error('Error fetching dashboard data:', err);
@@ -159,6 +174,36 @@ export default function AdminDashboard() {
       }
     } catch (err) {
       console.error('Error fetching campaigns:', err);
+    }
+  };
+
+  const fetchFeedback = async () => {
+    try {
+      setFeedbackLoading(true);
+      const response = await fetch('/api/feedback/all', {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        setFeedbackList(data.feedback || []);
+        
+        // Calculate stats
+        const stats = {
+          total: data.feedback?.length || 0,
+          pending: data.feedback?.filter(f => f.status === 'pending').length || 0,
+          inReview: data.feedback?.filter(f => f.status === 'in_review').length || 0,
+          responded: data.feedback?.filter(f => f.status === 'responded').length || 0
+        };
+        setFeedbackStats(stats);
+      }
+    } catch (err) {
+      console.error('Error fetching feedback:', err);
+    } finally {
+      setFeedbackLoading(false);
     }
   };
 
@@ -342,6 +387,7 @@ export default function AdminDashboard() {
                 { id: 'overview', label: 'Overview', icon: BarChart3, color: 'from-blue-500 to-cyan-500' },
                 { id: 'agents', label: 'Agent Management', icon: Users, color: 'from-green-500 to-emerald-500' },
                 { id: 'leads', label: 'Lead Assignment', icon: Target, color: 'from-purple-500 to-pink-500' },
+                { id: 'feedback', label: 'Agent Feedback', icon: MessageSquare, color: 'from-indigo-500 to-purple-500' },
                 { id: 'campaigns', label: 'Confirmed Meetings', icon: CalendarDays, color: 'from-orange-500 to-red-500' }
               ].map((tab) => {
                 const Icon = tab.icon;
@@ -1032,6 +1078,181 @@ export default function AdminDashboard() {
               </div>
             </div>
           )}
+
+          {/* Feedback Management Tab */}
+          {activeTab === 'feedback' && (
+            <div className="space-y-6">
+              <div className="flex justify-between items-center">
+                <h2 className="text-2xl font-bold text-gray-900">Agent Feedback Management</h2>
+                <button
+                  onClick={fetchFeedback}
+                  className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                >
+                  <MessageSquare className="-ml-1 mr-2 h-4 w-4" />
+                  Refresh Feedback
+                </button>
+              </div>
+
+              {/* Feedback Stats */}
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                <div className="bg-white rounded-lg shadow p-6">
+                  <div className="flex items-center">
+                    <div className="flex-shrink-0">
+                      <MessageSquare className="h-8 w-8 text-indigo-600" />
+                    </div>
+                    <div className="ml-5 w-0 flex-1">
+                      <dl>
+                        <dt className="text-sm font-medium text-gray-500 truncate">Total Feedback</dt>
+                        <dd className="text-lg font-medium text-gray-900">{feedbackStats.total}</dd>
+                      </dl>
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="bg-white rounded-lg shadow p-6">
+                  <div className="flex items-center">
+                    <div className="flex-shrink-0">
+                      <AlertCircle className="h-8 w-8 text-yellow-600" />
+                    </div>
+                    <div className="ml-5 w-0 flex-1">
+                      <dl>
+                        <dt className="text-sm font-medium text-gray-500 truncate">Pending Review</dt>
+                        <dd className="text-lg font-medium text-gray-900">{feedbackStats.pending}</dd>
+                      </dl>
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="bg-white rounded-lg shadow p-6">
+                  <div className="flex items-center">
+                    <div className="flex-shrink-0">
+                      <Eye className="h-8 w-8 text-blue-600" />
+                    </div>
+                    <div className="ml-5 w-0 flex-1">
+                      <dl>
+                        <dt className="text-sm font-medium text-gray-500 truncate">In Review</dt>
+                        <dd className="text-lg font-medium text-gray-900">{feedbackStats.inReview}</dd>
+                      </dl>
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="bg-white rounded-lg shadow p-6">
+                  <div className="flex items-center">
+                    <div className="flex-shrink-0">
+                      <Check className="h-8 w-8 text-green-600" />
+                    </div>
+                    <div className="ml-5 w-0 flex-1">
+                      <dl>
+                        <dt className="text-sm font-medium text-gray-500 truncate">Responded</dt>
+                        <dd className="text-lg font-medium text-gray-900">{feedbackStats.responded}</dd>
+                      </dl>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Feedback Table */}
+              <div className="bg-white shadow overflow-hidden sm:rounded-md">
+                <div className="px-4 py-5 sm:p-6">
+                  <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">Recent Feedback</h3>
+                  
+                  {feedbackLoading ? (
+                    <div className="text-center py-8">
+                      <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+                      <p className="mt-2 text-sm text-gray-500">Loading feedback...</p>
+                    </div>
+                  ) : feedbackList.length === 0 ? (
+                    <div className="text-center py-8">
+                      <MessageSquare className="mx-auto h-12 w-12 text-gray-400" />
+                      <h3 className="mt-2 text-sm font-medium text-gray-900">No feedback yet</h3>
+                      <p className="mt-1 text-sm text-gray-500">Agents haven't submitted any feedback yet.</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full divide-y divide-gray-200">
+                        <thead className="bg-gray-50">
+                          <tr>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                              Agent & Lead
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                              Type & Priority
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                              Status
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                              Submitted
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                              Actions
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody className="bg-white divide-y divide-gray-200">
+                          {feedbackList.map((feedback) => (
+                            <tr key={feedback.id} className="hover:bg-gray-50">
+                              <td className="px-6 py-4 whitespace-nowrap">
+                                <div className="flex items-center">
+                                  <div className="flex-shrink-0 h-10 w-10">
+                                    <div className="h-10 w-10 rounded-full bg-indigo-100 flex items-center justify-center">
+                                      <User className="h-5 w-5 text-indigo-600" />
+                                    </div>
+                                  </div>
+                                  <div className="ml-4">
+                                    <div className="text-sm font-medium text-gray-900">
+                                      {feedback.agent?.name || 'Unknown Agent'}
+                                    </div>
+                                    <div className="text-sm text-gray-500">
+                                      Lead: {feedback.lead?.fullName || feedback.lead?.email || 'Unknown Lead'}
+                                    </div>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap">
+                                <div className="text-sm text-gray-900">{feedback.type}</div>
+                                <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                                  feedback.priority === 'high' ? 'bg-red-100 text-red-800' :
+                                  feedback.priority === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                                  'bg-green-100 text-green-800'
+                                }`}>
+                                  {feedback.priority}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap">
+                                <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                                  feedback.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
+                                  feedback.status === 'in_review' ? 'bg-blue-100 text-blue-800' :
+                                  'bg-green-100 text-green-800'
+                                }`}>
+                                  {feedback.status.replace('_', ' ')}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                {feedback.createdAt ? format(new Date(feedback.createdAt), 'MMM d, yyyy HH:mm') : 'N/A'}
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                                <button
+                                  onClick={() => {
+                                    setSelectedFeedback(feedback);
+                                    setShowFeedbackModal(true);
+                                  }}
+                                  className="text-indigo-600 hover:text-indigo-900 mr-3"
+                                >
+                                  View Details
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </main>
       </div>
 
@@ -1330,6 +1551,185 @@ export default function AdminDashboard() {
               <div className="mt-6 flex justify-end">
                 <button
                   onClick={handleCloseLeadModal}
+                  className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Feedback Detail Modal */}
+      {showFeedbackModal && selectedFeedback && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
+            <div className="mt-3">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-medium text-gray-900">Feedback Details</h3>
+                <button
+                  onClick={() => {
+                    setShowFeedbackModal(false);
+                    setSelectedFeedback(null);
+                    setFeedbackResponse('');
+                  }}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+              
+              <div className="space-y-6">
+                {/* Feedback Information */}
+                <div className="bg-gray-50 p-4 rounded-lg">
+                  <h4 className="text-md font-semibold text-gray-900 mb-3">Feedback Information</h4>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Agent</label>
+                      <p className="mt-1 text-sm text-gray-900">{selectedFeedback.agent?.name || 'Unknown Agent'}</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Lead</label>
+                      <p className="mt-1 text-sm text-gray-900">
+                        {selectedFeedback.lead?.fullName || selectedFeedback.lead?.email || 'Unknown Lead'}
+                      </p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Type</label>
+                      <p className="mt-1 text-sm text-gray-900">{selectedFeedback.type}</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Priority</label>
+                      <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                        selectedFeedback.priority === 'high' ? 'bg-red-100 text-red-800' :
+                        selectedFeedback.priority === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                        'bg-green-100 text-green-800'
+                      }`}>
+                        {selectedFeedback.priority}
+                      </span>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Status</label>
+                      <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                        selectedFeedback.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
+                        selectedFeedback.status === 'in_review' ? 'bg-blue-100 text-blue-800' :
+                        'bg-green-100 text-green-800'
+                      }`}>
+                        {selectedFeedback.status.replace('_', ' ')}
+                      </span>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Submitted</label>
+                      <p className="mt-1 text-sm text-gray-900">
+                        {selectedFeedback.createdAt ? format(new Date(selectedFeedback.createdAt), 'MMM d, yyyy HH:mm') : 'N/A'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Feedback Content */}
+                <div className="bg-gray-50 p-4 rounded-lg">
+                  <h4 className="text-md font-semibold text-gray-900 mb-3">Feedback Content</h4>
+                  <div className="bg-white p-3 rounded border">
+                    <p className="text-sm text-gray-900 whitespace-pre-wrap">
+                      {selectedFeedback.message || 'No message provided'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Admin Response */}
+                <div className="bg-gray-50 p-4 rounded-lg">
+                  <h4 className="text-md font-semibold text-gray-900 mb-3">Admin Response</h4>
+                  {selectedFeedback.adminResponse ? (
+                    <div className="bg-white p-3 rounded border mb-3">
+                      <p className="text-sm text-gray-900 whitespace-pre-wrap">
+                        {selectedFeedback.adminResponse}
+                      </p>
+                      <p className="text-xs text-gray-500 mt-2">
+                        Responded: {selectedFeedback.respondedAt ? format(new Date(selectedFeedback.respondedAt), 'MMM d, yyyy HH:mm') : 'N/A'}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <textarea
+                        value={feedbackResponse}
+                        onChange={(e) => setFeedbackResponse(e.target.value)}
+                        placeholder="Enter your response to this feedback..."
+                        rows={4}
+                        className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                      />
+                      <div className="flex space-x-2">
+                        <button
+                          onClick={async () => {
+                            try {
+                              const response = await fetch(`/api/feedback/${selectedFeedback.id}`, {
+                                method: 'PUT',
+                                headers: {
+                                  'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
+                                  'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                  adminResponse: feedbackResponse,
+                                  status: 'responded'
+                                })
+                              });
+                              
+                              if (response.ok) {
+                                await fetchFeedback();
+                                setShowFeedbackModal(false);
+                                setSelectedFeedback(null);
+                                setFeedbackResponse('');
+                              }
+                            } catch (err) {
+                              console.error('Error responding to feedback:', err);
+                            }
+                          }}
+                          disabled={!feedbackResponse.trim()}
+                          className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Send Response
+                        </button>
+                        <button
+                          onClick={async () => {
+                            try {
+                              const response = await fetch(`/api/feedback/admin/respond/${selectedFeedback.id}`, {
+                                method: 'POST',
+                                headers: {
+                                  'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
+                                  'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                  status: 'in_review'
+                                })
+                              });
+                              
+                              if (response.ok) {
+                                await fetchFeedback();
+                                setShowFeedbackModal(false);
+                                setSelectedFeedback(null);
+                              }
+                            } catch (err) {
+                              console.error('Error updating feedback status:', err);
+                            }
+                          }}
+                          className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        >
+                          Mark In Review
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-6 flex justify-end">
+                <button
+                  onClick={() => {
+                    setShowFeedbackModal(false);
+                    setSelectedFeedback(null);
+                    setFeedbackResponse('');
+                  }}
                   className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500"
                 >
                   Close

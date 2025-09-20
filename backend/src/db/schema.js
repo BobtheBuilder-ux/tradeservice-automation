@@ -84,6 +84,10 @@ export const leads = pgTable('leads', {
   processingErrors: jsonb('processing_errors'),
   trackingId: varchar('tracking_id', { length: 255 }),
   
+  // Meeting scheduling and reminders
+  meetingScheduled: boolean('meeting_scheduled').notNull().default(false),
+  lastMeetingReminderSent: timestamp('last_meeting_reminder_sent', { withTimezone: true }),
+  
   // Timestamps
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
@@ -305,11 +309,42 @@ export const migrationLocks = pgTable('migration_locks', {
   migrationVersion: varchar('migration_version', { length: 50 }),
 });
 
+// Agent Feedback table
+export const agentFeedback = pgTable('agent_feedback', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  agentId: uuid('agent_id').references(() => agents.id, { onDelete: 'cascade' }).notNull(),
+  leadId: uuid('lead_id').references(() => leads.id, { onDelete: 'cascade' }).notNull(),
+  feedbackType: varchar('feedback_type', { length: 50 }).notNull().default('general'), // general, lead_update, issue, suggestion
+  subject: varchar('subject', { length: 255 }).notNull(),
+  content: text('content').notNull(),
+  priority: varchar('priority', { length: 20 }).notNull().default('medium'), // low, medium, high, urgent
+  status: varchar('status', { length: 50 }).notNull().default('submitted'), // submitted, reviewed, resolved, closed
+  adminResponse: text('admin_response'),
+  adminRespondedBy: uuid('admin_responded_by').references(() => agents.id, { onDelete: 'set null' }),
+  adminRespondedAt: timestamp('admin_responded_at', { withTimezone: true }),
+  isRead: boolean('is_read').notNull().default(false),
+  tags: jsonb('tags'), // Array of tags for categorization
+  attachments: jsonb('attachments'), // Array of attachment metadata
+  metadata: jsonb('metadata'), // Additional metadata
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
+}, (table) => ({
+  agentIdIdx: index('idx_agent_feedback_agent_id').on(table.agentId),
+  leadIdIdx: index('idx_agent_feedback_lead_id').on(table.leadId),
+  statusIdx: index('idx_agent_feedback_status').on(table.status),
+  createdAtIdx: index('idx_agent_feedback_created_at').on(table.createdAt),
+  priorityIdx: index('idx_agent_feedback_priority').on(table.priority),
+  agentLeadIdx: index('idx_agent_feedback_agent_lead').on(table.agentId, table.leadId),
+  typeStatusIdx: index('idx_agent_feedback_type_status').on(table.feedbackType, table.status),
+}));
+
 // Relations
 export const agentsRelations = relations(agents, ({ many }) => ({
   assignedLeads: many(leads, { relationName: 'assignedAgent' }),
   updatedLeads: many(leads, { relationName: 'lastUpdatedBy' }),
   auditLogs: many(leadAuditLog),
+  feedback: many(agentFeedback, { relationName: 'agentFeedback' }),
+  adminResponses: many(agentFeedback, { relationName: 'adminResponses' }),
 }));
 
 export const leadsRelations = relations(leads, ({ one, many }) => ({
@@ -327,6 +362,24 @@ export const leadsRelations = relations(leads, ({ one, many }) => ({
   processingLogs: many(leadProcessingLogs),
   webhookEvents: many(webhookEvents),
   workflowAutomations: many(workflowAutomation),
+  feedback: many(agentFeedback),
+}));
+
+export const agentFeedbackRelations = relations(agentFeedback, ({ one }) => ({
+  agent: one(agents, {
+    fields: [agentFeedback.agentId],
+    references: [agents.id],
+    relationName: 'agentFeedback',
+  }),
+  lead: one(leads, {
+    fields: [agentFeedback.leadId],
+    references: [leads.id],
+  }),
+  adminResponder: one(agents, {
+    fields: [agentFeedback.adminRespondedBy],
+    references: [agents.id],
+    relationName: 'adminResponses',
+  }),
 }));
 
 export const leadAuditLogRelations = relations(leadAuditLog, ({ one }) => ({

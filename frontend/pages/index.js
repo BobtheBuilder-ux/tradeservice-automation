@@ -66,16 +66,14 @@ export default function Dashboard() {
       }
       
       const data = await response.json();
-      setUser(data.user);
       
-      // For now, set basic permissions since the backend /me endpoint doesn't return permissions
-      // You may need to add a separate endpoint for permissions or modify the backend
-      setPermissions({ view_all_agents: data.user.role === 'admin' });
-      
-      // Fetch data based on user permissions
-      await fetchLeads(data.user, { view_all_agents: data.user.role === 'admin' });
+      // Redirect to appropriate dashboard based on user role
       if (data.user.role === 'admin') {
-        await fetchAgents();
+        router.push('/admin-dashboard');
+        return;
+      } else {
+        router.push('/agent-dashboard');
+        return;
       }
     } catch (err) {
       console.error('Authentication error:', err);
@@ -238,6 +236,13 @@ export default function Dashboard() {
               </p>
             </div>
             <div className="flex items-center space-x-4">
+              <button
+                onClick={() => router.push('/agent-dashboard')}
+                className="inline-flex items-center px-4 py-2 border border-orange-300 shadow-sm text-sm font-medium rounded-md text-orange-700 bg-orange-50 hover:bg-orange-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
+              >
+                <User className="w-4 h-4 mr-2" />
+                Agent Dashboard
+              </button>
               <button
                 onClick={() => router.push('/campaigns')}
                 className="inline-flex items-center px-4 py-2 border border-blue-300 shadow-sm text-sm font-medium rounded-md text-blue-700 bg-blue-50 hover:bg-blue-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
