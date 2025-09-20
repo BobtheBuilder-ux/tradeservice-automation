@@ -342,26 +342,26 @@ export default function AgentDashboard() {
                   ) : (
                     filteredLeads.map((lead) => (
                       <tr key={lead.id} className="hover:bg-gradient-to-r hover:from-orange-50 hover:to-red-50 transition-all duration-200">
-                        <td className="px-6 py-4 whitespace-nowrap">
+                        <td className="px-6 py-5 whitespace-nowrap">
                           <div className="flex items-center">
                             <div>
-                              <div className="text-sm font-medium text-gray-900">
+                              <div className="text-sm font-bold text-gray-900">
                                 {lead.fullName || 'No name'}
                               </div>
-                              <div className="text-sm text-gray-500 flex items-center mt-1">
-                                <Mail className="w-3 h-3 mr-1" />
+                              <div className="text-sm text-teal-600 flex items-center mt-1 font-medium">
+                                <Mail className="w-4 h-4 mr-1" />
                                 {lead.email}
                               </div>
                               {lead.phone && (
-                                <div className="text-sm text-gray-500 flex items-center mt-1">
-                                  <Phone className="w-3 h-3 mr-1" />
+                                <div className="text-sm text-orange-600 flex items-center mt-1 font-medium">
+                                  <Phone className="w-4 h-4 mr-1" />
                                   {lead.phone}
                                 </div>
                               )}
                             </div>
                           </div>
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
+                        <td className="px-6 py-5 whitespace-nowrap">
                           <div className="flex items-center">
                             {getStatusIcon(lead.status)}
                             <span className="ml-2 text-sm text-gray-900 capitalize">
