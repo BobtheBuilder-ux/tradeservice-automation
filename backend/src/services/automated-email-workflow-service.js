@@ -323,6 +323,16 @@ class AutomatedEmailWorkflowService {
         return { success: true, skipped: true, reason: 'meeting_scheduled' };
       }
 
+      // Check if lead has confirmed meeting is scheduled
+      if (leadData.meetingScheduled) {
+        logger.info('Lead has confirmed meeting scheduled, skipping follow-up reminder', {
+          trackingId,
+          leadId,
+          meetingScheduled: leadData.meetingScheduled
+        });
+        return { success: true, skipped: true, reason: 'meeting_confirmed' };
+      }
+
       // Queue follow-up email
       const calendlyLink = process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK || 'https://calendly.com/your-link';
       

@@ -12,6 +12,7 @@ import hubspotWebhookRoutes from './src/routes/hubspot-webhook.js';
 import calendlyWebhookRoutes from './src/routes/calendly-webhook.js';
 import zapierWebhookRoutes from './src/routes/zapier-webhook.js';
 import n8nWebhookRoutes from './src/routes/n8n-webhook.js';
+import meetingWebhookRoutes from './src/routes/meeting-webhook.js';
 import healthRoutes from './src/routes/health.js';
 import authRoutes from './src/routes/auth.js';
 import analyticsRoutes from './src/routes/analytics.js';
@@ -120,7 +121,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Routes
+// Route handlers
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/analytics', analyticsRoutes);
@@ -130,6 +131,7 @@ app.use('/webhook/hubspot', hubspotWebhookRoutes);
 app.use('/webhook/calendly', calendlyWebhookRoutes);
 app.use('/webhook/zapier', zapierWebhookRoutes);
 app.use('/webhook/n8n', n8nWebhookRoutes);
+app.use('/webhook/meeting', meetingWebhookRoutes);
 app.use('/health', healthRoutes);
 
 // Calendly booking redirect route

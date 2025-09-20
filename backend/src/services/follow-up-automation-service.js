@@ -116,13 +116,15 @@ class FollowUpAutomationService {
         fullName: leads.fullName,
         createdAt: leads.createdAt,
         status: leads.status,
-        scheduledAt: leads.scheduledAt
+        scheduledAt: leads.scheduledAt,
+        meetingScheduled: leads.meetingScheduled
       })
       .from(leads)
       .where(
         and(
           inArray(leads.status, ['new', 'contacted']),
           isNull(leads.scheduledAt),
+          eq(leads.meetingScheduled, false), // Only leads who haven't confirmed meeting scheduled
           lt(leads.createdAt, new Date(Date.now() - 48 * 60 * 60 * 1000)), // 48 hours ago
           gt(leads.createdAt, new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)) // 7 days ago
         )
@@ -153,7 +155,7 @@ class FollowUpAutomationService {
         .where(
           and(
             eq(emailQueue.toEmail, email),
-            eq(emailQueue.templateType, 'follow_up'),
+            eq(emailQueue.emailType, 'follow_up'),
             gt(emailQueue.createdAt, new Date(Date.now() - 48 * 60 * 60 * 1000)) // 48 hours ago
           )
         )
@@ -173,6 +175,18 @@ class FollowUpAutomationService {
    * Queue follow-up email for a lead
    */
   async queueFollowUpEmail(lead, trackingId) {
+    // Check if this lead has received a recent follow-up email
+    const hasRecentEmail = await this.hasRecentFollowUpEmail(lead.email);
+    
+    if (hasRecentEmail) {
+      logger.info('Skipping follow-up email - recent email already sent', {
+        trackingId,
+        leadId: lead.id,
+        email: lead.email
+      });
+      return { skipped: true, reason: 'recent_email_exists' };
+    }
+
     const calendlyLink = process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK;
 
     const leadData = {

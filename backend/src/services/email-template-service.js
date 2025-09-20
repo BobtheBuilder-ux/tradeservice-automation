@@ -97,6 +97,7 @@ class EmailTemplateService {
         html,
         text,
         template_type: 'follow_up',
+        email_type: 'follow_up',
         lead_id: leadData.id,
         tracking_id: trackingId,
         metadata: {
@@ -857,8 +858,25 @@ Tracking ID: ${trackingId}
                     font-weight: bold; 
                     font-size: 18px; 
                     display: inline-block; 
-                    box-shadow: 0 4px 15px rgba(231, 76, 60, 0.3);">
-            🚀 Claim My Free Consultation Now
+                    box-shadow: 0 4px 15px rgba(231, 76, 60, 0.3);
+                    margin: 10px;">
+            🗓️ Schedule My Free Consultation
+          </a>
+          
+          <br><br>
+          
+          <a href="${process.env.BACKEND_URL || 'http://localhost:3001'}/api/webhook/meeting-confirmed?leadId=${leadData.id}&trackingId=${trackingId}" 
+             style="background: linear-gradient(135deg, #27ae60 0%, #229954 100%); 
+                    color: white; 
+                    padding: 18px 35px; 
+                    text-decoration: none; 
+                    border-radius: 50px; 
+                    font-weight: bold; 
+                    font-size: 18px; 
+                    display: inline-block; 
+                    box-shadow: 0 4px 15px rgba(39, 174, 96, 0.3);
+                    margin: 10px;">
+            ✅ I have scheduled my meeting
           </a>
         </div>
         
