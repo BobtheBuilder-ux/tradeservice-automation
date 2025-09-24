@@ -150,6 +150,8 @@ router.post('/agents', verifyAdmin, async (req, res) => {
         verificationToken: resetToken,
         agentToken: resetToken,
         agentTokenExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        resetToken: resetToken,
+        resetTokenExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
         createdAt: new Date()
       })
       .returning();

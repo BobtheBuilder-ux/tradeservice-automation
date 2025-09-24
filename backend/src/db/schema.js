@@ -17,7 +17,7 @@ export const agents = pgTable('agents', {
   verificationToken: varchar('verification_token', { length: 255 }),
   agentToken: varchar('agent_token', { length: 255 }),
   agentTokenExpires: timestamp('agent_token_expires', { withTimezone: true }),
-  resetToken: varchar('reset_token', { length: 255 }),
+  resetToken: text('reset_token'),
   resetTokenExpires: timestamp('reset_token_expires', { withTimezone: true }),
   lastLogin: timestamp('last_login', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow(),
@@ -339,12 +339,16 @@ export const agentFeedback = pgTable('agent_feedback', {
 }));
 
 // Relations
-export const agentsRelations = relations(agents, ({ many }) => ({
+export const agentsRelations = relations(agents, ({ many, one }) => ({
   assignedLeads: many(leads, { relationName: 'assignedAgent' }),
   updatedLeads: many(leads, { relationName: 'lastUpdatedBy' }),
   auditLogs: many(leadAuditLog),
   feedback: many(agentFeedback, { relationName: 'agentFeedback' }),
   adminResponses: many(agentFeedback, { relationName: 'adminResponses' }),
+  integration: one(agentIntegrations, {
+    fields: [agents.id],
+    references: [agentIntegrations.agentId],
+  }),
 }));
 
 export const leadsRelations = relations(leads, ({ one, many }) => ({
@@ -418,5 +422,24 @@ export const emailQueueRelations = relations(emailQueue, ({ one }) => ({
   lead: one(leads, {
     fields: [emailQueue.leadId],
     references: [leads.id],
+  }),
+}));
+
+// Agent Integrations table to store per-agent OAuth tokens (Calendly, Zoom)
+export const agentIntegrations = pgTable('agent_integrations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  agentId: uuid('agent_id').references(() => agents.id, { onDelete: 'cascade' }).notNull().unique(),
+  calendlyAccessToken: text('calendly_access_token'),
+  zoomAccessToken: text('zoom_access_token'),
+  zoomRefreshToken: text('zoom_refresh_token'),
+  connectedAt: timestamp('connected_at', { withTimezone: true }).defaultNow(),
+}, (table) => ({
+  agentIdIdx: index('idx_agent_integrations_agent_id').on(table.agentId),
+}));
+
+export const agentIntegrationsRelations = relations(agentIntegrations, ({ one }) => ({
+  agent: one(agents, {
+    fields: [agentIntegrations.agentId],
+    references: [agents.id],
   }),
 }));

@@ -19,6 +19,7 @@ import analyticsRoutes from './src/routes/analytics.js';
 import leadsRoutes from './src/routes/leads.js';
 import adminRoutes from './src/routes/admin.js';
 import feedbackRoutes from './src/routes/feedback.js';
+import integrationsRoutes from './src/routes/integrations.js';
 
 import { WorkflowOrchestrator } from './workflow-orchestrator.js';
 import reminderScheduler from './src/services/reminder-scheduler.js';
@@ -85,12 +86,24 @@ if (process.env.NODE_ENV === 'production') {
 // Middleware
 app.use(helmet());
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production' 
-    ? [process.env.FRONTEND_URL].filter(Boolean)
-    : ['http://localhost:3000', 'http://127.0.0.1:3000', process.env.FRONTEND_URL].filter(Boolean),
+  origin: function (origin, callback) {
+    const allowedOrigins = process.env.NODE_ENV === 'production' 
+      ? [process.env.FRONTEND_URL].filter(Boolean)
+      : ['http://localhost:3000', 'http://127.0.0.1:3000', process.env.FRONTEND_URL].filter(Boolean);
+    
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin', 'User-Agent', 'Cache-Control', 'Pragma']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin', 'User-Agent', 'Cache-Control', 'Pragma'],
+  optionsSuccessStatus: 200 // Some legacy browsers (IE11, various SmartTVs) choke on 204
 }));
 
 // Additional CORS handling for webhook endpoints
@@ -127,6 +140,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/leads', leadsRoutes);
 app.use('/api/feedback', feedbackRoutes);
+app.use('/api/integrations', integrationsRoutes);
 app.use('/webhook/hubspot', hubspotWebhookRoutes);
 app.use('/webhook/calendly', calendlyWebhookRoutes);
 app.use('/webhook/zapier', zapierWebhookRoutes);

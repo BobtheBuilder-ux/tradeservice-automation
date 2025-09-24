@@ -154,6 +154,21 @@ class ApiClient {
   async delete(endpoint, options = {}) {
     return this.request(endpoint, { ...options, method: 'DELETE' });
   }
+
+  // Integrations
+  async getIntegrationStatus() {
+    return this.get('/integrations/status');
+  }
+
+  async getCalendlyAuthUrl(redirect) {
+    const encoded = redirect ? `?redirect=${encodeURIComponent(redirect)}` : '';
+    return this.get(`/integrations/calendly/start${encoded}`);
+  }
+
+  async getZoomAuthUrl(redirect) {
+    const encoded = redirect ? `?redirect=${encodeURIComponent(redirect)}` : '';
+    return this.get(`/integrations/zoom/start${encoded}`);
+  }
 }
 
 // Create and export a singleton instance

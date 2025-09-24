@@ -325,10 +325,12 @@ router.post('/forgot-password', async (req, res) => {
       });
     }
 
+    const normalizedEmail = email.trim().toLowerCase();
+
     // Find user
     const userRecord = await db.select()
       .from(agents)
-      .where(eq(agents.email, email))
+      .where(eq(agents.email, normalizedEmail))
       .limit(1);
 
     if (!userRecord || userRecord.length === 0) {
@@ -340,8 +342,12 @@ router.post('/forgot-password', async (req, res) => {
 
     const user = userRecord[0];
 
-    // Generate reset token
-    const resetToken = generateResetToken(email);
+    // Generate reset token with normalized email
+    const resetToken = generateResetToken(normalizedEmail);
+
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[DEV] Generated reset token for', normalizedEmail, '\n', resetToken);
+    }
 
     // Store reset token in database
     try {
@@ -359,7 +365,7 @@ router.post('/forgot-password', async (req, res) => {
     }
 
     // Send reset email
-    const emailResult = await emailService.sendPasswordResetEmail(email, resetToken);
+    const emailResult = await emailService.sendPasswordResetEmail(normalizedEmail, resetToken);
     
     if (!emailResult.success) {
       console.error('Failed to send reset email:', emailResult.error);
@@ -405,19 +411,27 @@ router.post('/reset-password', async (req, res) => {
       });
     }
 
+    const decodedEmail = (decoded.email || '').toLowerCase();
+
     // Find user with this reset token
     const userRecord = await db.select()
       .from(agents)
       .where(eq(agents.resetToken, token))
       .limit(1);
 
-    if (!userRecord || userRecord.length === 0 || userRecord[0].email !== decoded.email) {
+    if (!userRecord || userRecord.length === 0) {
       return res.status(400).json({
         error: 'Invalid reset token'
       });
     }
 
     const user = userRecord[0];
+
+    if ((user.email || '').toLowerCase() !== decodedEmail) {
+      return res.status(400).json({
+        error: 'Invalid reset token'
+      });
+    }
 
     // Check if token is expired
     if (new Date() > new Date(user.resetTokenExpires)) {

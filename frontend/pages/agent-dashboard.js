@@ -17,7 +17,9 @@ import {
   XCircle,
   BarChart,
   LogOut,
-  MessageSquare
+  MessageSquare,
+  Video,
+  Link
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { useAuth, authManager } from '../lib/auth';
@@ -38,6 +40,11 @@ export default function AgentDashboard() {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
   const [feedbackLead, setFeedbackLead] = useState(null);
+  const [integrationStatus, setIntegrationStatus] = useState({
+    calendly: { connected: false, connectedAt: null },
+    zoom: { connected: false, connectedAt: null }
+  });
+  const [integrationLoading, setIntegrationLoading] = useState(false);
 
   useEffect(() => {
     // Wait for auth to finish loading before making redirect decisions
@@ -57,6 +64,7 @@ export default function AgentDashboard() {
     // Only fetch leads if user is authenticated and verified
     if (isAuthenticated && user) {
       fetchLeads();
+      fetchIntegrationStatus();
     }
   }, [isAuthenticated, user, router, authLoading]);
 
@@ -94,6 +102,54 @@ export default function AgentDashboard() {
       setError('Failed to load leads');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchIntegrationStatus = async () => {
+    if (!isAuthenticated || !localStorage.getItem('auth_token')) {
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/integrations/status', {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        setIntegrationStatus(data);
+      }
+    } catch (err) {
+      console.error('Error fetching integration status:', err);
+    }
+  };
+
+  const handleIntegrationConnect = async (platform) => {
+    setIntegrationLoading(true);
+    try {
+      const response = await fetch(`/api/integrations/${platform}/start`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        // Redirect to OAuth URL
+        window.location.href = data.url;
+      } else {
+        throw new Error(`Failed to start ${platform} integration`);
+      }
+    } catch (err) {
+      console.error(`Error connecting ${platform}:`, err);
+      alert(`Failed to connect ${platform}. Please try again.`);
+    } finally {
+      setIntegrationLoading(false);
     }
   };
 
@@ -168,6 +224,35 @@ export default function AgentDashboard() {
                 <h1 className="text-2xl font-bold text-white drop-shadow-lg">🚀 Agent Dashboard</h1>
               </div>
               <div className="flex items-center space-x-4">
+                {/* Integration Buttons */}
+                <div className="flex items-center space-x-2">
+                  <button
+                    onClick={() => handleIntegrationConnect('calendly')}
+                    disabled={integrationLoading}
+                    className={`flex items-center space-x-2 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+                      integrationStatus.calendly.connected
+                        ? 'bg-green-500/20 text-green-100 border border-green-400/30'
+                        : 'bg-white/20 text-white hover:bg-white/30 border border-white/20 hover:border-white/40'
+                    }`}
+                  >
+                    <Link className="w-4 h-4" />
+                    <span>{integrationStatus.calendly.connected ? 'Calendly ✓' : 'Connect Calendly'}</span>
+                  </button>
+                  
+                  <button
+                    onClick={() => handleIntegrationConnect('zoom')}
+                    disabled={integrationLoading}
+                    className={`flex items-center space-x-2 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+                      integrationStatus.zoom.connected
+                        ? 'bg-green-500/20 text-green-100 border border-green-400/30'
+                        : 'bg-white/20 text-white hover:bg-white/30 border border-white/20 hover:border-white/40'
+                    }`}
+                  >
+                    <Video className="w-4 h-4" />
+                    <span>{integrationStatus.zoom.connected ? 'Zoom ✓' : 'Connect Zoom'}</span>
+                  </button>
+                </div>
+                
                 <span className="text-orange-100 font-medium">Welcome, {user?.name || user?.email}</span>
                 <button
                   onClick={handleSignOut}
