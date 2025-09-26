@@ -24,6 +24,7 @@ import {
 import { format } from 'date-fns';
 import { useAuth, authManager } from '../lib/auth';
 import FeedbackModal from '../components/FeedbackModal';
+import LeadDetailsModal from '../components/LeadDetailsModal';
 
 // Using backend API instead of Supabase direct connection
 
@@ -40,6 +41,8 @@ export default function AgentDashboard() {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
   const [feedbackLead, setFeedbackLead] = useState(null);
+  const [showLeadDetailsModal, setShowLeadDetailsModal] = useState(false);
+  const [detailsLead, setDetailsLead] = useState(null);
   const [integrationStatus, setIntegrationStatus] = useState({
     calendly: { connected: false, connectedAt: null }
   });
@@ -420,7 +423,14 @@ export default function AgentDashboard() {
                     </tr>
                   ) : (
                     filteredLeads.map((lead) => (
-                      <tr key={lead.id} className="hover:bg-gradient-to-r hover:from-orange-50 hover:to-red-50 transition-all duration-200">
+                      <tr 
+                        key={lead.id} 
+                        className="hover:bg-gradient-to-r hover:from-orange-50 hover:to-red-50 transition-all duration-200 cursor-pointer"
+                        onClick={() => {
+                          setDetailsLead(lead);
+                          setShowLeadDetailsModal(true);
+                        }}
+                      >
                         <td className="px-6 py-5 whitespace-nowrap">
                           <div className="flex items-center">
                             <div>
@@ -459,7 +469,8 @@ export default function AgentDashboard() {
                         <td className="px-6 py-5 whitespace-nowrap text-sm font-medium">
                           <div className="flex space-x-2">
                             <button
-                              onClick={() => {
+                              onClick={(e) => {
+                                e.stopPropagation(); // Prevent row click
                                 setSelectedLead(lead);
                                 setShowEditModal(true);
                               }}
@@ -469,7 +480,8 @@ export default function AgentDashboard() {
                               Edit
                             </button>
                             <button
-                              onClick={() => {
+                              onClick={(e) => {
+                                e.stopPropagation(); // Prevent row click
                                 setFeedbackLead(lead);
                                 setShowFeedbackModal(true);
                               }}
@@ -490,7 +502,23 @@ export default function AgentDashboard() {
         </main>
       </div>
 
-      {/* Feedback Modal */}
+      {/* Lead Details Modal */}
+        <LeadDetailsModal
+          isOpen={showLeadDetailsModal}
+          lead={detailsLead}
+          onClose={() => {
+            setShowLeadDetailsModal(false);
+            setDetailsLead(null);
+          }}
+          onLeadUpdate={(updatedLead) => {
+            // Update the lead in the local state
+            setLeads(leads.map(l => l.id === updatedLead.id ? updatedLead : l));
+            setShowLeadDetailsModal(false);
+            setDetailsLead(null);
+          }}
+        />
+
+        {/* Feedback Modal */}
       <FeedbackModal
         isOpen={showFeedbackModal}
         onClose={() => {

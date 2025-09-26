@@ -24,11 +24,20 @@ export async function fetchHubSpotLeads(options = {}, trackingId) {
     const searchRequest = {
       filterGroups: [],
       properties: [
+        // Standard properties
         'id', 'email', 'firstname', 'lastname', 'phone', 'company', 
         'jobtitle', 'website', 'city', 'state', 'country', 'zip',
         'createdate', 'lastmodifieddate', 'hs_lead_status',
         'lifecyclestage', 'lead_source', 'hs_analytics_source',
-        'hs_analytics_source_data_1', 'hs_analytics_source_data_2'
+        'hs_analytics_source_data_1', 'hs_analytics_source_data_2',
+        // Custom properties from the discovery file
+        'address', 'annualrevenue', 'anything_specific_about_your_hiring_needs',
+        'are_you_currently_covered_by_any_form_of_mortgage_insurance',
+        'area_of_interest', 'availability_to_start', 'budget_range',
+        'business_type', 'current_challenges', 'desired_outcome',
+        'experience_level', 'industry', 'lead_score', 'lead_priority',
+        'marketing_source', 'notes', 'preferred_contact_method',
+        'project_timeline', 'referral_source', 'service_interest'
       ],
       sorts: [{
         propertyName: 'createdate',
@@ -91,11 +100,20 @@ export async function fetchHubSpotLeadById(contactId, trackingId) {
     const response = await hubspotClient.crm.contacts.basicApi.getById(
       contactId,
       [
+        // Standard properties
         'id', 'email', 'firstname', 'lastname', 'phone', 'company', 
         'jobtitle', 'website', 'city', 'state', 'country', 'zip',
         'createdate', 'lastmodifieddate', 'hs_lead_status',
         'lifecyclestage', 'lead_source', 'hs_analytics_source',
-        'hs_analytics_source_data_1', 'hs_analytics_source_data_2'
+        'hs_analytics_source_data_1', 'hs_analytics_source_data_2',
+        // Custom properties from the discovery file
+        'address', 'annualrevenue', 'anything_specific_about_your_hiring_needs',
+        'are_you_currently_covered_by_any_form_of_mortgage_insurance',
+        'area_of_interest', 'availability_to_start', 'budget_range',
+        'business_type', 'current_challenges', 'desired_outcome',
+        'experience_level', 'industry', 'lead_score', 'lead_priority',
+        'marketing_source', 'notes', 'preferred_contact_method',
+        'project_timeline', 'referral_source', 'service_interest'
       ]
     );
     
