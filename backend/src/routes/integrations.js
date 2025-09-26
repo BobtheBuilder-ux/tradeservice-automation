@@ -72,8 +72,6 @@ router.get('/status', verifyToken, async (req, res) => {
     const rows = await db
       .select({
         calendlyAccessToken: agentIntegrations.calendlyAccessToken,
-        zoomAccessToken: agentIntegrations.zoomAccessToken,
-        zoomRefreshToken: agentIntegrations.zoomRefreshToken,
         connectedAt: agentIntegrations.connectedAt,
       })
       .from(agentIntegrations)
@@ -84,11 +82,6 @@ router.get('/status', verifyToken, async (req, res) => {
     res.json({
       calendly: {
         connected: Boolean(integ.calendlyAccessToken),
-        connectedAt: integ.connectedAt || null,
-      },
-      zoom: {
-        connected: Boolean(integ.zoomAccessToken),
-        hasRefreshToken: Boolean(integ.zoomRefreshToken),
         connectedAt: integ.connectedAt || null,
       },
     });
@@ -201,101 +194,5 @@ router.get('/calendly/callback', async (req, res) => {
   }
 });
 
-// GET /api/integrations/zoom/start
-router.get('/zoom/start', verifyToken, async (req, res) => {
-  try {
-    const clientId = process.env.ZOOM_CLIENT_ID;
-    const redirectBase = process.env.BACKEND_URL || 'http://localhost:3001';
-    const redirectUri = `${redirectBase}/api/integrations/zoom/callback`;
-
-    if (!clientId) {
-      return res.status(400).json({ error: 'Zoom client ID not configured' });
-    }
-
-    // Set frontend callback URL for after OAuth completion
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    const frontendCallback = `${frontendUrl}/integration-callback?platform=zoom`;
-
-    const stateToken = jwt.sign({ userId: req.user.id, provider: 'zoom', redirect: frontendCallback }, process.env.JWT_SECRET, { expiresIn: '10m' });
-
-    const params = new URLSearchParams({
-      response_type: 'code',
-      client_id: clientId,
-      redirect_uri: redirectUri,
-      state: stateToken,
-    });
-
-    const authorizeUrl = `https://zoom.us/oauth/authorize?${params.toString()}`;
-    res.json({ url: authorizeUrl });
-  } catch (error) {
-    console.error('Error creating Zoom authorize URL:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// GET /api/integrations/zoom/callback
-router.get('/zoom/callback', async (req, res) => {
-  try {
-    const { code, state } = req.query;
-    if (!code || !state) {
-      return res.status(400).send('Missing code or state');
-    }
-
-    let decoded;
-    try {
-      decoded = jwt.verify(state, process.env.JWT_SECRET);
-    } catch (e) {
-      return res.status(400).send('Invalid state');
-    }
-
-    const clientId = process.env.ZOOM_CLIENT_ID;
-    const clientSecret = process.env.ZOOM_CLIENT_SECRET;
-    const redirectBase = process.env.BACKEND_URL || 'http://localhost:3001';
-    const redirectUri = `${redirectBase}/api/integrations/zoom/callback`;
-
-    if (!clientId || !clientSecret) {
-      return res.status(400).send('Zoom OAuth not configured');
-    }
-
-    const basicAuth = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-
-    const tokenRes = await fetch(`https://zoom.us/oauth/token?grant_type=authorization_code&code=${encodeURIComponent(code)}&redirect_uri=${encodeURIComponent(redirectUri)}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Basic ${basicAuth}`,
-      },
-    });
-
-    if (!tokenRes.ok) {
-      const errText = await tokenRes.text();
-      console.error('Zoom token exchange failed:', errText);
-      return res.status(500).send('Token exchange failed');
-    }
-
-    const tokenJson = await tokenRes.json();
-    const accessToken = tokenJson.access_token;
-    const refreshToken = tokenJson.refresh_token;
-
-    if (!accessToken) {
-      return res.status(500).send('No access token returned');
-    }
-
-    await upsertAgentIntegration(decoded.userId, {
-      zoomAccessToken: accessToken,
-      zoomRefreshToken: refreshToken || null,
-    });
-
-    if (decoded.redirect) {
-      const url = new URL(decoded.redirect);
-      url.searchParams.set('connected', 'zoom');
-      return res.redirect(url.toString());
-    }
-
-    return res.send('Zoom connected successfully. You can close this window.');
-  } catch (error) {
-    console.error('Zoom OAuth callback error:', error);
-    res.status(500).send('Internal server error');
-  }
-});
 
 export default router;

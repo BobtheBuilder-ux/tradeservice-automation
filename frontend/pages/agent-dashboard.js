@@ -41,8 +41,7 @@ export default function AgentDashboard() {
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
   const [feedbackLead, setFeedbackLead] = useState(null);
   const [integrationStatus, setIntegrationStatus] = useState({
-    calendly: { connected: false, connectedAt: null },
-    zoom: { connected: false, connectedAt: null }
+    calendly: { connected: false, connectedAt: null }
   });
   const [integrationLoading, setIntegrationLoading] = useState(false);
 
@@ -237,19 +236,6 @@ export default function AgentDashboard() {
                   >
                     <Link className="w-4 h-4" />
                     <span>{integrationStatus.calendly.connected ? 'Calendly ✓' : 'Connect Calendly'}</span>
-                  </button>
-                  
-                  <button
-                    onClick={() => handleIntegrationConnect('zoom')}
-                    disabled={integrationLoading}
-                    className={`flex items-center space-x-2 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
-                      integrationStatus.zoom.connected
-                        ? 'bg-green-500/20 text-green-100 border border-green-400/30'
-                        : 'bg-white/20 text-white hover:bg-white/30 border border-white/20 hover:border-white/40'
-                    }`}
-                  >
-                    <Video className="w-4 h-4" />
-                    <span>{integrationStatus.zoom.connected ? 'Zoom ✓' : 'Connect Zoom'}</span>
                   </button>
                 </div>
                 

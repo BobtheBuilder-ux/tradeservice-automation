@@ -104,6 +104,77 @@ router.get('/unassigned', verifyToken, async (req, res) => {
   }
 });
 
+// POST /api/leads - Create a new lead
+router.post('/', verifyToken, async (req, res) => {
+  try {
+    // Check if user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const { email, firstName, lastName, phone, source = 'manual', priority = 'medium' } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    // Check if lead with this email already exists
+    const existingLead = await db.select({ id: leads.id })
+      .from(leads)
+      .where(eq(leads.email, email))
+      .limit(1);
+
+    if (existingLead && existingLead.length > 0) {
+      return res.status(409).json({ error: 'Lead with this email already exists' });
+    }
+
+    // Create the new lead
+    const newLead = await db.insert(leads).values({
+      email,
+      firstName: firstName || null,
+      lastName: lastName || null,
+      phone: phone || null,
+      source,
+      priority,
+      status: 'new',
+      lastUpdatedBy: req.user.id,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }).returning({
+      id: leads.id,
+      email: leads.email,
+      firstName: leads.firstName,
+      lastName: leads.lastName,
+      fullName: leads.fullName,
+      phone: leads.phone,
+      source: leads.source,
+      status: leads.status,
+      priority: leads.priority,
+      assignedAgentId: leads.assignedAgentId,
+      createdAt: leads.createdAt,
+      updatedAt: leads.updatedAt
+    });
+
+    if (!newLead || newLead.length === 0) {
+      return res.status(500).json({ error: 'Failed to create lead' });
+    }
+
+    console.log('New lead created:', {
+      id: newLead[0].id,
+      email: newLead[0].email,
+      name: `${newLead[0].firstName || ''} ${newLead[0].lastName || ''}`.trim()
+    });
+
+    res.status(201).json({ 
+      message: 'Lead created successfully',
+      lead: newLead[0]
+    });
+  } catch (error) {
+    console.error('Error creating lead:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // GET /api/leads/agents/available - Get available agents (admin only)
 router.get('/agents/available', verifyToken, async (req, res) => {
   try {
@@ -493,155 +564,7 @@ router.post('/:leadId/calendly-link', verifyToken, async (req, res) => {
   }
 });
 
-// Create Zoom meeting for assigned agent
-router.post('/:leadId/zoom-meeting', verifyToken, async (req, res) => {
-  try {
-    const { leadId } = req.params;
-    const { topic, startTime, duration = 30, agenda } = req.body;
 
-    console.log(`🔍 ZOOM-MEETING: Creating meeting for lead ${leadId}`);
-
-    // Get lead details with assigned agent
-    const leadWithAgent = await db.select({
-      leadId: leads.id,
-      leadEmail: leads.email,
-      leadFirstName: leads.firstName,
-      leadLastName: leads.lastName,
-      leadFullName: leads.fullName,
-      assignedAgentId: leads.assignedAgentId,
-      agentId: agents.agentId,
-      agentFirstName: agents.firstName,
-      agentLastName: agents.lastName,
-      agentFullName: agents.fullName,
-      agentEmail: agents.email
-    })
-    .from(leads)
-    .leftJoin(agents, eq(leads.assignedAgentId, agents.id))
-    .where(eq(leads.id, leadId))
-    .limit(1);
-
-    if (!leadWithAgent || leadWithAgent.length === 0) {
-      return res.status(404).json({ error: 'Lead not found' });
-    }
-
-    const lead = leadWithAgent[0];
-
-    if (!lead.assignedAgentId) {
-      return res.status(400).json({ error: 'Lead must be assigned to an agent before creating Zoom meeting' });
-    }
-
-    console.log(`👤 ZOOM-MEETING: Lead assigned to agent ${lead.agentFullName || lead.agentFirstName}`);
-
-    // Get agent's Zoom integration
-    const agentIntegration = await db.select({
-      zoomAccessToken: agentIntegrations.zoomAccessToken,
-      zoomRefreshToken: agentIntegrations.zoomRefreshToken
-    })
-    .from(agentIntegrations)
-    .where(eq(agentIntegrations.agentId, lead.assignedAgentId))
-    .limit(1);
-
-    if (!agentIntegration || agentIntegration.length === 0 || !agentIntegration[0].zoomAccessToken) {
-      return res.status(400).json({ 
-        error: 'Agent does not have Zoom integration configured',
-        message: 'The assigned agent needs to connect their Zoom account first'
-      });
-    }
-
-    const { zoomAccessToken } = agentIntegration[0];
-    console.log(`🔑 ZOOM-MEETING: Found Zoom access token for agent`);
-
-    // Prepare meeting data
-    const meetingData = {
-      topic: topic || `Meeting with ${lead.leadFullName || lead.leadFirstName}`,
-      type: 2, // Scheduled meeting
-      start_time: startTime || new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Default to tomorrow
-      duration: duration,
-      agenda: agenda || `Meeting with lead ${lead.leadFullName || lead.leadFirstName} (${lead.leadEmail})`,
-      settings: {
-        host_video: true,
-        participant_video: true,
-        join_before_host: true,
-        mute_upon_entry: false,
-        watermark: false,
-        use_pmi: false,
-        approval_type: 2, // No registration required
-        audio: 'both', // Both telephony and VoIP
-        auto_recording: 'none'
-      }
-    };
-
-    console.log(`📅 ZOOM-MEETING: Creating meeting with data:`, {
-      topic: meetingData.topic,
-      start_time: meetingData.start_time,
-      duration: meetingData.duration
-    });
-
-    // Create Zoom meeting using agent's access token
-    const zoomResponse = await fetch('https://api.zoom.us/v2/users/me/meetings', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${zoomAccessToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(meetingData)
-    });
-
-    if (!zoomResponse.ok) {
-      const errorData = await zoomResponse.text();
-      console.error(`❌ ZOOM-MEETING: Failed to create meeting:`, {
-        status: zoomResponse.status,
-        statusText: zoomResponse.statusText,
-        error: errorData
-      });
-      
-      return res.status(500).json({ 
-        error: 'Failed to create Zoom meeting',
-        details: `Zoom API error: ${zoomResponse.status} ${zoomResponse.statusText}`,
-        zoomError: errorData
-      });
-    }
-
-    const zoomMeeting = await zoomResponse.json();
-    console.log(`✅ ZOOM-MEETING: Successfully created meeting:`, {
-      id: zoomMeeting.id,
-      join_url: zoomMeeting.join_url,
-      start_url: zoomMeeting.start_url
-    });
-
-    // Return meeting details
-    res.json({
-      message: 'Zoom meeting created successfully',
-      meeting: {
-        id: zoomMeeting.id,
-        topic: zoomMeeting.topic,
-        start_time: zoomMeeting.start_time,
-        duration: zoomMeeting.duration,
-        join_url: zoomMeeting.join_url,
-        start_url: zoomMeeting.start_url,
-        password: zoomMeeting.password,
-        agenda: zoomMeeting.agenda
-      },
-      lead: {
-        id: lead.leadId,
-        name: lead.leadFullName || lead.leadFirstName,
-        email: lead.leadEmail
-      },
-      agent: {
-        id: lead.agentId,
-        name: lead.agentFullName || lead.agentFirstName,
-        email: lead.agentEmail
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ ZOOM-MEETING: Error creating meeting:', error);
-    res.status(500).json({ 
-      error: 'Internal server error while creating Zoom meeting',
-      details: error.message 
-    });
-  }
-});
 
 // POST /api/leads/:leadId/complete-automation - Execute complete automation workflow
 router.post('/:leadId/complete-automation', verifyToken, async (req, res) => {
@@ -671,8 +594,7 @@ router.post('/:leadId/complete-automation', verifyToken, async (req, res) => {
         failedSteps: result.failedSteps,
         results: {
           assignment: result.steps.assignment || null,
-          calendly: result.steps.calendly || null,
-          zoom: result.steps.zoom || null
+        calendly: result.steps.calendly || null
         }
       });
     } else {

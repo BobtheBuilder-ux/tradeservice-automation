@@ -3,8 +3,7 @@
  * Handles the complete automated workflow for new leads:
  * 1. Auto-assign lead to agent with lowest lead count
  * 2. Generate Calendly scheduling link for assigned agent
- * 3. Create Zoom meeting for the lead
- * 4. Send notification emails
+ * 3. Send notification emails with Calendly link
  */
 
 import { db } from '../config/index.js';
@@ -45,30 +44,17 @@ class LeadAutomationService {
 
       console.log(`✅ AUTOMATION: Lead assigned to agent ${assignmentResult.agent?.name || 'Unknown'}`);
 
-      // Step 2: Generate Calendly scheduling link
-      const calendlyResult = await this.generateCalendlyLink(leadId, trackingId);
+      // Step 2: Generate Calendly scheduling link and send email
+      const calendlyResult = await this.generateCalendlyLinkAndSendEmail(leadId, trackingId);
       if (!calendlyResult.success) {
-        logger.warn('Calendly link generation failed, continuing workflow', {
+        logger.warn('Calendly link generation and email sending failed, continuing workflow', {
           trackingId,
           leadId,
           error: calendlyResult.error
         });
-        console.log(`⚠️ AUTOMATION: Calendly link generation failed - ${calendlyResult.error}`);
+        console.log(`⚠️ AUTOMATION: Calendly link generation and email sending failed - ${calendlyResult.error}`);
       } else {
-        console.log(`✅ AUTOMATION: Calendly link generated successfully`);
-      }
-
-      // Step 3: Create Zoom meeting
-      const zoomResult = await this.createZoomMeeting(leadId, trackingId);
-      if (!zoomResult.success) {
-        logger.warn('Zoom meeting creation failed, continuing workflow', {
-          trackingId,
-          leadId,
-          error: zoomResult.error
-        });
-        console.log(`⚠️ AUTOMATION: Zoom meeting creation failed - ${zoomResult.error}`);
-      } else {
-        console.log(`✅ AUTOMATION: Zoom meeting created successfully`);
+        console.log(`✅ AUTOMATION: Calendly link generated and email sent successfully`);
       }
 
       // Compile results
@@ -78,18 +64,15 @@ class LeadAutomationService {
         trackingId,
         steps: {
           assignment: assignmentResult,
-          calendly: calendlyResult,
-          zoom: zoomResult
+          calendly: calendlyResult
         },
         completedSteps: [
           assignmentResult.success ? 'assignment' : null,
-          calendlyResult.success ? 'calendly' : null,
-          zoomResult.success ? 'zoom' : null
+          calendlyResult.success ? 'calendly' : null
         ].filter(Boolean),
         failedSteps: [
           !assignmentResult.success ? 'assignment' : null,
-          !calendlyResult.success ? 'calendly' : null,
-          !zoomResult.success ? 'zoom' : null
+          !calendlyResult.success ? 'calendly' : null
         ].filter(Boolean)
       };
 
@@ -407,16 +390,28 @@ class LeadAutomationService {
   }
 
   /**
-   * Create Zoom meeting for the lead
+ * Generate Calendly link and send email for the lead
+ * @param {string} leadId - Lead ID
+ * @param {string} trackingId - Tracking ID for logging
+ * @returns {Promise<Object>} - Calendly link and email result
+ */
+  /**
+   * Generate Calendly scheduling link and send email to lead
    * @param {string} leadId - The lead ID
    * @param {string} trackingId - Tracking ID for logging
-   * @returns {Promise<Object>} - Zoom meeting result
+   * @returns {Promise<Object>} - Combined result
    */
-  async createZoomMeeting(leadId, trackingId) {
+  async generateCalendlyLinkAndSendEmail(leadId, trackingId) {
     try {
-      console.log(`🔍 AUTOMATION: Creating Zoom meeting for lead ${leadId}`);
+      console.log(`📅 AUTOMATION: Generating Calendly link and sending email for lead ${leadId}`);
 
-      // Get lead details with assigned agent
+      // First generate the Calendly link
+      const calendlyResult = await this.generateCalendlyLink(leadId, trackingId);
+      if (!calendlyResult.success) {
+        return calendlyResult;
+      }
+
+      // Get lead details for email
       const leadWithAgent = await db.select({
         leadId: leads.id,
         leadEmail: leads.email,
@@ -441,82 +436,36 @@ class LeadAutomationService {
 
       const lead = leadWithAgent[0];
 
-      if (!lead.assignedAgentId) {
-        throw new Error('Lead must be assigned to an agent first');
-      }
-
-      // Get agent's Zoom integration
-      const agentIntegration = await db.select({
-        zoomAccessToken: agentIntegrations.zoomAccessToken,
-        zoomRefreshToken: agentIntegrations.zoomRefreshToken
-      })
-      .from(agentIntegrations)
-      .where(eq(agentIntegrations.agentId, lead.assignedAgentId))
-      .limit(1);
-
-      if (!agentIntegration || agentIntegration.length === 0 || !agentIntegration[0].zoomAccessToken) {
-        throw new Error('Agent does not have Zoom integration configured');
-      }
-
-      const { zoomAccessToken } = agentIntegration[0];
-
-      // Prepare meeting data
-      const meetingData = {
-        topic: `Meeting with ${lead.leadFullName || lead.leadFirstName}`,
-        type: 2, // Scheduled meeting
-        start_time: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // Default to tomorrow
-        duration: 30,
-        agenda: `Meeting with lead ${lead.leadFullName || lead.leadFirstName} (${lead.leadEmail})`,
-        settings: {
-          host_video: true,
-          participant_video: true,
-          join_before_host: true,
-          mute_upon_entry: false,
-          watermark: false,
-          use_pmi: false,
-          approval_type: 2, // No registration required
-          audio: 'both', // Both telephony and VoIP
-          auto_recording: 'none'
-        }
-      };
-
-      // Create Zoom meeting using agent's access token
-      const zoomResponse = await fetch('https://api.zoom.us/v2/users/me/meetings', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${zoomAccessToken}`,
-          'Content-Type': 'application/json'
+      // Import and use the Calendly email service
+      const CalendlyEmailService = (await import('./calendly-email-service.js')).default;
+      
+      // Send appointment email with Calendly link
+      const emailResult = await CalendlyEmailService.sendAppointmentEmail(
+        {
+          id: lead.leadId,
+          email: lead.leadEmail,
+          full_name: lead.leadFullName || lead.leadFirstName,
+          first_name: lead.leadFirstName,
+          last_name: lead.leadLastName
         },
-        body: JSON.stringify(meetingData)
-      });
+        calendlyResult.schedulingUrl,
+        trackingId
+      );
 
-      if (!zoomResponse.ok) {
-        const errorData = await zoomResponse.text();
-        throw new Error(`Zoom API error: ${zoomResponse.status} ${zoomResponse.statusText} - ${errorData}`);
+      if (!emailResult.success) {
+        logger.warn('Email sending failed after successful Calendly link generation', {
+          trackingId,
+          leadId,
+          error: emailResult.error
+        });
       }
-
-      const zoomMeeting = await zoomResponse.json();
-
-      logger.info('✅ Zoom meeting created successfully', {
-        trackingId,
-        leadId,
-        meetingId: zoomMeeting.id,
-        joinUrl: zoomMeeting.join_url
-      });
 
       return {
         success: true,
-        message: 'Zoom meeting created successfully',
-        meeting: {
-          id: zoomMeeting.id,
-          topic: zoomMeeting.topic,
-          start_time: zoomMeeting.start_time,
-          duration: zoomMeeting.duration,
-          join_url: zoomMeeting.join_url,
-          start_url: zoomMeeting.start_url,
-          password: zoomMeeting.password,
-          agenda: zoomMeeting.agenda
-        },
+        message: 'Calendly link generated and email sent successfully',
+        schedulingUrl: calendlyResult.schedulingUrl,
+        emailSent: emailResult.success,
+        emailError: emailResult.success ? null : emailResult.error,
         lead: {
           id: lead.leadId,
           name: lead.leadFullName || lead.leadFirstName,
@@ -530,7 +479,7 @@ class LeadAutomationService {
       };
 
     } catch (error) {
-      logger.error('❌ Zoom meeting creation failed', {
+      logger.error('❌ Calendly link generation and email sending failed', {
         trackingId,
         leadId,
         error: error.message
@@ -539,7 +488,8 @@ class LeadAutomationService {
       return {
         success: false,
         error: error.message,
-        meeting: null
+        schedulingUrl: null,
+        emailSent: false
       };
     }
   }
@@ -587,8 +537,7 @@ class LeadAutomationService {
       let agentIntegrationsData = null;
       if (lead.assignedAgentId) {
         const integrations = await db.select({
-          calendlyAccessToken: agentIntegrations.calendlyAccessToken,
-          zoomAccessToken: agentIntegrations.zoomAccessToken
+          calendlyAccessToken: agentIntegrations.calendlyAccessToken
         })
         .from(agentIntegrations)
         .where(eq(agentIntegrations.agentId, lead.assignedAgentId))
@@ -611,14 +560,12 @@ class LeadAutomationService {
           id: lead.agentId,
           name: lead.agentFullName || lead.agentFirstName,
           email: lead.agentEmail,
-          hasCalendlyIntegration: !!(agentIntegrationsData?.calendlyAccessToken),
-          hasZoomIntegration: !!(agentIntegrationsData?.zoomAccessToken)
+          hasCalendlyIntegration: !!(agentIntegrationsData?.calendlyAccessToken)
         } : null,
         automationStatus: {
           isAssigned: !!lead.assignedAgentId,
           canGenerateCalendlyLink: !!(lead.assignedAgentId && agentIntegrationsData?.calendlyAccessToken),
-          canCreateZoomMeeting: !!(lead.assignedAgentId && agentIntegrationsData?.zoomAccessToken),
-          readyForAutomation: !!(lead.assignedAgentId && agentIntegrationsData?.calendlyAccessToken && agentIntegrationsData?.zoomAccessToken)
+          readyForAutomation: !!(lead.assignedAgentId && agentIntegrationsData?.calendlyAccessToken)
         }
       };
 

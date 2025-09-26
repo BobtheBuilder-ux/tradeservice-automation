@@ -1052,16 +1052,6 @@ export default function AdminDashboard() {
                               </span>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                              {meeting.zoom_link && (
-                                <a
-                                  href={meeting.zoom_link}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-blue-600 hover:text-blue-900 mr-3"
-                                >
-                                  Join Meeting
-                                </a>
-                              )}
                               <button
                                 className="text-gray-600 hover:text-gray-900"
                                 title="View Details"

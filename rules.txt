@@ -10,3 +10,5 @@ Always write drizzle schema and push the schema to the remote database
 Test endpoint to ensure they are working by using curl and once the endpoints are working, ensure to update the frontend
 Always console the backend
 Always use | jq . to check the response from the backend
+Use admin user credentials berrybobbiechuks@gmail.com password= Password12...$
+Agent credentials luckisstarspiff@gmail.com password= Password12...$

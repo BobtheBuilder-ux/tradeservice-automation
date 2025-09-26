@@ -164,11 +164,6 @@ class ApiClient {
     const encoded = redirect ? `?redirect=${encodeURIComponent(redirect)}` : '';
     return this.get(`/integrations/calendly/start${encoded}`);
   }
-
-  async getZoomAuthUrl(redirect) {
-    const encoded = redirect ? `?redirect=${encodeURIComponent(redirect)}` : '';
-    return this.get(`/integrations/zoom/start${encoded}`);
-  }
 }
 
 // Create and export a singleton instance

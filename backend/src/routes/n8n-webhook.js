@@ -3,6 +3,7 @@ import { generateTrackingId } from '../utils/crypto.js';
 import logger from '../utils/logger.js';
 import emailService from '../services/email-service.js';
 import emailTemplateService from '../services/email-template-service.js';
+import leadAutomationService from '../services/lead-automation-service.js';
 
 const router = express.Router();
 
@@ -21,7 +22,8 @@ router.get('/', (req, res) => {
     endpoints: {
       sendEmail: 'POST /webhook/n8n/send-email',
       sendTemplateEmail: 'POST /webhook/n8n/send-template-email',
-      queueEmail: 'POST /webhook/n8n/queue-email'
+      queueEmail: 'POST /webhook/n8n/queue-email',
+      triggerLeadAutomation: 'POST /webhook/n8n/trigger-lead-automation'
     }
   });
 });
@@ -450,7 +452,8 @@ router.get('/health', (req, res) => {
       verification: 'GET /webhook/n8n',
       sendEmail: 'POST /webhook/n8n/send-email',
       sendTemplateEmail: 'POST /webhook/n8n/send-template-email',
-      queueEmail: 'POST /webhook/n8n/queue-email'
+      queueEmail: 'POST /webhook/n8n/queue-email',
+      triggerLeadAutomation: 'POST /webhook/n8n/trigger-lead-automation'
     },
     supportedTemplates: [
       'appointment_scheduling',
@@ -484,6 +487,106 @@ router.post('/test', express.json(), async (req, res) => {
     receivedData: req.body,
     webhookUrl: 'https://n8n-test-nluz.onrender.com/webhook/639181ea-18f1-4e89-94b0-c257d61619e3'
   });
+});
+
+/**
+ * N8N lead automation trigger webhook
+ * POST /webhook/n8n/trigger-lead-automation
+ * Triggers the streamlined lead assignment and Calendly workflow for new leads from HubSpot
+ */
+router.post('/trigger-lead-automation', express.json(), async (req, res) => {
+  const trackingId = generateTrackingId();
+  const { leadId, hubspot_contact_id, lead_data } = req.body;
+
+  logger.info('N8N lead automation trigger received', {
+    trackingId,
+    leadId: leadId || '[MISSING]',
+    hubspot_contact_id: hubspot_contact_id || '[MISSING]',
+    hasLeadData: !!lead_data
+  });
+
+  try {
+    // Validate required fields
+    if (!leadId && !hubspot_contact_id) {
+      logger.warn('Missing required lead identification', {
+        trackingId,
+        missingFields: {
+          leadId: !leadId,
+          hubspot_contact_id: !hubspot_contact_id
+        }
+      });
+      return res.status(400).json({
+        success: false,
+        error: 'Either leadId or hubspot_contact_id is required',
+        trackingId
+      });
+    }
+
+    // Use leadId if provided, otherwise use hubspot_contact_id
+    const targetLeadId = leadId || hubspot_contact_id;
+
+    logger.info('Triggering streamlined lead automation workflow', {
+      trackingId,
+      targetLeadId,
+      source: 'n8n_webhook'
+    });
+
+    // Execute the complete streamlined workflow (assignment + Calendly)
+    const automationResult = await leadAutomationService.executeCompleteWorkflow(targetLeadId, trackingId);
+
+    if (automationResult.success) {
+      logger.info('N8N lead automation completed successfully', {
+        trackingId,
+        leadId: targetLeadId,
+        completedSteps: automationResult.completedSteps,
+        failedSteps: automationResult.failedSteps
+      });
+
+      res.json({
+        success: true,
+        leadId: targetLeadId,
+        trackingId,
+        workflow: {
+          completedSteps: automationResult.completedSteps,
+          failedSteps: automationResult.failedSteps,
+          steps: {
+            assignment: automationResult.steps.assignment,
+            calendly: automationResult.steps.calendly
+          }
+        },
+        timestamp: new Date().toISOString()
+      });
+    } else {
+      logger.error('N8N lead automation failed', {
+        trackingId,
+        leadId: targetLeadId,
+        error: automationResult.error
+      });
+      
+      res.status(500).json({
+        success: false,
+        leadId: targetLeadId,
+        error: automationResult.error,
+        trackingId,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+  } catch (error) {
+    logger.error('N8N lead automation webhook error', {
+      trackingId,
+      leadId: leadId || hubspot_contact_id,
+      error: error.message,
+      stack: error.stack
+    });
+    
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      trackingId,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
 export default router;

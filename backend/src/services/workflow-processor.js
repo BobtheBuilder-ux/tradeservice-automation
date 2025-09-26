@@ -365,8 +365,6 @@ class WorkflowProcessor {
         return await this.sendMeetingReminder1H(job, trackingId);
       case 'send_meeting_reminder_2h_sms':
         return await this.send2HourSmsReminder(job, trackingId);
-      case 'verify_zoom_link':
-        return await this.verifyZoomLink(job, trackingId);
       default:
         throw new Error(`Unknown meeting monitor step: ${job.step_name}`);
     }
@@ -680,58 +678,7 @@ class WorkflowProcessor {
     }
   }
 
-  /**
-   * Verify Zoom link
-   */
-  async verifyZoomLink(job, trackingId) {
-    try {
-      // Get meeting details
-      const { data: lead, error } = await supabase
-        .from('leads')
-        .select('meeting_location, calendly_event_uri')
-        .eq('id', job.lead_id)
-        .single();
 
-      if (error) throw error;
-
-      if (lead.meeting_location && lead.meeting_location.includes('zoom.us')) {
-        logger.info('Zoom link verified', {
-          trackingId: trackingId,
-          leadId: job.lead_id,
-          hasZoomLink: true
-        });
-        return true;
-      }
-
-      // If no Zoom link, try to get it from Calendly
-      if (lead.calendly_event_uri) {
-        const meetingDetails = await meetingService.getMeetingDetails(lead.calendly_event_uri, trackingId);
-        if (meetingDetails && meetingDetails.location) {
-          // Update meeting location
-          await supabase
-            .from('leads')
-            .update({ meeting_location: meetingDetails.location })
-            .eq('id', job.lead_id);
-
-          logger.info('Meeting location updated from Calendly', {
-            trackingId: trackingId,
-            leadId: job.lead_id,
-            location: meetingDetails.location
-          });
-        }
-      }
-
-      return true;
-    } catch (error) {
-      logger.error(error.message, {
-        context: 'verify_zoom_link',
-        trackingId: trackingId,
-        leadId: job.lead_id,
-        stack: error.stack
-      });
-      return false;
-    }
-  }
 
   /**
    * Send follow-up email

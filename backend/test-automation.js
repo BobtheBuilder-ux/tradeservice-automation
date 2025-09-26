@@ -49,7 +49,6 @@ async function testCompleteAutomation() {
       console.log(`   Agent: ${statusResult.agent ? statusResult.agent.name : 'Not assigned'}`);
       console.log(`   Can assign: ${statusResult.automationStatus.isAssigned ? 'Already assigned' : 'Yes'}`);
       console.log(`   Can generate Calendly link: ${statusResult.automationStatus.canGenerateCalendlyLink}`);
-      console.log(`   Can create Zoom meeting: ${statusResult.automationStatus.canCreateZoomMeeting}`);
       console.log(`   Ready for full automation: ${statusResult.automationStatus.readyForAutomation}`);
     } else {
       console.log(`❌ Failed to get automation status: ${statusResult.error}`);
@@ -77,17 +76,9 @@ async function testCompleteAutomation() {
 
       if (workflowResult.steps.calendly && workflowResult.steps.calendly.success) {
         const calendly = workflowResult.steps.calendly;
-        console.log(`   📅 Calendly: Scheduling link generated`);
+        console.log(`   📅 Calendly: Scheduling link generated and email sent`);
         console.log(`      Event: ${calendly.eventType?.name || 'Unknown'} (${calendly.eventType?.duration || 'Unknown'} min)`);
         console.log(`      URL: ${calendly.schedulingUrl}`);
-      }
-
-      if (workflowResult.steps.zoom && workflowResult.steps.zoom.success) {
-        const zoom = workflowResult.steps.zoom;
-        console.log(`   🔍 Zoom: Meeting created`);
-        console.log(`      Meeting ID: ${zoom.meeting?.id || 'Unknown'}`);
-        console.log(`      Topic: ${zoom.meeting?.topic || 'Unknown'}`);
-        console.log(`      Join URL: ${zoom.meeting?.join_url || 'Unknown'}`);
       }
     } else {
       console.log(`❌ Complete automation workflow failed: ${workflowResult.error}`);
@@ -111,7 +102,7 @@ async function testCompleteAutomation() {
       console.log(`   Agent: ${updatedStatusResult.agent ? updatedStatusResult.agent.name : 'Not assigned'}`);
       console.log(`   Is assigned: ${updatedStatusResult.automationStatus.isAssigned}`);
       console.log(`   Can generate Calendly link: ${updatedStatusResult.automationStatus.canGenerateCalendlyLink}`);
-      console.log(`   Can create Zoom meeting: ${updatedStatusResult.automationStatus.canCreateZoomMeeting}`);
+   
       console.log(`   Ready for full automation: ${updatedStatusResult.automationStatus.readyForAutomation}`);
     } else {
       console.log(`❌ Failed to get updated automation status: ${updatedStatusResult.error}`);
@@ -170,29 +161,18 @@ async function testIndividualComponents() {
     console.log('');
 
     // Test Calendly link generation (will likely fail due to missing integration)
-    console.log('📅 Testing Calendly link generation...');
-    const calendlyResult = await leadAutomationService.generateCalendlyLink(testLead.id, 'test-tracking-id');
+    console.log('📅 Testing Calendly link generation and email sending...');
+    const calendlyResult = await leadAutomationService.generateCalendlyLinkAndSendEmail(testLead.id, 'test-tracking-id');
     
     if (calendlyResult.success) {
-      console.log('✅ Calendly link generation successful');
+      console.log('✅ Calendly link generation and email sending successful');
       console.log(`   Scheduling URL: ${calendlyResult.schedulingUrl}`);
       console.log(`   Event Type: ${calendlyResult.eventType.name}`);
+      console.log(`   Email sent to: ${calendlyResult.emailSent ? 'Yes' : 'No'}`);
     } else {
-      console.log(`❌ Calendly link generation failed: ${calendlyResult.error}`);
+      console.log(`❌ Calendly link generation and email sending failed: ${calendlyResult.error}`);
     }
     console.log('');
-
-    // Test Zoom meeting creation (will likely fail due to missing integration)
-    console.log('🔍 Testing Zoom meeting creation...');
-    const zoomResult = await leadAutomationService.createZoomMeeting(testLead.id, 'test-tracking-id');
-    
-    if (zoomResult.success) {
-      console.log('✅ Zoom meeting creation successful');
-      console.log(`   Meeting ID: ${zoomResult.meeting.id}`);
-      console.log(`   Join URL: ${zoomResult.meeting.join_url}`);
-    } else {
-      console.log(`❌ Zoom meeting creation failed: ${zoomResult.error}`);
-    }
 
   } catch (error) {
     console.error('❌ Component test failed with error:', error.message);
