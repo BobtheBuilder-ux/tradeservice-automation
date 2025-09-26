@@ -65,6 +65,6 @@ Thumbs.db
 app
 supabase/
 .trae
-rule.txt
+rules.txt
 N8N_WEBHOOK_DOCUMENTATION.md
 n8n-hubspot-lead-automation-workflow.json

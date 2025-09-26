@@ -8,7 +8,7 @@
 
 import { db } from '../config/index.js';
 import { leads, agents, agentIntegrations } from '../db/schema.js';
-import { eq, desc, isNull, and, count } from 'drizzle-orm';
+import { eq, desc, isNull, and, count, not } from 'drizzle-orm';
 import logger from '../utils/logger.js';
 import { generateTrackingId } from '../utils/crypto.js';
 
@@ -38,14 +38,33 @@ class LeadAutomationService {
 
       // Step 1: Auto-assign lead to agent
       const assignmentResult = await this.autoAssignLead(leadId, trackingId);
+      let calendlyResult;
+      
       if (!assignmentResult.success) {
-        throw new Error(`Lead assignment failed: ${assignmentResult.error}`);
+        // If assignment fails due to no agents with Calendly integration, 
+        // use fallback mechanism with main Calendly link
+        if (assignmentResult.error && assignmentResult.error.includes('No available agents with Calendly integration')) {
+          logger.warn('Lead assignment failed - no agents with Calendly integration available, using fallback', {
+            trackingId,
+            leadId,
+            error: assignmentResult.error
+          });
+          console.log(`⚠️ AUTOMATION: Lead assignment failed - ${assignmentResult.error}`);
+          console.log(`🔄 AUTOMATION: Using fallback mechanism with main Calendly link`);
+          
+          // Use fallback mechanism
+          calendlyResult = await this.sendFallbackCalendlyEmail(leadId, trackingId);
+          
+        } else {
+          throw new Error(`Lead assignment failed: ${assignmentResult.error}`);
+        }
+      } else {
+        console.log(`✅ AUTOMATION: Lead assigned to agent ${assignmentResult.agent?.name || 'Unknown'}`);
+
+        // Step 2: Generate Calendly scheduling link and send email
+        calendlyResult = await this.generateCalendlyLinkAndSendEmail(leadId, trackingId);
       }
-
-      console.log(`✅ AUTOMATION: Lead assigned to agent ${assignmentResult.agent?.name || 'Unknown'}`);
-
-      // Step 2: Generate Calendly scheduling link and send email
-      const calendlyResult = await this.generateCalendlyLinkAndSendEmail(leadId, trackingId);
+      
       if (!calendlyResult.success) {
         logger.warn('Calendly link generation and email sending failed, continuing workflow', {
           trackingId,
@@ -154,6 +173,7 @@ class LeadAutomationService {
       }
 
       // Get agents with their current lead counts, ordered by lead count (ascending)
+      // Only include agents who have Calendly integration configured
       const agentsWithLeadCounts = await db.select({
         id: agents.id,
         agentId: agents.agentId,
@@ -161,19 +181,22 @@ class LeadAutomationService {
         lastName: agents.lastName,
         fullName: agents.fullName,
         email: agents.email,
-        leadCount: count(leads.id)
+        leadCount: count(leads.id),
+        calendlyAccessToken: agentIntegrations.calendlyAccessToken
       })
       .from(agents)
       .leftJoin(leads, eq(agents.id, leads.assignedAgentId))
+      .leftJoin(agentIntegrations, eq(agents.id, agentIntegrations.agentId))
       .where(and(
         eq(agents.isActive, true),
-        eq(agents.emailVerified, true)
+        eq(agents.emailVerified, true),
+        not(isNull(agentIntegrations.calendlyAccessToken)) // Only agents with Calendly integration
       ))
-      .groupBy(agents.id, agents.agentId, agents.firstName, agents.lastName, agents.fullName, agents.email)
+      .groupBy(agents.id, agents.agentId, agents.firstName, agents.lastName, agents.fullName, agents.email, agentIntegrations.calendlyAccessToken)
       .orderBy(count(leads.id), agents.firstName);
 
       if (!agentsWithLeadCounts || agentsWithLeadCounts.length === 0) {
-        throw new Error('No available agents found');
+        throw new Error('No available agents with Calendly integration found');
       }
 
       // Select the agent with the lowest lead count
@@ -579,6 +602,113 @@ class LeadAutomationService {
         success: false,
         error: error.message,
         status: null
+      };
+    }
+  }
+
+  /**
+   * Send fallback Calendly email using main Calendly link via N8N webhook
+   * @param {string} leadId - The lead ID
+   * @param {string} trackingId - Tracking ID for logging
+   * @returns {Promise<Object>} - Email sending result
+   */
+  async sendFallbackCalendlyEmail(leadId, trackingId) {
+    try {
+      console.log(`📧 AUTOMATION: Sending fallback Calendly email for lead ${leadId}`);
+
+      // Get lead details
+      const leadData = await db.select()
+        .from(leads)
+        .where(eq(leads.id, leadId))
+        .limit(1);
+
+      if (!leadData || leadData.length === 0) {
+        throw new Error('Lead not found');
+      }
+
+      const lead = leadData[0];
+
+      // Import calendlyConfig here to avoid circular dependency
+      const { calendlyConfig } = await import('../config/index.js');
+      
+      if (!calendlyConfig.schedulingUrl) {
+        throw new Error('Main Calendly scheduling URL not configured');
+      }
+
+      // Prepare data for N8N webhook
+      const webhookData = {
+        to: lead.email,
+        template_type: 'appointment_scheduling',
+        lead_data: {
+          id: lead.id,
+          full_name: lead.fullName || `${lead.firstName} ${lead.lastName}`.trim(),
+          name: lead.fullName || `${lead.firstName} ${lead.lastName}`.trim(),
+          email: lead.email,
+          phone: lead.phone,
+          company: lead.company
+        },
+        calendly_link: calendlyConfig.schedulingUrl,
+        metadata: {
+          trackingId,
+          fallback: true,
+          reason: 'no_agent_calendly_integration'
+        }
+      };
+
+      // Send request to N8N webhook
+      const response = await fetch('http://localhost:3001/webhook/n8n/send-template-email', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(webhookData)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`N8N webhook failed: ${response.status} - ${errorText}`);
+      }
+
+      const result = await response.json();
+
+      logger.info('✅ Fallback Calendly email sent successfully via N8N webhook', {
+        trackingId,
+        leadId,
+        email: lead.email,
+        calendlyLink: calendlyConfig.schedulingUrl,
+        queueId: result.queueId
+      });
+
+      console.log(`✅ AUTOMATION: Fallback Calendly email sent successfully`);
+      console.log(`   📧 Email: ${lead.email}`);
+      console.log(`   🔗 Calendly Link: ${calendlyConfig.schedulingUrl}`);
+
+      return {
+        success: true,
+        leadId,
+        trackingId,
+        email: lead.email,
+        calendlyLink: calendlyConfig.schedulingUrl,
+        fallback: true,
+        queueId: result.queueId,
+        webhookResponse: result
+      };
+
+    } catch (error) {
+      logger.error('❌ Failed to send fallback Calendly email', {
+        trackingId,
+        leadId,
+        error: error.message
+      });
+
+      console.log(`❌ AUTOMATION: Fallback Calendly email failed - ${error.message}`);
+
+      return {
+        success: false,
+        leadId,
+        trackingId,
+        error: error.message,
+        fallback: true
       };
     }
   }
