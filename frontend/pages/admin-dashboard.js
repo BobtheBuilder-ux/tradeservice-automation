@@ -386,7 +386,7 @@ export default function AdminDashboard() {
               {[
                 { id: 'overview', label: 'Overview', icon: BarChart3, color: 'from-blue-500 to-cyan-500' },
                 { id: 'agents', label: 'Agent Management', icon: Users, color: 'from-green-500 to-emerald-500' },
-                { id: 'leads', label: 'Lead Assignment', icon: Target, color: 'from-purple-500 to-pink-500' },
+                { id: 'leads', label: 'Appointment Assignment', icon: Target, color: 'from-purple-500 to-pink-500' },
                 { id: 'feedback', label: 'Agent Feedback', icon: MessageSquare, color: 'from-indigo-500 to-purple-500' },
                 { id: 'campaigns', label: 'Confirmed Meetings', icon: CalendarDays, color: 'from-orange-500 to-red-500' }
               ].map((tab) => {
@@ -459,7 +459,7 @@ export default function AdminDashboard() {
                     </div>
                     <div className="ml-5 w-0 flex-1">
                       <dl>
-                        <dt className="text-sm font-medium text-green-100 truncate">Total Leads</dt>
+                        <dt className="text-sm font-medium text-green-100 truncate">Total Appointment</dt>
                         <dd className="text-2xl font-bold text-white">{leads.length}</dd>
                       </dl>
                     </div>
@@ -475,7 +475,7 @@ export default function AdminDashboard() {
                     </div>
                     <div className="ml-5 w-0 flex-1">
                       <dl>
-                        <dt className="text-sm font-medium text-orange-100 truncate">Unassigned Leads</dt>
+                        <dt className="text-sm font-medium text-orange-100 truncate">Unassigned Appointment</dt>
                         <dd className="text-2xl font-bold text-white">{unassignedLeads.length}</dd>
                       </dl>
                     </div>
@@ -520,14 +520,14 @@ export default function AdminDashboard() {
                       </div>
                     </div>
                     <div>
-                      <h4 className="text-sm font-medium text-gray-900 mb-3">Lead Distribution</h4>
+                      <h4 className="text-sm font-medium text-gray-900 mb-3">Appointment Distribution</h4>
                       <div className="space-y-2">
                         <div className="flex justify-between text-sm">
-                          <span className="text-gray-600">Assigned Leads</span>
+                          <span className="text-gray-600">Assigned Appointment</span>
                           <span className="font-medium">{leads.filter(l => l.assignedAgentId).length}</span>
                         </div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-gray-600">Unassigned Leads</span>
+                          <span className="text-gray-600">Unassigned Appointment</span>
                           <span className="font-medium">{unassignedLeads.length}</span>
                         </div>
                       </div>
@@ -671,7 +671,7 @@ export default function AdminDashboard() {
                                         ? 'bg-yellow-100 text-yellow-700'
                                         : 'bg-red-100 text-red-700'
                                 }`}>
-                                  📊 {agentLeadCount} leads
+                                  📊 {agentLeadCount} Appointments
                                 </div>
                               </div>
                             </td>
@@ -700,7 +700,7 @@ export default function AdminDashboard() {
           {activeTab === 'leads' && (
             <div className="space-y-6">
               <div className="flex justify-between items-center">
-                <h2 className="text-2xl font-bold text-gray-900">Lead Assignment</h2>
+                <h2 className="text-2xl font-bold text-gray-900">Appointment Assignment</h2>
                 {selectedLeads.length > 0 && (
                   <button
                     onClick={() => setShowAssignModal(true)}
@@ -720,7 +720,7 @@ export default function AdminDashboard() {
                       <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
                       <input
                         type="text"
-                        placeholder="Search leads by name or email..."
+                        placeholder="Search Appointment by name or email..."
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
                         className="pl-10 pr-4 py-2 w-full border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"

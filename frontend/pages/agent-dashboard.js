@@ -214,7 +214,7 @@ export default function AgentDashboard() {
     <>
       <Head>
         <title>Agent Dashboard - Lead Management</title>
-        <meta name="description" content="Agent Dashboard for Lead Management" />
+        <meta name="description" content="Agent Dashboard for Appointment Management" />
       </Head>
       
       <div className="min-h-screen bg-gradient-to-br from-orange-50 via-red-50 to-pink-50">
@@ -277,7 +277,7 @@ export default function AgentDashboard() {
                 </div>
                 <div className="ml-5 w-0 flex-1">
                   <dl>
-                    <dt className="text-sm font-bold text-teal-100 truncate">Total Leads</dt>
+                    <dt className="text-sm font-bold text-teal-100 truncate">Total Appointments</dt>
                     <dd className="text-2xl font-bold text-white drop-shadow-lg">{leads.length}</dd>
                   </dl>
                 </div>
@@ -291,7 +291,7 @@ export default function AgentDashboard() {
                 </div>
                 <div className="ml-5 w-0 flex-1">
                   <dl>
-                    <dt className="text-sm font-bold text-orange-100 truncate">New Leads</dt>
+                    <dt className="text-sm font-bold text-orange-100 truncate">New Appointments</dt>
                     <dd className="text-2xl font-bold text-white drop-shadow-lg">
                       {leads.filter(lead => lead.status === 'new').length}
                     </dd>
@@ -342,7 +342,7 @@ export default function AgentDashboard() {
                     <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-orange-400 w-5 h-5" />
                     <input
                       type="text"
-                      placeholder="🔍 Search leads by name, email, or phone..."
+                      placeholder="🔍 Search Appointment by name, email, or phone..."
                       value={searchTerm}
                       onChange={(e) => setSearchTerm(e.target.value)}
                       className="pl-12 pr-4 py-3 w-full border-2 border-orange-200 rounded-xl focus:ring-4 focus:ring-orange-200 focus:border-orange-400 transition-all duration-200 bg-orange-50 focus:bg-white font-medium"
@@ -382,7 +382,7 @@ export default function AgentDashboard() {
           {/* Leads Table */}
           <div className="bg-white rounded-xl shadow-xl overflow-hidden border border-orange-200">
             <div className="px-6 py-4 border-b border-orange-200 bg-gradient-to-r from-orange-500 to-red-500">
-              <h3 className="text-xl font-bold text-white drop-shadow-lg">🎯 Your Assigned Leads</h3>
+              <h3 className="text-xl font-bold text-white drop-shadow-lg">🎯 Your Assigned Appointment</h3>
             </div>
             
             <div className="overflow-x-auto">
@@ -414,8 +414,8 @@ export default function AgentDashboard() {
                           <div className="text-6xl mb-4">📭</div>
                           <p className="text-lg font-bold text-gray-700">
                             {searchTerm || statusFilter !== 'all' || priorityFilter !== 'all' 
-                              ? '🔍 No leads match your current filters.' 
-                              : '🎯 No leads assigned to you yet.'}
+                              ? '🔍 No Appointment match your current filters.' 
+                              : '🎯 No Appointment assigned to you yet.'}
                           </p>
                           <p className="text-sm text-gray-500 mt-2">Check back later or adjust your filters!</p>
                         </div>
