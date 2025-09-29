@@ -104,13 +104,13 @@ export default function Login() {
   return (
     <>
       <Head>
-        <title>Login - Lead Management Dashboard</title>
-        <meta name="description" content="Login to Lead Management Dashboard" />
+        <title>Login - Appointment Booking Dashboard</title>
+        <meta name="description" content="Login to Appointment Booking Dashboard" />
       </Head>
       <div className="min-h-screen bg-gray-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
         <div className="sm:mx-auto sm:w-full sm:max-w-md">
           <div className="text-center">
-            <h1 className="text-3xl font-bold text-gray-900 mb-2">Lead Management Dashboard</h1>
+            <h1 className="text-3xl font-bold text-gray-900 mb-2">Appointment Booking Dashboard</h1>
             <h2 className="text-xl text-gray-600">Sign in to your account</h2>
           </div>
         </div>
