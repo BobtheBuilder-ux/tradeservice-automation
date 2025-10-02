@@ -168,24 +168,38 @@ export async function createLead(leadData, trackingId) {
       email: leadData.email ? hashForLogging(leadData.email) : '[MISSING]'
     });
 
-    // Send email notifications to agents
+    // Send email notification only to assigned agent (if any)
        try {
-         const agentEmails = await getActiveAgentEmails(trackingId);
-         if (agentEmails.length > 0) {
-           // Send notification to each agent
-           for (const agentEmail of agentEmails) {
-             await EmailService.sendLeadNotification(agentEmail, data, trackingId);
+         if (data.assignedAgentId) {
+           // Get the assigned agent's email
+           const assignedAgent = await db
+             .select({
+               email: agents.email,
+               fullName: agents.fullName
+             })
+             .from(agents)
+             .where(and(eq(agents.id, data.assignedAgentId), eq(agents.isActive, true)))
+             .limit(1);
+
+           if (assignedAgent && assignedAgent.length > 0) {
+             await EmailService.sendLeadNotification(assignedAgent[0].email, data, trackingId);
+             
+             logger.logLeadProcessing(trackingId, 'lead_notification_sent_to_assigned_agent', {
+               leadId: data.id,
+               assignedAgentId: data.assignedAgentId,
+               agentEmail: assignedAgent[0].email
+             });
+           } else {
+             logger.logLeadProcessing(trackingId, 'assigned_agent_not_found_or_inactive', {
+               leadId: data.id,
+               assignedAgentId: data.assignedAgentId
+             });
            }
-         
-         logger.logLeadProcessing(trackingId, 'lead_notifications_sent', {
-           leadId: data.id,
-           agentCount: agentEmails.length
-         });
-       } else {
-         logger.logLeadProcessing(trackingId, 'no_active_agents_for_notification', {
-           leadId: data.id
-         });
-       }
+         } else {
+           logger.logLeadProcessing(trackingId, 'no_agent_assigned_no_notification_sent', {
+             leadId: data.id
+           });
+         }
      } catch (notificationError) {
        // Don't fail lead creation if notification fails
        logger.logError(notificationError, {
