@@ -3,6 +3,7 @@ import { leads, agents } from '../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import logger from '../utils/logger.js';
 import EmailService from './email-service.js';
+import bobOrchestrator from './bob-orchestrator.js';
 import { hashForLogging } from '../utils/crypto.js';
 
 /**
@@ -209,6 +210,16 @@ export async function createLead(leadData, trackingId) {
        });
      }
 
+    try {
+      await bobOrchestrator.syncLead(data);
+    } catch (syncError) {
+      logger.logError(syncError, {
+        context: 'bob_phase1_create_lead_sync',
+        trackingId,
+        leadId: data.id
+      });
+    }
+
     return data;
 
   } catch (error) {
@@ -280,6 +291,16 @@ export async function updateLead(leadId, leadData, trackingId) {
       hubspotContactId: leadData.hubspot_contact_id,
       email: leadData.email ? hashForLogging(leadData.email) : '[MISSING]'
     });
+
+    try {
+      await bobOrchestrator.syncLead(data);
+    } catch (syncError) {
+      logger.logError(syncError, {
+        context: 'bob_phase1_update_lead_sync',
+        trackingId,
+        leadId: data.id
+      });
+    }
 
     return data;
 

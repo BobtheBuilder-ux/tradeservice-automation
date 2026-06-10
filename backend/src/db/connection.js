@@ -2,18 +2,21 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import dotenv from 'dotenv';
 import * as schema from './schema.js';
+import { getRuntimeConfig } from '../utils/runtime-config.js';
 
 // Load environment variables
 dotenv.config();
 
+const runtimeConfig = getRuntimeConfig();
+
 // Validate required environment variables
-if (!process.env.DATABASE_URL) {
-  throw new Error('DATABASE_URL environment variable is required');
+if (!runtimeConfig.databaseUrl) {
+  throw new Error('DATABASE_URL environment variable is required (or save InsForge URL at /data/.openclaw/secrets/insforge_database_url)');
 }
 
 // Create PostgreSQL connection pool
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: runtimeConfig.databaseUrl,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
   max: 20, // Maximum number of clients in the pool
   idleTimeoutMillis: 30000, // Close idle clients after 30 seconds

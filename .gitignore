@@ -68,3 +68,17 @@ supabase/
 rules.txt
 N8N_WEBHOOK_DOCUMENTATION.md
 n8n-hubspot-lead-automation-workflow.json
+
+# InsForge & AI agent skills
+.insforge
+.agent
+.agents
+.augment
+.claude
+.cline
+.github/copilot*
+.kilocode
+.qoder
+.qwen
+.roo
+.windsurf

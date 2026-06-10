@@ -338,6 +338,73 @@ export const agentFeedback = pgTable('agent_feedback', {
   typeStatusIdx: index('idx_agent_feedback_type_status').on(table.feedbackType, table.status),
 }));
 
+// Phase 1 Bob foundations: lead-centric conversation, message, and action tracking
+export const leadConversations = pgTable('lead_conversations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  leadId: uuid('lead_id').notNull().references(() => leads.id, { onDelete: 'cascade' }),
+  channel: varchar('channel', { length: 50 }).notNull().default('email'),
+  status: varchar('status', { length: 50 }).notNull().default('active'),
+  optedOut: boolean('opted_out').notNull().default(false),
+  lastInboundAt: timestamp('last_inbound_at', { withTimezone: true }),
+  lastOutboundAt: timestamp('last_outbound_at', { withTimezone: true }),
+  nextAction: varchar('next_action', { length: 100 }),
+  nextActionAt: timestamp('next_action_at', { withTimezone: true }),
+  lastSummary: text('last_summary'),
+  metadata: jsonb('metadata'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  leadIdx: index('idx_lead_conversations_lead_id').on(table.leadId),
+  channelIdx: index('idx_lead_conversations_channel').on(table.channel),
+  statusIdx: index('idx_lead_conversations_status').on(table.status),
+  nextActionIdx: index('idx_lead_conversations_next_action_at').on(table.nextActionAt),
+}));
+
+export const leadConversationMessages = pgTable('lead_conversation_messages', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  conversationId: uuid('conversation_id').notNull().references(() => leadConversations.id, { onDelete: 'cascade' }),
+  leadId: uuid('lead_id').notNull().references(() => leads.id, { onDelete: 'cascade' }),
+  direction: varchar('direction', { length: 20 }).notNull(),
+  channel: varchar('channel', { length: 50 }).notNull().default('email'),
+  messageType: varchar('message_type', { length: 50 }).notNull().default('email'),
+  subject: varchar('subject', { length: 500 }),
+  bodyText: text('body_text'),
+  bodyHtml: text('body_html'),
+  providerMessageId: varchar('provider_message_id', { length: 255 }),
+  status: varchar('status', { length: 50 }).notNull().default('logged'),
+  sentAt: timestamp('sent_at', { withTimezone: true }),
+  deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+  errorMessage: text('error_message'),
+  metadata: jsonb('metadata'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  conversationIdx: index('idx_lead_messages_conversation_id').on(table.conversationId),
+  leadIdx: index('idx_lead_messages_lead_id').on(table.leadId),
+  channelIdx: index('idx_lead_messages_channel').on(table.channel),
+  createdAtIdx: index('idx_lead_messages_created_at').on(table.createdAt),
+}));
+
+export const bobActions = pgTable('bob_actions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  leadId: uuid('lead_id').notNull().references(() => leads.id, { onDelete: 'cascade' }),
+  conversationId: uuid('conversation_id').references(() => leadConversations.id, { onDelete: 'set null' }),
+  actionType: varchar('action_type', { length: 100 }).notNull(),
+  channel: varchar('channel', { length: 50 }).notNull().default('email'),
+  status: varchar('status', { length: 50 }).notNull().default('pending'),
+  reason: text('reason'),
+  payload: jsonb('payload'),
+  result: jsonb('result'),
+  scheduledFor: timestamp('scheduled_for', { withTimezone: true }),
+  executedAt: timestamp('executed_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  leadIdx: index('idx_bob_actions_lead_id').on(table.leadId),
+  statusIdx: index('idx_bob_actions_status').on(table.status),
+  actionTypeIdx: index('idx_bob_actions_action_type').on(table.actionType),
+  scheduledForIdx: index('idx_bob_actions_scheduled_for').on(table.scheduledFor),
+}));
+
 // Relations
 export const agentsRelations = relations(agents, ({ many, one }) => ({
   assignedLeads: many(leads, { relationName: 'assignedAgent' }),
@@ -367,6 +434,9 @@ export const leadsRelations = relations(leads, ({ one, many }) => ({
   webhookEvents: many(webhookEvents),
   workflowAutomations: many(workflowAutomation),
   feedback: many(agentFeedback),
+  conversations: many(leadConversations),
+  conversationMessages: many(leadConversationMessages),
+  bobActions: many(bobActions),
 }));
 
 export const agentFeedbackRelations = relations(agentFeedback, ({ one }) => ({
@@ -422,6 +492,37 @@ export const emailQueueRelations = relations(emailQueue, ({ one }) => ({
   lead: one(leads, {
     fields: [emailQueue.leadId],
     references: [leads.id],
+  }),
+}));
+
+export const leadConversationsRelations = relations(leadConversations, ({ one, many }) => ({
+  lead: one(leads, {
+    fields: [leadConversations.leadId],
+    references: [leads.id],
+  }),
+  messages: many(leadConversationMessages),
+  actions: many(bobActions),
+}));
+
+export const leadConversationMessagesRelations = relations(leadConversationMessages, ({ one }) => ({
+  conversation: one(leadConversations, {
+    fields: [leadConversationMessages.conversationId],
+    references: [leadConversations.id],
+  }),
+  lead: one(leads, {
+    fields: [leadConversationMessages.leadId],
+    references: [leads.id],
+  }),
+}));
+
+export const bobActionsRelations = relations(bobActions, ({ one }) => ({
+  lead: one(leads, {
+    fields: [bobActions.leadId],
+    references: [leads.id],
+  }),
+  conversation: one(leadConversations, {
+    fields: [bobActions.conversationId],
+    references: [leadConversations.id],
   }),
 }));
 

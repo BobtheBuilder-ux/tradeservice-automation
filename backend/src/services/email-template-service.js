@@ -539,13 +539,15 @@ class EmailTemplateService {
           subject: emailData.subject,
           htmlContent: emailData.html,
           textContent: emailData.text,
-          templateType: emailData.template_type,
-          emailType: emailData.email_type || 'transactional',
+          emailType: emailData.email_type || emailData.template_type || 'transactional',
           leadId: emailData.lead_id,
           trackingId: emailData.tracking_id,
-          metadata: emailData.metadata,
+          metadata: {
+            ...(emailData.metadata || {}),
+            templateType: emailData.template_type || null,
+            priority: emailData.priority || 'normal'
+          },
           status: 'scheduled',
-          priority: emailData.priority || 'normal',
           scheduledFor: emailData.scheduled_for || new Date().toISOString()
         })
         .returning();

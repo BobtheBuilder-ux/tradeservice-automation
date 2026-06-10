@@ -28,6 +28,8 @@ import hubspotPollingService from './src/services/hubspot-polling-service.js';
 import emailQueueProcessor from './src/services/email-queue-processor.js';
 import followUpAutomationService from './src/services/follow-up-automation-service.js';
 import automatedEmailWorkflowService from './src/services/automated-email-workflow-service.js';
+import bobOrchestrator from './src/services/bob-orchestrator.js';
+import bobActionExecutor from './src/services/bob-action-executor.js';
 import { calendlyConfig, db } from './src/config/index.js';
 import { leadProcessingLogs } from './src/db/schema.js';
 import logger from './utils/logger.js';
@@ -432,7 +434,8 @@ app.get('/', (req, res) => {
       'Integrated Workflow Orchestration',
       'Real-time Workflow Processing',
       'Automated New Lead Monitoring',
-      'Health Monitoring'
+      'Health Monitoring',
+      'Bob Lead Conversation Orchestration'
     ],
     endpoints: {
       auth: '/api/auth',
@@ -449,6 +452,10 @@ app.get('/', (req, res) => {
         stop: 'POST /api/monitor/stop',
         status: 'GET /api/monitor/status',
         check: 'POST /api/monitor/check'
+      },
+      bob: {
+        orchestrator: bobOrchestrator.getStatus(),
+        executor: bobActionExecutor.getStatus()
       },
       webhooks: {
         // Facebook webhook removed
@@ -547,6 +554,20 @@ app.listen(PORT, async () => {
   } catch (error) {
     logWithTimestamp('error', '❌ Failed to initialize workflow processing', { error: error.message, stack: error.stack });
   }
+
+  try {
+    bobOrchestrator.start();
+    logWithTimestamp('info', '✅ Bob orchestrator started successfully');
+  } catch (error) {
+    logWithTimestamp('error', '❌ Failed to start Bob orchestrator', { error: error.message, stack: error.stack });
+  }
+
+  try {
+    bobActionExecutor.start();
+    logWithTimestamp('info', '✅ Bob action executor started successfully');
+  } catch (error) {
+    logWithTimestamp('error', '❌ Failed to start Bob action executor', { error: error.message, stack: error.stack });
+  }
   
   logWithTimestamp('info', '🎉 All systems initialized successfully - Server ready to handle requests');
   console.log('\n' + '='.repeat(80));
@@ -562,6 +583,8 @@ app.listen(PORT, async () => {
   console.log(`📧 Email Queue Processor: Active`);
   console.log(`🔄 Follow-up Automation: Active (30-minute intervals)`);
   console.log(`📬 Automated Email Workflow: Active (5-minute intervals)`);
+  console.log(`🤖 Bob Orchestrator: Active (5-minute intervals)`);
+  console.log(`⚙️  Bob Action Executor: Active (60-second intervals)`);
   console.log('='.repeat(80));
   console.log('='.repeat(80) + '\n');
 });
@@ -601,6 +624,22 @@ process.on('SIGTERM', () => {
   } catch (error) {
     logWithTimestamp('error', '❌ Error stopping workflow orchestrator', { error: error.message, stack: error.stack });
   }
+
+  try {
+    logWithTimestamp('info', '🛑 Stopping Bob orchestrator');
+    bobOrchestrator.stop();
+    logWithTimestamp('info', '✅ Bob orchestrator stopped successfully');
+  } catch (error) {
+    logWithTimestamp('error', '❌ Error stopping Bob orchestrator', { error: error.message, stack: error.stack });
+  }
+
+  try {
+    logWithTimestamp('info', '🛑 Stopping Bob action executor');
+    bobActionExecutor.stop();
+    logWithTimestamp('info', '✅ Bob action executor stopped successfully');
+  } catch (error) {
+    logWithTimestamp('error', '❌ Error stopping Bob action executor', { error: error.message, stack: error.stack });
+  }
   
   logWithTimestamp('info', '👋 Graceful shutdown completed');
   process.exit(0);
@@ -624,6 +663,14 @@ process.on('SIGINT', () => {
   } catch (error) {
     logWithTimestamp('error', '❌ Error stopping new lead monitor', { error: error.message, stack: error.stack });
   }
+
+  try {
+    logWithTimestamp('info', '🛑 Stopping automated email workflow service');
+    automatedEmailWorkflowService.stopContinuousMonitoring();
+    logWithTimestamp('info', '✅ Automated email workflow service stopped successfully');
+  } catch (error) {
+    logWithTimestamp('error', '❌ Error stopping automated email workflow service', { error: error.message, stack: error.stack });
+  }
   
   try {
     logWithTimestamp('info', '🛑 Stopping workflow orchestrator');
@@ -631,6 +678,22 @@ process.on('SIGINT', () => {
     logWithTimestamp('info', '✅ Workflow orchestrator shutdown initiated');
   } catch (error) {
     logWithTimestamp('error', '❌ Error stopping workflow orchestrator', { error: error.message, stack: error.stack });
+  }
+
+  try {
+    logWithTimestamp('info', '🛑 Stopping Bob orchestrator');
+    bobOrchestrator.stop();
+    logWithTimestamp('info', '✅ Bob orchestrator stopped successfully');
+  } catch (error) {
+    logWithTimestamp('error', '❌ Error stopping Bob orchestrator', { error: error.message, stack: error.stack });
+  }
+
+  try {
+    logWithTimestamp('info', '🛑 Stopping Bob action executor');
+    bobActionExecutor.stop();
+    logWithTimestamp('info', '✅ Bob action executor stopped successfully');
+  } catch (error) {
+    logWithTimestamp('error', '❌ Error stopping Bob action executor', { error: error.message, stack: error.stack });
   }
   
   logWithTimestamp('info', '👋 Graceful shutdown completed');

@@ -1,6 +1,6 @@
 // API client for communicating with the backend server
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL;
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_INSFORGE_API_BASE_URL || process.env.NEXT_PUBLIC_INSFORGE_URL || '';
 
 class ApiClient {
   constructor() {

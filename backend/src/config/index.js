@@ -2,16 +2,20 @@ import { Client as HubSpotClient } from '@hubspot/api-client';
 import dotenv from 'dotenv';
 import logger from '../utils/logger.js';
 import { db, checkDatabaseConnection } from '../db/connection.js';
+import { getRuntimeConfig } from '../utils/runtime-config.js';
 
 dotenv.config();
 
-// Validate required environment variables (warn in development, error in production)
-const requiredVars = [
-  'DATABASE_URL',
-  'HUBSPOT_ACCESS_TOKEN'
-];
+const runtimeConfig = getRuntimeConfig();
 
-const missingVars = requiredVars.filter(varName => !process.env[varName]);
+// Validate required environment variables (warn in development, error in production)
+const missingVars = [];
+if (!runtimeConfig.databaseUrl) {
+  missingVars.push('DATABASE_URL');
+}
+if (!process.env.HUBSPOT_ACCESS_TOKEN) {
+  missingVars.push('HUBSPOT_ACCESS_TOKEN');
+}
 if (missingVars.length > 0) {
   if (process.env.NODE_ENV === 'production') {
     throw new Error(`Missing required environment variables: ${missingVars.join(', ')}`);
@@ -51,7 +55,8 @@ export const calendlyConfig = {
 export const appConfig = {
   port: process.env.PORT || 3000,
   nodeEnv: process.env.NODE_ENV || 'development',
-  logLevel: process.env.LOG_LEVEL || 'info'
+  logLevel: process.env.LOG_LEVEL || 'info',
+  insforgeApiBaseUrl: runtimeConfig.insforgeApiBaseUrl
 };
 
 export default {
