@@ -69,6 +69,8 @@ class BobActionExecutor {
   buildEmailContent(type, lead, trackingId) {
     const bookingLink = this.buildBookingLink(lead, trackingId);
     const firstName = lead.firstName || lead.fullName || 'there';
+    const preferredWindow = lead.preferredMeetingWindow ? ` Preferred time window: ${lead.preferredMeetingWindow}.` : '';
+    const serviceLine = lead.serviceInterest ? `I’d love to learn more about your interest in ${lead.serviceInterest}. ` : '';
 
     if (type === 'send_follow_up_email') {
       return {
@@ -87,6 +89,75 @@ class BobActionExecutor {
         `,
         text: `Hi ${firstName},\n\nI wanted to follow up in case you still want help getting your consultation booked.\n\nBook here: ${bookingLink}\n\nIf you'd rather reply with a few times that work for you, that's fine too.\n\nBest,\nBob`,
         template: 'follow_up_booking',
+        conversationStatus: 'awaiting_reply',
+      };
+    }
+
+    if (type === 'request_more_info') {
+      return {
+        subject: `A few quick questions before we book, ${firstName}`,
+        html: `
+          <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;line-height:1.6;color:#1f2937;">
+            <h2 style="margin-bottom:12px;">Hi ${firstName},</h2>
+            <p>${serviceLine}Before I point you to the best next step, I want to make sure we’re sending you in the right direction.</p>
+            <p>Could you reply with these quick details?</p>
+            <ul>
+              <li>What service or outcome are you looking for?</li>
+              <li>What timeline are you working with?</li>
+              <li>Do you already know the best day/time for a call?${preferredWindow}</li>
+            </ul>
+            <p>Once I have that, I can help you get booked faster.</p>
+            <p>Best,<br />Bob</p>
+          </div>
+        `,
+        text: `Hi ${firstName},\n\n${serviceLine}Before I point you to the best next step, could you reply with:\n- what service or outcome you want\n- your timeline\n- the best day/time for a call${preferredWindow}\n\nOnce I have that, I can help you get booked faster.\n\nBest,\nBob`,
+        template: 'qualification_request',
+        conversationStatus: 'awaiting_reply',
+        lastIntent: 'qualification_requested',
+      };
+    }
+
+    if (type === 'send_booking_reminder') {
+      return {
+        subject: `Ready when you are, ${firstName}`,
+        html: `
+          <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;line-height:1.6;color:#1f2937;">
+            <h2 style="margin-bottom:12px;">Hi ${firstName},</h2>
+            <p>I’m checking back in because it looks like you’re still a good fit for a consultation, but your meeting isn’t booked yet.</p>
+            <p>You can reserve a time here:</p>
+            <p style="margin:24px 0;">
+              <a href="${bookingLink}" style="background:#111827;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Book my consultation</a>
+            </p>
+            <p>If you want me to help narrow down a time window first, just reply and I’ll help you sort it out.</p>
+            <p>Best,<br />Bob</p>
+          </div>
+        `,
+        text: `Hi ${firstName},\n\nIt looks like you're still a good fit for a consultation, but your meeting isn’t booked yet.\n\nReserve a time here: ${bookingLink}\n\nIf you want help narrowing down a time window first, just reply and I’ll help.\n\nBest,\nBob`,
+        template: 'booking_reminder',
+        conversationStatus: 'ready_to_book',
+        lastIntent: 'booking_reminder_sent',
+      };
+    }
+
+    if (type === 'send_booking_invite') {
+      return {
+        subject: `Let’s get your consultation booked, ${firstName}`,
+        html: `
+          <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;line-height:1.6;color:#1f2937;">
+            <h2 style="margin-bottom:12px;">Hi ${firstName},</h2>
+            <p>Thanks for the details so far. The best next step is to get your consultation on the calendar.</p>
+            <p>You can book here:</p>
+            <p style="margin:24px 0;">
+              <a href="${bookingLink}" style="background:#111827;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Book my meeting</a>
+            </p>
+            <p>If you’d rather reply with your availability first, that works too.</p>
+            <p>Best,<br />Bob</p>
+          </div>
+        `,
+        text: `Hi ${firstName},\n\nThanks for the details so far. The best next step is to get your consultation on the calendar.\n\nBook here: ${bookingLink}\n\nIf you’d rather reply with your availability first, that works too.\n\nBest,\nBob`,
+        template: 'booking_invite',
+        conversationStatus: 'ready_to_book',
+        lastIntent: 'booking_invite_sent',
       };
     }
 
@@ -106,6 +177,7 @@ class BobActionExecutor {
       `,
       text: `Hi ${firstName},\n\nThanks for reaching out. I’d be happy to help you take the next step.\n\nBook your consultation here: ${bookingLink}\n\nIf you have questions before booking, just reply and I’ll help.\n\nBest,\nBob`,
       template: 'welcome_booking',
+      conversationStatus: 'awaiting_reply',
     };
   }
 
@@ -139,6 +211,20 @@ class BobActionExecutor {
         createdAt: leads.createdAt,
         updatedAt: leads.updatedAt,
         trackingId: leads.trackingId,
+        qualificationStatus: leads.qualificationStatus,
+        qualificationScore: leads.qualificationScore,
+        leadStage: leads.leadStage,
+        schedulingState: leads.schedulingState,
+        preferredContactChannel: leads.preferredContactChannel,
+        preferredMeetingWindow: leads.preferredMeetingWindow,
+        serviceInterest: leads.serviceInterest,
+        timeline: leads.timeline,
+        budgetRange: leads.budgetRange,
+        locationSummary: leads.locationSummary,
+        qualificationNotes: leads.qualificationNotes,
+        automationPaused: leads.automationPaused,
+        requiresHumanReview: leads.requiresHumanReview,
+        escalationReason: leads.escalationReason,
       })
       .from(leads)
       .where(eq(leads.id, leadId))
@@ -192,6 +278,8 @@ class BobActionExecutor {
         actionType: action.actionType,
         template: email.template,
         bobActionId: action.id,
+        conversationStatus: email.conversationStatus,
+        lastIntent: email.lastIntent,
       },
     });
 
@@ -224,6 +312,28 @@ class BobActionExecutor {
         emailQueueId: queuedEmail.id,
       },
     });
+
+    await db
+      .update(leads)
+      .set({
+        status: ['send_booking_invite', 'send_booking_reminder'].includes(action.actionType) ? 'contacted' : lead.status,
+        leadStage:
+          action.actionType === 'request_more_info'
+            ? 'awaiting_information'
+            : ['send_booking_invite', 'send_booking_reminder'].includes(action.actionType)
+              ? 'ready_to_book'
+              : lead.leadStage,
+        schedulingState:
+          action.actionType === 'request_more_info'
+            ? 'needs_follow_up'
+            : ['send_booking_invite', 'send_booking_reminder'].includes(action.actionType)
+              ? 'booking_invited'
+              : lead.schedulingState,
+        lastContactedAt: new Date(),
+        nextContactAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        updatedAt: new Date(),
+      })
+      .where(eq(leads.id, lead.id));
 
     await this.markAction(action.id, 'completed', {
       executedAt: new Date(),
@@ -268,6 +378,19 @@ class BobActionExecutor {
         ? 'Bob queued a phone outreach attempt for this lead.'
         : 'Bob flagged this lead for phone outreach but no phone number is available.',
     });
+
+    await db
+      .update(leads)
+      .set({
+        status: lead.phone ? 'contacted' : lead.status,
+        leadStage: lead.phone ? 'nurturing' : 'escalated',
+        schedulingState: lead.phone ? 'needs_follow_up' : lead.schedulingState,
+        requiresHumanReview: !lead.phone,
+        escalationReason: !lead.phone ? 'missing_phone_for_call_attempt' : lead.escalationReason,
+        nextContactAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        updatedAt: new Date(),
+      })
+      .where(eq(leads.id, lead.id));
 
     await this.markAction(action.id, 'awaiting_call', {
       executedAt: new Date(),
@@ -331,11 +454,48 @@ class BobActionExecutor {
       }
       case 'send_intro_email':
       case 'send_follow_up_email':
+      case 'request_more_info':
+      case 'send_booking_invite':
+      case 'send_booking_reminder':
         await this.queueEmailAction(action, lead);
         return;
       case 'queue_call_attempt':
         await this.queueCallAttempt(action, lead, conversation);
         return;
+      case 'mark_ready_for_human': {
+        await leadConversationService.logSystemEvent({
+          lead,
+          conversationId: action.conversationId,
+          channel: 'system',
+          messageType: 'human_review',
+          subject: 'Lead marked for human review',
+          bodyText: action.reason || 'Bob marked this lead for human review.',
+          metadata: {
+            bobActionId: action.id,
+            humanReviewRequired: true,
+            conversationStatus: 'needs_human_review',
+            lastIntent: 'human_review_requested',
+          },
+        });
+
+        await db
+          .update(leads)
+          .set({
+            requiresHumanReview: true,
+            leadStage: 'escalated',
+            escalationReason: action.payload?.escalationReason || lead.escalationReason || action.reason || null,
+            updatedAt: new Date(),
+          })
+          .where(eq(leads.id, lead.id));
+
+        await this.markAction(action.id, 'awaiting_human', {
+          executedAt: new Date(),
+          result: {
+            escalationReason: action.payload?.escalationReason || lead.escalationReason || null,
+          },
+        });
+        return;
+      }
       case 'monitor_meeting':
       case 'hold':
       case 'wait':

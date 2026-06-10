@@ -4,6 +4,7 @@ import { leads, agents, agentIntegrations } from '../db/schema.js';
 import { eq, desc, isNull, and, count } from 'drizzle-orm';
 import jwt from 'jsonwebtoken';
 import leadAutomationService from '../services/lead-automation-service.js';
+import bobOrchestrator from '../services/bob-orchestrator.js';
 
 const router = express.Router();
 
@@ -69,6 +70,84 @@ router.get('/', verifyToken, async (req, res) => {
     res.json({ leads: leadsData || [] });
   } catch (error) {
     console.error('Error in leads route:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PATCH /api/leads/:leadId/qualification - Update qualification and scheduling fields
+router.patch('/:leadId/qualification', verifyToken, async (req, res) => {
+  try {
+    const { leadId } = req.params;
+
+    const existingLead = await db.select()
+      .from(leads)
+      .where(eq(leads.id, leadId))
+      .limit(1);
+
+    if (!existingLead || existingLead.length === 0) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    const lead = existingLead[0];
+    if (req.user.role !== 'admin' && lead.assignedAgentId !== req.user.id) {
+      return res.status(403).json({ error: 'You can only update leads assigned to you' });
+    }
+
+    const allowedFields = [
+      'qualificationStatus',
+      'qualificationScore',
+      'leadStage',
+      'schedulingState',
+      'preferredContactChannel',
+      'preferredMeetingWindow',
+      'serviceInterest',
+      'timeline',
+      'budgetRange',
+      'locationSummary',
+      'qualificationNotes',
+      'nextContactAt',
+      'requiresHumanReview',
+      'escalationReason',
+      'automationPaused'
+    ];
+
+    const patch = {};
+    for (const field of allowedFields) {
+      if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+        patch[field] = req.body[field];
+      }
+    }
+
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ error: 'No valid qualification fields were provided' });
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, 'qualificationStatus')) {
+      patch.lastQualifiedAt = new Date();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, 'nextContactAt') && patch.nextContactAt) {
+      patch.nextContactAt = new Date(patch.nextContactAt);
+    }
+
+    patch.lastUpdatedBy = req.user.id;
+    patch.updatedAt = new Date();
+
+    const updatedLead = await db.update(leads)
+      .set(patch)
+      .where(eq(leads.id, leadId))
+      .returning();
+
+    if (updatedLead && updatedLead[0]) {
+      await bobOrchestrator.syncLead(updatedLead[0]);
+    }
+
+    res.json({
+      message: 'Lead qualification updated successfully',
+      lead: updatedLead[0]
+    });
+  } catch (error) {
+    console.error('Error updating lead qualification:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

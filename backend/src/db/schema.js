@@ -60,6 +60,25 @@ export const leads = pgTable('leads', {
   agentNotes: text('agent_notes'),
   followUpDate: timestamp('follow_up_date', { withTimezone: true }),
   priority: varchar('priority', { length: 20 }).notNull().default('medium'),
+
+  // Phase 2 qualification and scheduling state
+  qualificationStatus: varchar('qualification_status', { length: 50 }).notNull().default('unqualified'),
+  qualificationScore: integer('qualification_score').notNull().default(0),
+  leadStage: varchar('lead_stage', { length: 50 }).notNull().default('new_inquiry'),
+  schedulingState: varchar('scheduling_state', { length: 50 }).notNull().default('not_started'),
+  preferredContactChannel: varchar('preferred_contact_channel', { length: 50 }).notNull().default('email'),
+  preferredMeetingWindow: varchar('preferred_meeting_window', { length: 255 }),
+  serviceInterest: varchar('service_interest', { length: 255 }),
+  timeline: varchar('timeline', { length: 100 }),
+  budgetRange: varchar('budget_range', { length: 100 }),
+  locationSummary: varchar('location_summary', { length: 255 }),
+  qualificationNotes: text('qualification_notes'),
+  lastContactedAt: timestamp('last_contacted_at', { withTimezone: true }),
+  nextContactAt: timestamp('next_contact_at', { withTimezone: true }),
+  lastQualifiedAt: timestamp('last_qualified_at', { withTimezone: true }),
+  automationPaused: boolean('automation_paused').notNull().default(false),
+  requiresHumanReview: boolean('requires_human_review').notNull().default(false),
+  escalationReason: text('escalation_reason'),
   
   // Calendly integration
   calendlyEventUri: text('calendly_event_uri'),
@@ -102,6 +121,10 @@ export const leads = pgTable('leads', {
   emailStatusIdx: index('idx_leads_email_status').on(table.email, table.status),
   sourceCreatedAtIdx: index('idx_leads_source_created_at').on(table.source, table.createdAt),
   priorityStatusIdx: index('idx_leads_priority_status').on(table.priority, table.status),
+  qualificationStatusIdx: index('idx_leads_qualification_status').on(table.qualificationStatus),
+  leadStageIdx: index('idx_leads_lead_stage').on(table.leadStage),
+  schedulingStateIdx: index('idx_leads_scheduling_state').on(table.schedulingState),
+  nextContactAtIdx: index('idx_leads_next_contact_at').on(table.nextContactAt),
 }));
 
 // Lead audit log table
@@ -344,11 +367,15 @@ export const leadConversations = pgTable('lead_conversations', {
   leadId: uuid('lead_id').notNull().references(() => leads.id, { onDelete: 'cascade' }),
   channel: varchar('channel', { length: 50 }).notNull().default('email'),
   status: varchar('status', { length: 50 }).notNull().default('active'),
+  conversationStatus: varchar('conversation_status', { length: 50 }).notNull().default('active_nurture'),
   optedOut: boolean('opted_out').notNull().default(false),
   lastInboundAt: timestamp('last_inbound_at', { withTimezone: true }),
   lastOutboundAt: timestamp('last_outbound_at', { withTimezone: true }),
   nextAction: varchar('next_action', { length: 100 }),
   nextActionAt: timestamp('next_action_at', { withTimezone: true }),
+  lastIntent: varchar('last_intent', { length: 100 }),
+  lastIntentAt: timestamp('last_intent_at', { withTimezone: true }),
+  humanReviewRequired: boolean('human_review_required').notNull().default(false),
   lastSummary: text('last_summary'),
   metadata: jsonb('metadata'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -357,6 +384,7 @@ export const leadConversations = pgTable('lead_conversations', {
   leadIdx: index('idx_lead_conversations_lead_id').on(table.leadId),
   channelIdx: index('idx_lead_conversations_channel').on(table.channel),
   statusIdx: index('idx_lead_conversations_status').on(table.status),
+  conversationStatusIdx: index('idx_lead_conversations_conversation_status').on(table.conversationStatus),
   nextActionIdx: index('idx_lead_conversations_next_action_at').on(table.nextActionAt),
 }));
 

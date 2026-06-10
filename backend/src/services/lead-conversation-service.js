@@ -22,6 +22,7 @@ class LeadConversationService {
         leadId: lead.id,
         channel,
         status: 'active',
+        conversationStatus: 'active_nurture',
         metadata: {
           source: lead.source || 'unknown',
           bootstrap: 'bob_phase_1',
@@ -107,6 +108,8 @@ class LeadConversationService {
 
     const updatedConversation = await this.updateConversation(conversation.id, {
       lastOutboundAt: queuedAt,
+      conversationStatus: metadata.conversationStatus || 'awaiting_reply',
+      lastIntent: metadata.lastIntent || conversation.lastIntent || null,
       lastSummary: `Queued outbound email: ${subject}`,
       metadata: {
         ...existingMetadata,
@@ -169,6 +172,10 @@ class LeadConversationService {
     });
 
     await this.updateConversation(conversation.id, {
+      conversationStatus: metadata.conversationStatus || conversation.conversationStatus || 'active_nurture',
+      lastIntent: metadata.lastIntent || conversation.lastIntent || null,
+      lastIntentAt: metadata.lastIntent ? new Date() : conversation.lastIntentAt || null,
+      humanReviewRequired: metadata.humanReviewRequired ?? conversation.humanReviewRequired ?? false,
       lastSummary: bodyText || subject,
       metadata: {
         ...(conversation?.metadata || {}),

@@ -170,6 +170,7 @@ export default function AgentDashboard() {
   const filteredLeads = leads.filter(lead => {
     const matchesSearch = !searchTerm || 
       lead.full_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      lead.fullName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       lead.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
       lead.phone?.includes(searchTerm);
     
@@ -196,6 +197,15 @@ export default function AgentDashboard() {
       case 'medium': return 'bg-gradient-to-r from-orange-100 to-yellow-100 text-orange-800 border border-orange-200 shadow-sm';
       case 'low': return 'bg-gradient-to-r from-emerald-100 to-green-100 text-emerald-800 border border-emerald-200 shadow-sm';
       default: return 'bg-gradient-to-r from-gray-100 to-slate-100 text-gray-800 border border-gray-200 shadow-sm';
+    }
+  };
+
+  const getQualificationColor = (status) => {
+    switch (status) {
+      case 'qualified': return 'bg-emerald-100 text-emerald-800 border border-emerald-200';
+      case 'partially_qualified': return 'bg-amber-100 text-amber-800 border border-amber-200';
+      case 'disqualified': return 'bg-rose-100 text-rose-800 border border-rose-200';
+      default: return 'bg-slate-100 text-slate-700 border border-slate-200';
     }
   };
 
@@ -269,7 +279,7 @@ export default function AgentDashboard() {
           )}
 
           {/* Stats Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-6 mb-8">
             <div className="bg-gradient-to-br from-teal-500 to-cyan-600 rounded-xl shadow-xl p-6 transform hover:scale-105 transition-all duration-200">
               <div className="flex items-center">
                 <div className="flex-shrink-0">
@@ -317,6 +327,22 @@ export default function AgentDashboard() {
             </div>
             
             <div className="bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl shadow-xl p-6 transform hover:scale-105 transition-all duration-200">
+              <div className="flex items-center">
+                <div className="flex-shrink-0">
+                  <CheckCircle className="h-10 w-10 text-white drop-shadow-lg" />
+                </div>
+                <div className="ml-5 w-0 flex-1">
+                  <dl>
+                    <dt className="text-sm font-bold text-indigo-100 truncate">Qualified</dt>
+                    <dd className="text-2xl font-bold text-white drop-shadow-lg">
+                      {leads.filter(lead => ['qualified', 'partially_qualified'].includes(lead.qualificationStatus)).length}
+                    </dd>
+                  </dl>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-gradient-to-br from-fuchsia-500 to-purple-600 rounded-xl shadow-xl p-6 transform hover:scale-105 transition-all duration-200">
               <div className="flex items-center">
                 <div className="flex-shrink-0">
                   <CheckCircle className="h-10 w-10 text-white drop-shadow-lg" />
@@ -447,6 +473,14 @@ export default function AgentDashboard() {
                                   {lead.phone}
                                 </div>
                               )}
+                              <div className="flex flex-wrap gap-2 mt-2">
+                                <span className={`inline-flex px-2 py-1 text-[11px] font-bold rounded-lg ${getQualificationColor(lead.qualificationStatus)}`}>
+                                  {(lead.qualificationStatus || 'unqualified').replace(/_/g, ' ')}
+                                </span>
+                                <span className="inline-flex px-2 py-1 text-[11px] font-bold rounded-lg bg-indigo-100 text-indigo-800 border border-indigo-200">
+                                  {(lead.leadStage || 'new_inquiry').replace(/_/g, ' ')}
+                                </span>
+                              </div>
                             </div>
                           </div>
                         </td>

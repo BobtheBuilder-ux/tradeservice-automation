@@ -18,13 +18,36 @@ class BobDecisionEngine {
       hasMeeting: Boolean(lead?.scheduledAt || lead?.meetingScheduled),
       isAssigned: Boolean(lead?.assignedAgentId),
       isOptedOut: Boolean(conversation?.optedOut),
-      hasRecentOutbound: Boolean(conversation?.lastOutboundAt),
       callQueued: Boolean(metadata.callQueuedAt),
+      automationPaused: Boolean(lead?.automationPaused),
+      requiresHumanReview: Boolean(lead?.requiresHumanReview || conversation?.humanReviewRequired),
+      qualificationStatus: lead?.qualificationStatus || 'unqualified',
+      leadStage: lead?.leadStage || 'new_inquiry',
+      schedulingState: lead?.schedulingState || 'not_started',
+      conversationStatus: conversation?.conversationStatus || 'active_nurture',
+      preferredContactChannel: lead?.preferredContactChannel || 'email',
     };
   }
 
   decideNextAction(context) {
-    const { lead, conversation, ageHours, hoursSinceLastOutbound, outboundCount, hasMeeting, isAssigned, isOptedOut, callQueued } = context;
+    const {
+      lead,
+      conversation,
+      ageHours,
+      hoursSinceLastOutbound,
+      outboundCount,
+      hasMeeting,
+      isAssigned,
+      isOptedOut,
+      callQueued,
+      automationPaused,
+      requiresHumanReview,
+      qualificationStatus,
+      leadStage,
+      schedulingState,
+      conversationStatus,
+      preferredContactChannel,
+    } = context;
 
     if (!lead) {
       return {
@@ -39,10 +62,34 @@ class BobDecisionEngine {
     if (isOptedOut) {
       return {
         actionType: 'hold',
-        channel: conversation?.channel || 'email',
+        channel: conversation?.channel || preferredContactChannel,
         reason: 'Lead opted out of communication',
         scheduledFor: null,
         payload: { status: 'do_not_contact' },
+      };
+    }
+
+    if (automationPaused) {
+      return {
+        actionType: 'hold',
+        channel: conversation?.channel || preferredContactChannel,
+        reason: 'Automation is paused for this lead',
+        scheduledFor: null,
+        payload: { status: 'paused' },
+      };
+    }
+
+    if (requiresHumanReview) {
+      return {
+        actionType: 'mark_ready_for_human',
+        channel: 'system',
+        reason: lead?.escalationReason || 'Lead requires human review before more automation runs',
+        scheduledFor: new Date(),
+        payload: {
+          escalationReason: lead?.escalationReason || null,
+          qualificationStatus,
+          leadStage,
+        },
       };
     }
 
@@ -69,24 +116,30 @@ class BobDecisionEngine {
     if (callQueued) {
       return {
         actionType: 'wait',
-        channel: conversation?.channel || 'phone',
+        channel: preferredContactChannel,
         reason: 'A phone follow-up is already queued for this lead',
         scheduledFor: null,
         payload: {
           leadStatus: lead.status || 'pending_call',
+          schedulingState,
         },
       };
     }
 
     if (!conversation?.lastOutboundAt) {
       return {
-        actionType: 'send_intro_email',
+        actionType: qualificationStatus === 'unqualified' ? 'request_more_info' : 'send_booking_invite',
         channel: 'email',
-        reason: 'No outbound contact has been logged yet',
+        reason:
+          qualificationStatus === 'unqualified'
+            ? 'Lead is missing qualification detail, so the first outreach should gather context'
+            : 'Qualified lead has not received a booking invite yet',
         scheduledFor: new Date(),
         payload: {
-          template: 'welcome_booking',
+          template: qualificationStatus === 'unqualified' ? 'qualification_request' : 'booking_invite',
           leadStatus: lead.status || 'new',
+          qualificationStatus,
+          leadStage,
         },
       };
     }
@@ -94,50 +147,99 @@ class BobDecisionEngine {
     if (hoursSinceLastOutbound !== null && hoursSinceLastOutbound < 20) {
       return {
         actionType: 'wait',
-        channel: conversation?.channel || 'email',
+        channel: conversation?.channel || preferredContactChannel,
         reason: 'Most recent outbound contact is still within the active response window',
         scheduledFor: null,
         payload: {
           leadStatus: lead.status || 'contacted',
+          conversationStatus,
         },
       };
     }
 
-    if (outboundCount <= 1 && hoursSinceLastOutbound !== null && hoursSinceLastOutbound >= 24) {
+    if (qualificationStatus === 'unqualified' || leadStage === 'awaiting_information') {
       return {
-        actionType: 'send_follow_up_email',
+        actionType: 'request_more_info',
         channel: 'email',
-        reason: 'Lead has not booked within 24 hours of the initial outreach',
+        reason: 'Lead still needs qualification before scheduling should be pushed harder',
         scheduledFor: new Date(),
         payload: {
-          template: 'follow_up_booking',
-          leadStatus: lead.status || 'contacted',
-          outboundCount,
+          template: 'qualification_request',
+          qualificationStatus,
+          leadStage,
+        },
+      };
+    }
+
+    if (['qualified', 'partially_qualified'].includes(qualificationStatus) && ['not_started', 'needs_follow_up'].includes(schedulingState)) {
+      return {
+        actionType: outboundCount === 0 ? 'send_booking_invite' : 'send_booking_reminder',
+        channel: 'email',
+        reason:
+          outboundCount === 0
+            ? 'Qualified lead is ready for the first booking invite'
+            : 'Qualified lead still has not booked and should receive a booking reminder',
+        scheduledFor: new Date(),
+        payload: {
+          template: outboundCount === 0 ? 'booking_invite' : 'booking_reminder',
+          qualificationStatus,
+          schedulingState,
+          leadStage,
+        },
+      };
+    }
+
+    if (conversationStatus === 'ready_to_book') {
+      return {
+        actionType: 'send_booking_reminder',
+        channel: 'email',
+        reason: 'Conversation is marked ready to book, so Bob should send a direct booking reminder',
+        scheduledFor: new Date(),
+        payload: {
+          template: 'booking_reminder',
+          schedulingState,
         },
       };
     }
 
     if (outboundCount >= 2 && ageHours !== null && ageHours >= 72) {
+      if (lead.phone) {
+        return {
+          actionType: 'queue_call_attempt',
+          channel: 'phone',
+          reason: 'Lead remains unscheduled after the email nurture window; phone outreach is the next best action',
+          scheduledFor: new Date(),
+          payload: {
+            script: 'qualification_and_booking',
+            requiresPhone: true,
+            outboundCount,
+            qualificationStatus,
+          },
+        };
+      }
+
       return {
-        actionType: 'queue_call_attempt',
-        channel: 'phone',
-        reason: 'Lead remains unscheduled after the email nurture window; phone outreach is the next best action',
+        actionType: 'mark_ready_for_human',
+        channel: 'system',
+        reason: 'Lead needs a higher-touch follow-up, but no phone number is available for an automated call queue',
         scheduledFor: new Date(),
         payload: {
-          script: 'qualification_and_booking',
-          requiresPhone: Boolean(lead.phone),
-          outboundCount,
+          escalationReason: 'needs_phone_or_manual_follow_up',
+          qualificationStatus,
+          leadStage,
         },
       };
     }
 
     return {
       actionType: 'wait',
-      channel: conversation?.channel || 'email',
-      reason: 'Lead is in active nurture window; no immediate action required',
+      channel: conversation?.channel || preferredContactChannel,
+      reason: 'Lead is in an active nurture window and no immediate phase-two action is required',
       scheduledFor: null,
       payload: {
         leadStatus: lead.status || 'new',
+        qualificationStatus,
+        schedulingState,
       },
     };
   }
