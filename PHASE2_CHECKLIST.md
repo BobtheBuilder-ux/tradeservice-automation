@@ -1,6 +1,7 @@
 # Phase 2 Checklist — Qualification, Scheduling State, and Smarter Bob Rules
 
 Completed on Wed, June 10, 2026.
+Migration applied on Thu, June 11, 2026.
 
 ## 1) Data-model upgrades
 - [x] Added lead qualification fields to schema:
@@ -74,7 +75,7 @@ Completed on Wed, June 10, 2026.
 
 ## 7) Deployment/migration note
 - [x] Phase 2 code and migration files are ready
-- [ ] Applying the InsForge migration through the CLI was blocked by permissions/RLS (`must be owner of table leads`)
+- [x] Applied the InsForge migration after reassigning `public.leads` and `public.lead_conversations` ownership to `project_admin`
 
 ## Out of scope for this phase
 - [ ] Live outbound voice calling
