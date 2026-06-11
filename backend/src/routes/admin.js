@@ -2,8 +2,8 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { db } from '../config/index.js';
-import { agents, leads } from '../db/schema.js';
-import { eq, count, or, inArray, and } from 'drizzle-orm';
+import { agents, bobActions, leadConversations, leads } from '../db/schema.js';
+import { eq, count, or, inArray, and, desc, sql } from 'drizzle-orm';
 import emailService from '../services/email-service.js';
 import dotenv from 'dotenv';
 
@@ -358,6 +358,181 @@ router.post('/unassign-leads', verifyAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error('Error in unassign leads route:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// BOB ACTIVITY ENDPOINTS
+
+// Get Bob action history and human-review queue for admins
+router.get('/bob-activity', verifyAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
+
+    const actionRows = await db.select({
+      id: bobActions.id,
+      leadId: bobActions.leadId,
+      conversationId: bobActions.conversationId,
+      actionType: bobActions.actionType,
+      channel: bobActions.channel,
+      status: bobActions.status,
+      reason: bobActions.reason,
+      payload: bobActions.payload,
+      result: bobActions.result,
+      scheduledFor: bobActions.scheduledFor,
+      executedAt: bobActions.executedAt,
+      createdAt: bobActions.createdAt,
+      updatedAt: bobActions.updatedAt,
+      leadEmail: leads.email,
+      leadFullName: leads.fullName,
+      leadFirstName: leads.firstName,
+      leadLastName: leads.lastName,
+      leadPhone: leads.phone,
+      leadStatus: leads.status,
+      leadStage: leads.leadStage,
+      qualificationStatus: leads.qualificationStatus,
+      qualificationScore: leads.qualificationScore,
+      schedulingState: leads.schedulingState,
+      requiresHumanReview: leads.requiresHumanReview,
+      escalationReason: leads.escalationReason,
+      automationPaused: leads.automationPaused,
+      conversationStatus: leadConversations.conversationStatus,
+      lastIntent: leadConversations.lastIntent,
+      humanReviewRequired: leadConversations.humanReviewRequired,
+    })
+      .from(bobActions)
+      .leftJoin(leads, eq(bobActions.leadId, leads.id))
+      .leftJoin(leadConversations, eq(bobActions.conversationId, leadConversations.id))
+      .orderBy(desc(bobActions.createdAt))
+      .limit(limit);
+
+    const reviewRows = await db.select({
+      id: leads.id,
+      email: leads.email,
+      fullName: leads.fullName,
+      firstName: leads.firstName,
+      lastName: leads.lastName,
+      phone: leads.phone,
+      status: leads.status,
+      priority: leads.priority,
+      qualificationStatus: leads.qualificationStatus,
+      qualificationScore: leads.qualificationScore,
+      leadStage: leads.leadStage,
+      schedulingState: leads.schedulingState,
+      serviceInterest: leads.serviceInterest,
+      timeline: leads.timeline,
+      budgetRange: leads.budgetRange,
+      requiresHumanReview: leads.requiresHumanReview,
+      escalationReason: leads.escalationReason,
+      automationPaused: leads.automationPaused,
+      nextContactAt: leads.nextContactAt,
+      updatedAt: leads.updatedAt,
+      createdAt: leads.createdAt,
+    })
+      .from(leads)
+      .where(or(eq(leads.requiresHumanReview, true), eq(leads.automationPaused, true)))
+      .orderBy(desc(leads.updatedAt))
+      .limit(50);
+
+    const [statusCounts, reviewCount] = await Promise.all([
+      db.select({
+        status: bobActions.status,
+        count: count(),
+      })
+        .from(bobActions)
+        .groupBy(bobActions.status),
+      db.select({ count: count() })
+        .from(leads)
+        .where(or(eq(leads.requiresHumanReview, true), eq(leads.automationPaused, true))),
+    ]);
+
+    const stats = {
+      totalActions: statusCounts.reduce((sum, row) => sum + Number(row.count || 0), 0),
+      pendingActions: Number(statusCounts.find((row) => row.status === 'pending')?.count || 0),
+      failedActions: Number(statusCounts.find((row) => row.status === 'failed')?.count || 0),
+      awaitingHuman: Number(statusCounts.find((row) => row.status === 'awaiting_human')?.count || 0),
+      awaitingCall: Number(statusCounts.find((row) => row.status === 'awaiting_call')?.count || 0),
+      reviewLeads: Number(reviewCount[0]?.count || 0),
+    };
+
+    res.json({
+      success: true,
+      stats,
+      actions: actionRows,
+      reviewQueue: reviewRows,
+    });
+  } catch (error) {
+    console.error('Error in get Bob activity route:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Update a lead's Bob review/automation state
+router.patch('/bob-activity/leads/:leadId/review', verifyAdmin, async (req, res) => {
+  try {
+    const { leadId } = req.params;
+    const {
+      requiresHumanReview,
+      automationPaused,
+      escalationReason,
+      leadStage,
+      schedulingState,
+    } = req.body;
+
+    const patch = {
+      updatedAt: new Date(),
+      lastUpdatedBy: req.user.id,
+    };
+
+    if (typeof requiresHumanReview === 'boolean') patch.requiresHumanReview = requiresHumanReview;
+    if (typeof automationPaused === 'boolean') patch.automationPaused = automationPaused;
+    if (typeof escalationReason === 'string') patch.escalationReason = escalationReason.trim() || null;
+    if (typeof leadStage === 'string' && leadStage.trim()) patch.leadStage = leadStage.trim();
+    if (typeof schedulingState === 'string' && schedulingState.trim()) patch.schedulingState = schedulingState.trim();
+
+    const [updatedLead] = await db.update(leads)
+      .set(patch)
+      .where(eq(leads.id, leadId))
+      .returning();
+
+    if (!updatedLead) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    await db.update(leadConversations)
+      .set({
+        humanReviewRequired: updatedLead.requiresHumanReview,
+        conversationStatus: updatedLead.requiresHumanReview ? 'needs_human_review' : 'active_nurture',
+        lastIntent: updatedLead.requiresHumanReview ? 'human_review_requested' : 'human_review_resolved',
+        lastIntentAt: new Date(),
+        updatedAt: new Date(),
+        metadata: sql`coalesce(${leadConversations.metadata}, '{}'::jsonb) || ${JSON.stringify({
+          lastAdminReviewUpdateAt: new Date().toISOString(),
+          lastAdminReviewUpdatedBy: req.user.id,
+        })}::jsonb`,
+      })
+      .where(eq(leadConversations.leadId, leadId));
+
+    if (!updatedLead.requiresHumanReview) {
+      await db.update(bobActions)
+        .set({
+          status: 'completed',
+          executedAt: new Date(),
+          updatedAt: new Date(),
+          result: sql`coalesce(${bobActions.result}, '{}'::jsonb) || ${JSON.stringify({
+            resolvedByAdminId: req.user.id,
+            resolvedAt: new Date().toISOString(),
+          })}::jsonb`,
+        })
+        .where(and(
+          eq(bobActions.leadId, leadId),
+          eq(bobActions.status, 'awaiting_human')
+        ));
+    }
+
+    res.json({ success: true, lead: updatedLead });
+  } catch (error) {
+    console.error('Error in update Bob review route:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

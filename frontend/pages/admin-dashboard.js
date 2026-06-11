@@ -25,7 +25,9 @@ import {
   User,
   Eye,
   CalendarDays,
-  MessageSquare
+  MessageSquare,
+  Bot,
+  PauseCircle
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { useAuth } from '../lib/auth';
@@ -81,6 +83,21 @@ export default function AdminDashboard() {
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
   const [feedbackResponse, setFeedbackResponse] = useState('');
 
+  // Bob Activity State
+  const [bobActivity, setBobActivity] = useState({
+    actions: [],
+    reviewQueue: [],
+    stats: {
+      totalActions: 0,
+      pendingActions: 0,
+      failedActions: 0,
+      awaitingHuman: 0,
+      awaitingCall: 0,
+      reviewLeads: 0
+    }
+  });
+  const [bobActivityLoading, setBobActivityLoading] = useState(false);
+
   useEffect(() => {
     // Wait for auth to finish loading before making redirect decisions
     if (authLoading) return;
@@ -106,7 +123,8 @@ export default function AdminDashboard() {
         fetchAgents(),
         fetchLeads(),
         fetchCampaigns(),
-        fetchFeedback()
+        fetchFeedback(),
+        fetchBobActivity()
       ]);
     } catch (err) {
       console.error('Error fetching dashboard data:', err);
@@ -204,6 +222,61 @@ export default function AdminDashboard() {
       console.error('Error fetching feedback:', err);
     } finally {
       setFeedbackLoading(false);
+    }
+  };
+
+  const fetchBobActivity = async () => {
+    try {
+      setBobActivityLoading(true);
+      const response = await fetch('/api/admin/bob-activity', {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setBobActivity({
+          actions: data.actions || [],
+          reviewQueue: data.reviewQueue || [],
+          stats: data.stats || {
+            totalActions: 0,
+            pendingActions: 0,
+            failedActions: 0,
+            awaitingHuman: 0,
+            awaitingCall: 0,
+            reviewLeads: 0
+          }
+        });
+      }
+    } catch (err) {
+      console.error('Error fetching Bob activity:', err);
+    } finally {
+      setBobActivityLoading(false);
+    }
+  };
+
+  const handleUpdateBobReview = async (leadId, updates) => {
+    try {
+      const response = await fetch(`/api/admin/bob-activity/leads/${leadId}/review`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(updates)
+      });
+
+      if (response.ok) {
+        await Promise.all([fetchBobActivity(), fetchLeads()]);
+      } else {
+        const errorData = await response.json();
+        setError(errorData.error || 'Failed to update Bob review status');
+      }
+    } catch (err) {
+      console.error('Error updating Bob review status:', err);
+      setError('Failed to update Bob review status');
     }
   };
 
@@ -387,6 +460,7 @@ export default function AdminDashboard() {
                 { id: 'overview', label: 'Overview', icon: BarChart3, color: 'from-blue-500 to-cyan-500' },
                 { id: 'agents', label: 'Agent Management', icon: Users, color: 'from-green-500 to-emerald-500' },
                 { id: 'leads', label: 'Appointment Assignment', icon: Target, color: 'from-purple-500 to-pink-500' },
+                { id: 'bob', label: 'Bob Activity', icon: Bot, color: 'from-slate-600 to-cyan-600' },
                 { id: 'feedback', label: 'Agent Feedback', icon: MessageSquare, color: 'from-indigo-500 to-purple-500' },
                 { id: 'campaigns', label: 'Confirmed Meetings', icon: CalendarDays, color: 'from-orange-500 to-red-500' }
               ].map((tab) => {
@@ -1064,6 +1138,200 @@ export default function AdminDashboard() {
                       </tbody>
                     </table>
                   )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Bob Activity Tab */}
+          {activeTab === 'bob' && (
+            <div className="space-y-6">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h2 className="text-2xl font-bold text-gray-900">Bob Activity</h2>
+                  <p className="text-sm text-gray-600">Review automation decisions, queued outreach, and leads that need admin attention.</p>
+                </div>
+                <button
+                  onClick={fetchBobActivity}
+                  className="inline-flex items-center justify-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-slate-700 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-500"
+                >
+                  <Bot className="-ml-1 mr-2 h-4 w-4" />
+                  Refresh Bob
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4">
+                {[
+                  { label: 'Total Actions', value: bobActivity.stats.totalActions, icon: Bot, tone: 'text-slate-700' },
+                  { label: 'Pending', value: bobActivity.stats.pendingActions, icon: Calendar, tone: 'text-blue-600' },
+                  { label: 'Needs Review', value: bobActivity.stats.reviewLeads, icon: AlertCircle, tone: 'text-orange-600' },
+                  { label: 'Awaiting Human', value: bobActivity.stats.awaitingHuman, icon: User, tone: 'text-purple-600' },
+                  { label: 'Awaiting Call', value: bobActivity.stats.awaitingCall, icon: Phone, tone: 'text-cyan-600' },
+                  { label: 'Failed', value: bobActivity.stats.failedActions, icon: X, tone: 'text-red-600' }
+                ].map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <div key={item.label} className="bg-white rounded-lg shadow p-5">
+                      <div className="flex items-center">
+                        <Icon className={`h-7 w-7 ${item.tone}`} />
+                        <div className="ml-4 min-w-0">
+                          <p className="text-xs font-medium text-gray-500 truncate">{item.label}</p>
+                          <p className="text-xl font-semibold text-gray-900">{item.value || 0}</p>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="bg-white rounded-lg shadow overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-200 flex items-center justify-between">
+                  <div>
+                    <h3 className="text-lg font-medium text-gray-900">Human Review Queue</h3>
+                    <p className="text-sm text-gray-500">Leads Bob has paused or escalated for an admin decision.</p>
+                  </div>
+                </div>
+                {bobActivityLoading ? (
+                  <div className="p-8 text-center">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-slate-700 mx-auto"></div>
+                    <p className="mt-2 text-sm text-gray-500">Loading Bob activity...</p>
+                  </div>
+                ) : bobActivity.reviewQueue.length === 0 ? (
+                  <div className="p-8 text-center">
+                    <Check className="mx-auto h-10 w-10 text-green-500" />
+                    <h3 className="mt-2 text-sm font-medium text-gray-900">No leads need review</h3>
+                    <p className="mt-1 text-sm text-gray-500">Bob has no paused or escalated leads right now.</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lead</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Qualification</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reason</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Updated</th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {bobActivity.reviewQueue.map((lead) => (
+                          <tr key={lead.id} className="hover:bg-gray-50">
+                            <td className="px-6 py-4">
+                              <div className="text-sm font-medium text-gray-900">{lead.fullName || `${lead.firstName || ''} ${lead.lastName || ''}`.trim() || 'No name'}</div>
+                              <div className="text-sm text-gray-500 flex items-center mt-1">
+                                <Mail className="w-3 h-3 mr-1" />
+                                {lead.email}
+                              </div>
+                              {lead.phone && (
+                                <div className="text-sm text-gray-500 flex items-center mt-1">
+                                  <Phone className="w-3 h-3 mr-1" />
+                                  {lead.phone}
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <div className="text-sm text-gray-900">{lead.qualificationStatus || 'unqualified'}</div>
+                              <div className="text-xs text-gray-500">Score {lead.qualificationScore || 0} · {lead.schedulingState || 'not_started'}</div>
+                            </td>
+                            <td className="px-6 py-4">
+                              <div className="text-sm text-gray-900 max-w-xs">{lead.escalationReason || 'Review requested'}</div>
+                              {lead.automationPaused && (
+                                <span className="mt-2 inline-flex items-center px-2 py-1 text-xs font-semibold rounded-full bg-yellow-100 text-yellow-800">
+                                  <PauseCircle className="w-3 h-3 mr-1" />
+                                  Automation paused
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                              {lead.updatedAt ? format(new Date(lead.updatedAt), 'MMM d, yyyy HH:mm') : 'N/A'}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  onClick={() => handleUpdateBobReview(lead.id, {
+                                    requiresHumanReview: false,
+                                    automationPaused: false,
+                                    escalationReason: '',
+                                    leadStage: lead.leadStage === 'escalated' ? 'nurturing' : lead.leadStage,
+                                  })}
+                                  className="inline-flex items-center px-3 py-2 rounded-md bg-green-600 text-white hover:bg-green-700"
+                                >
+                                  <Check className="w-4 h-4 mr-1" />
+                                  Resolve
+                                </button>
+                                <button
+                                  onClick={() => handleUpdateBobReview(lead.id, {
+                                    automationPaused: !lead.automationPaused,
+                                    requiresHumanReview: lead.requiresHumanReview,
+                                    escalationReason: lead.escalationReason || 'Admin paused automation for manual review'
+                                  })}
+                                  className="inline-flex items-center px-3 py-2 rounded-md bg-yellow-100 text-yellow-800 hover:bg-yellow-200"
+                                >
+                                  <PauseCircle className="w-4 h-4 mr-1" />
+                                  {lead.automationPaused ? 'Resume' : 'Pause'}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-white rounded-lg shadow overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-200">
+                  <h3 className="text-lg font-medium text-gray-900">Recent Bob Actions</h3>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lead</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Reason</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {bobActivity.actions.length === 0 ? (
+                        <tr>
+                          <td colSpan="5" className="px-6 py-8 text-center text-sm text-gray-500">No Bob actions recorded yet.</td>
+                        </tr>
+                      ) : bobActivity.actions.map((action) => (
+                        <tr key={action.id} className="hover:bg-gray-50">
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="text-sm font-medium text-gray-900">{action.actionType}</div>
+                            <div className="text-xs text-gray-500">{action.channel || 'system'}</div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="text-sm font-medium text-gray-900">{action.leadFullName || action.leadFirstName || 'No name'}</div>
+                            <div className="text-sm text-gray-500">{action.leadEmail || 'No email'}</div>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                              action.status === 'completed' ? 'bg-green-100 text-green-800' :
+                              action.status === 'failed' ? 'bg-red-100 text-red-800' :
+                              action.status === 'awaiting_human' ? 'bg-orange-100 text-orange-800' :
+                              action.status === 'awaiting_call' ? 'bg-cyan-100 text-cyan-800' :
+                              'bg-blue-100 text-blue-800'
+                            }`}>
+                              {action.status}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="text-sm text-gray-600 max-w-md">{action.reason || action.lastIntent || 'No reason recorded'}</div>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                            {action.createdAt ? format(new Date(action.createdAt), 'MMM d, yyyy HH:mm') : 'N/A'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
