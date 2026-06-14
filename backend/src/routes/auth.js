@@ -484,12 +484,12 @@ router.post('/test-email', async (req, res) => {
       });
     }
 
-    // Test SMTP connection
+    // Test Resend configuration
     const connectionTest = await emailService.testConnection();
     
     if (!connectionTest.success) {
       return res.status(500).json({
-        error: 'SMTP connection failed',
+        error: 'Resend configuration failed',
         details: connectionTest.error
       });
     }
@@ -501,27 +501,26 @@ router.post('/test-email', async (req, res) => {
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h2 style="color: #333;">Email Test Successful!</h2>
-          <p>This is a test email from your backend API using Hostinger SMTP.</p>
+          <p>This is a test email from your backend API using Resend.</p>
           <p>If you received this email, your email configuration is working correctly.</p>
           <div style="background-color: #f5f5f5; padding: 20px; border-radius: 5px; margin: 20px 0;">
             <h3 style="color: #555;">Configuration Details:</h3>
             <ul>
-              <li>SMTP Host: ${process.env.SMTP_HOST}</li>
-              <li>SMTP Port: ${process.env.SMTP_PORT}</li>
+              <li>Provider: Resend</li>
               <li>From: ${process.env.EMAIL_FROM}</li>
             </ul>
           </div>
           <p>Timestamp: ${new Date().toISOString()}</p>
         </div>
       `,
-      text: 'Email test successful! Your Hostinger SMTP configuration is working.'
+      text: 'Email test successful! Your Resend configuration is working.'
     });
 
     res.json({
       message: 'Test email sent successfully',
       success: result.success,
       messageId: result.messageId,
-      smtpConnection: connectionTest.success
+      resendConnection: connectionTest.success
     });
 
   } catch (error) {

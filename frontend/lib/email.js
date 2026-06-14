@@ -1,33 +1,36 @@
-import nodemailer from 'nodemailer';
+import { Resend } from 'resend';
 
-// Email configuration
-const emailConfig = {
-  host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: parseInt(process.env.SMTP_PORT) || 587,
-  secure: process.env.SMTP_SECURE === 'true' || false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
+let client = null;
+
+function getClient() {
+  if (!client) {
+    if (!process.env.RESEND_API_KEY) {
+      throw new Error('RESEND_API_KEY is not configured');
+    }
+
+    client = new Resend(process.env.RESEND_API_KEY);
   }
-};
 
-// Create transporter
-let transporter = null;
+  return client;
+}
 
-function getTransporter() {
-  if (!transporter) {
-    transporter = nodemailer.createTransporter(emailConfig);
+function getFromAddress() {
+  if (!process.env.EMAIL_FROM) {
+    throw new Error('EMAIL_FROM is not configured');
   }
-  return transporter;
+
+  return process.env.EMAIL_FROM_NAME
+    ? `${process.env.EMAIL_FROM_NAME} <${process.env.EMAIL_FROM}>`
+    : process.env.EMAIL_FROM;
 }
 
 // Send agent ID email
 export async function sendAgentIdEmail(email, name, agentId) {
   try {
-    const transporter = getTransporter();
+    const resend = getClient();
     
     const mailOptions = {
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      from: getFromAddress(),
       to: email,
       subject: 'Welcome to Lead Management Dashboard - Your Agent ID',
       html: `
@@ -175,9 +178,13 @@ If you did not register for this account, please contact our support team immedi
       `
     };
     
-    const result = await transporter.sendMail(mailOptions);
-    console.log('Agent ID email sent successfully:', result.messageId);
-    return { success: true, messageId: result.messageId };
+    const { data, error } = await resend.emails.send(mailOptions);
+    if (error) {
+      throw new Error(error.message || 'Resend email send failed');
+    }
+
+    console.log('Agent ID email sent successfully:', data?.id);
+    return { success: true, messageId: data?.id };
     
   } catch (error) {
     console.error('Error sending agent ID email:', error);
@@ -188,11 +195,11 @@ If you did not register for this account, please contact our support team immedi
 // Send password reset email
 export async function sendPasswordResetEmail(email, name, resetToken) {
   try {
-    const transporter = getTransporter();
+    const resend = getClient();
     const resetUrl = `${process.env.NEXT_PUBLIC_APP_URL}/reset-password?token=${resetToken}`;
     
     const mailOptions = {
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      from: getFromAddress(),
       to: email,
       subject: 'Password Reset Request - Lead Management Dashboard',
       html: `
@@ -297,9 +304,13 @@ Lead Management Team
       `
     };
     
-    const result = await transporter.sendMail(mailOptions);
-    console.log('Password reset email sent successfully:', result.messageId);
-    return { success: true, messageId: result.messageId };
+    const { data, error } = await resend.emails.send(mailOptions);
+    if (error) {
+      throw new Error(error.message || 'Resend email send failed');
+    }
+
+    console.log('Password reset email sent successfully:', data?.id);
+    return { success: true, messageId: data?.id };
     
   } catch (error) {
     console.error('Error sending password reset email:', error);
@@ -310,9 +321,9 @@ Lead Management Team
 // Test email configuration
 export async function testEmailConfig() {
   try {
-    const transporter = getTransporter();
-    await transporter.verify();
-    return { success: true, message: 'Email configuration is valid' };
+    getClient();
+    getFromAddress();
+    return { success: true, message: 'Resend email configuration is valid' };
   } catch (error) {
     console.error('Email configuration test failed:', error);
     return { success: false, error: error.message };

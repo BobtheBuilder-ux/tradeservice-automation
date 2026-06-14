@@ -1,35 +1,26 @@
-import nodemailer from 'nodemailer';
-import { logger } from '../../utils/logger.js';
+import { Resend } from 'resend';
+import logger from '../utils/logger.js';
 
 class EmailService {
   constructor() {
-    this.transporter = null;
+    this.client = null;
     this.adminEmail = process.env.ADMIN_EMAIL || 'admin@company.com';
-    this.initializeTransporter();
+    this.from = process.env.EMAIL_FROM;
+    this.fromName = process.env.EMAIL_FROM_NAME || 'Lead Management System';
+    this.initializeClient();
   }
 
-  initializeTransporter() {
+  initializeClient() {
     try {
-      this.transporter = nodemailer.createTransporter({
-        host: process.env.SMTP_HOST || 'smtp.gmail.com',
-        port: process.env.SMTP_PORT || 587,
-        secure: false, // true for 465, false for other ports
-        auth: {
-          user: process.env.SMTP_USER,
-          pass: process.env.SMTP_PASS,
-        },
-      });
+      if (!process.env.RESEND_API_KEY) {
+        logger.warn('RESEND_API_KEY is not configured, email notifications will be skipped');
+        return;
+      }
 
-      // Verify connection configuration
-      this.transporter.verify((error, success) => {
-        if (error) {
-          logger.error('Email transporter verification failed:', error);
-        } else {
-          logger.info('Email server is ready to take our messages');
-        }
-      });
+      this.client = new Resend(process.env.RESEND_API_KEY);
+      logger.info('Resend email client initialized');
     } catch (error) {
-      logger.error('Failed to initialize email transporter:', error);
+      logger.error('Failed to initialize Resend email client:', error);
     }
   }
 
@@ -46,8 +37,13 @@ class EmailService {
     adminResponse = null,
   }) {
     try {
-      if (!this.transporter) {
-        logger.warn('Email transporter not initialized, skipping notification');
+      if (!this.client) {
+        logger.warn('Email client not initialized, skipping notification');
+        return;
+      }
+
+      if (!this.from) {
+        logger.warn('EMAIL_FROM is not configured, skipping notification');
         return;
       }
 
@@ -70,15 +66,19 @@ class EmailService {
       });
 
       const mailOptions = {
-        from: process.env.SMTP_FROM || process.env.SMTP_USER,
+        from: this.fromName ? `${this.fromName} <${this.from}>` : this.from,
         to: this.adminEmail,
         subject: emailSubject,
         html: emailBody,
       };
 
-      const info = await this.transporter.sendMail(mailOptions);
-      logger.info(`Feedback notification email sent: ${info.messageId}`);
-      return info;
+      const { data, error } = await this.client.emails.send(mailOptions);
+      if (error) {
+        throw new Error(error.message || 'Resend email send failed');
+      }
+
+      logger.info(`Feedback notification email sent: ${data?.id}`);
+      return data;
     } catch (error) {
       logger.error('Error sending feedback notification email:', error);
       throw error;
@@ -299,8 +299,16 @@ class EmailService {
 
   async sendTestEmail() {
     try {
+      if (!this.client) {
+        throw new Error('RESEND_API_KEY is not configured');
+      }
+
+      if (!this.from) {
+        throw new Error('EMAIL_FROM is not configured');
+      }
+
       const testMailOptions = {
-        from: process.env.SMTP_FROM || process.env.SMTP_USER,
+        from: this.fromName ? `${this.fromName} <${this.from}>` : this.from,
         to: this.adminEmail,
         subject: 'Test Email - Lead Management System',
         html: `
@@ -310,9 +318,13 @@ class EmailService {
         `,
       };
 
-      const info = await this.transporter.sendMail(testMailOptions);
-      logger.info(`Test email sent: ${info.messageId}`);
-      return info;
+      const { data, error } = await this.client.emails.send(testMailOptions);
+      if (error) {
+        throw new Error(error.message || 'Resend email send failed');
+      }
+
+      logger.info(`Test email sent: ${data?.id}`);
+      return data;
     } catch (error) {
       logger.error('Error sending test email:', error);
       throw error;

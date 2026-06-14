@@ -1,40 +1,41 @@
-import nodemailer from 'nodemailer';
+import { Resend } from 'resend';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
 class EmailService {
   constructor() {
-    this.transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: parseInt(process.env.SMTP_PORT),
-      secure: process.env.SMTP_SECURE === 'true',
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
-      },
-      tls: {
-        rejectUnauthorized: false
-      }
-    });
+    this.from = process.env.EMAIL_FROM;
+    this.fromName = process.env.EMAIL_FROM_NAME || 'Your App';
+    this.client = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
   }
 
   async sendEmail({ to, subject, html, text }) {
     try {
+      if (!this.client) {
+        throw new Error('RESEND_API_KEY is not configured');
+      }
+
+      if (!this.from) {
+        throw new Error('EMAIL_FROM is not configured');
+      }
+
       const mailOptions = {
-        from: {
-          name: process.env.EMAIL_FROM_NAME || 'Your App',
-          address: process.env.EMAIL_FROM
-        },
+        from: this.fromName ? `${this.fromName} <${this.from}>` : this.from,
         to,
         subject,
         html,
         text
       };
 
-      const result = await this.transporter.sendMail(mailOptions);
-      console.log('Email sent successfully:', result.messageId);
-      return { success: true, messageId: result.messageId };
+      const { data, error } = await this.client.emails.send(mailOptions);
+
+      if (error) {
+        throw new Error(error.message || 'Resend email send failed');
+      }
+
+      console.log('Email sent successfully:', data?.id);
+      return { success: true, messageId: data?.id };
     } catch (error) {
       console.error('Email sending failed:', error);
       return { success: false, error: error.message };
@@ -465,11 +466,18 @@ If you did not expect this account creation, please contact support immediately.
 
   async testConnection() {
     try {
-      await this.transporter.verify();
-      console.log('SMTP connection verified successfully');
-      return { success: true, message: 'SMTP connection verified' };
+      if (!this.client) {
+        throw new Error('RESEND_API_KEY is not configured');
+      }
+
+      if (!this.from) {
+        throw new Error('EMAIL_FROM is not configured');
+      }
+
+      console.log('Resend configuration verified successfully');
+      return { success: true, message: 'Resend configuration verified' };
     } catch (error) {
-      console.error('SMTP connection failed:', error);
+      console.error('Resend configuration check failed:', error);
       return { success: false, error: error.message };
     }
   }
