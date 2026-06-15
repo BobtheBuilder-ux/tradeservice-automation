@@ -6,12 +6,13 @@ import { agents, bobActions, leadConversations, leads } from '../db/schema.js';
 import { eq, count, or, inArray, and, desc, sql } from 'drizzle-orm';
 import emailService from '../services/email-service.js';
 import dotenv from 'dotenv';
+import { getJwtSecret } from '../utils/auth-config.js';
 
 dotenv.config();
 
 const router = express.Router();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const JWT_SECRET = getJwtSecret();
 
 // Middleware to verify admin access
 const verifyAdmin = async (req, res, next) => {

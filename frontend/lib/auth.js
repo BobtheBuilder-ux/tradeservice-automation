@@ -54,7 +54,7 @@ class AuthManager {
       const response = await apiClient.register(userData);
       
       if (response.token) {
-        console.log('Sign up successful, saving token to localStorage:', response.token);
+        console.log('Sign up successful, saving auth token to localStorage');
         apiClient.setAuthToken(response.token);
         this.user = response.user || { email: userData.email };
         this.isAuthenticated = true;
@@ -75,7 +75,7 @@ class AuthManager {
       const response = await apiClient.login(credentials);
       
       if (response.token) {
-        console.log('Sign in successful, saving token to localStorage:', response.token);
+        console.log('Sign in successful, saving auth token to localStorage');
         apiClient.setAuthToken(response.token);
         this.user = response.user || { email: credentials.email };
         this.isAuthenticated = true;

@@ -1,10 +1,12 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import { getJwtSecret } from '../utils/auth-config.js';
 import { db } from '../config/index.js';
 import { agentIntegrations, agents } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 
 const router = express.Router();
+const JWT_SECRET = getJwtSecret();
 
 // JWT middleware (lighter than leads.js: does not require emailVerified)
 const verifyToken = async (req, res, next) => {
@@ -14,7 +16,7 @@ const verifyToken = async (req, res, next) => {
       return res.status(401).json({ error: 'No token provided' });
     }
     const token = authHeader.substring(7);
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET);
 
     const user = await db
       .select({

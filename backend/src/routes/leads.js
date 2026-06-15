@@ -5,8 +5,10 @@ import { eq, desc, isNull, and, count } from 'drizzle-orm';
 import jwt from 'jsonwebtoken';
 import leadAutomationService from '../services/lead-automation-service.js';
 import bobOrchestrator from '../services/bob-orchestrator.js';
+import { getJwtSecret } from '../utils/auth-config.js';
 
 const router = express.Router();
+const JWT_SECRET = getJwtSecret();
 
 // Middleware to verify JWT token
 const verifyToken = async (req, res, next) => {
@@ -17,7 +19,7 @@ const verifyToken = async (req, res, next) => {
     }
 
     const token = authHeader.substring(7);
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET);
     
     // Get user from database
     const user = await db.select({
