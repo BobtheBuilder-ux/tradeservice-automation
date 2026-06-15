@@ -12,9 +12,8 @@ import calendlyEmailService from './calendly-email-service.js';
 import twilioSmsService from './twilio-sms-service.js';
 import meetingService from './meeting-service.js';
 import emailTemplateService from './email-template-service.js';
+import { randomUUID } from 'crypto';
 import { hashForLogging } from '../utils/crypto.js';
-import pkg from 'uuid';
-const { v4: uuidv4 } = pkg;
 
 class WorkflowProcessor {
   constructor() {
@@ -25,7 +24,7 @@ class WorkflowProcessor {
     this.emailService = calendlyEmailService;
     this.smsService = twilioSmsService;
     this.emailTemplateService = emailTemplateService;
-    this.trackingId = uuidv4();
+    this.trackingId = randomUUID();
   }
 
   /**

@@ -1,7 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  swcMinify: true,
   // Reduce compilation frequency
   onDemandEntries: {
     // Period (in ms) where the server will keep pages in the buffer
