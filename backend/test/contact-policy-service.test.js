@@ -104,7 +104,7 @@ test('blocks email after max email attempts', () => {
   assert.equal(result.reasonCode, 'max_email_attempts');
 });
 
-test('blocks SMS when lead has opted out of SMS', () => {
+test('blocks SMS when lead has not explicitly opted into SMS', () => {
   const result = policy.evaluate(
     baseContext({ lead: { ...baseContext().lead, smsOptIn: false } }),
     { actionType: 'send_sms_reminder', channel: 'sms', now }
@@ -114,9 +114,30 @@ test('blocks SMS when lead has opted out of SMS', () => {
   assert.equal(result.reasonCode, 'sms_not_allowed');
 });
 
+test('blocks SMS when consent is unknown', () => {
+  const leadWithoutConsent = { ...baseContext().lead };
+  delete leadWithoutConsent.smsOptIn;
+  const result = policy.evaluate(
+    baseContext({ lead: leadWithoutConsent }),
+    { actionType: 'send_sms_reminder', channel: 'sms', now }
+  );
+
+  assert.equal(result.allowed, false);
+  assert.equal(result.reasonCode, 'sms_not_allowed');
+});
+
+test('allows SMS when consent is explicitly stored in metadata', () => {
+  const result = policy.evaluate(
+    baseContext({ metadata: { smsOptIn: true }, hoursSinceLastOutbound: 30 }),
+    { actionType: 'send_sms_reminder', channel: 'sms', now }
+  );
+
+  assert.equal(result.allowed, true);
+});
+
 test('blocks SMS after max SMS attempts', () => {
   const result = policy.evaluate(
-    baseContext({ metadata: { smsCount: 3 }, hoursSinceLastOutbound: 30 }),
+    baseContext({ metadata: { smsCount: 3, smsOptIn: true }, hoursSinceLastOutbound: 30 }),
     { actionType: 'send_sms_reminder', channel: 'sms', now }
   );
 

@@ -136,23 +136,83 @@ test('lead at max email attempts is escalated instead of emailed again', () => {
   assert.equal(decision.payload.escalationReason, 'max_email_attempts');
 });
 
-test('lead with repeated outreach and phone queues call attempt after 72 hours', () => {
+test('lead with repeated outreach and phone receives SMS reminder before call queue', () => {
   const decision = decide(
     baseLead({
       assignedAgentId: 'agent-1',
-      phone: '+15555550123',
+      phone: '+155****0123',
       qualificationStatus: 'qualified',
       schedulingState: 'booking_invited',
       createdAt: new Date(Date.now() - 80 * 60 * 60 * 1000).toISOString(),
     }),
     baseConversation({
       lastOutboundAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
-      metadata: { outboundCount: 2 },
+      metadata: { outboundCount: 2, smsOptIn: true },
+    })
+  );
+
+  assert.equal(decision.actionType, 'send_sms_reminder');
+  assert.equal(decision.channel, 'sms');
+});
+
+test('lead with repeated outreach and prior SMS queues call attempt after 72 hours', () => {
+  const decision = decide(
+    baseLead({
+      assignedAgentId: 'agent-1',
+      phone: '+155****0123',
+      qualificationStatus: 'qualified',
+      schedulingState: 'booking_invited',
+      createdAt: new Date(Date.now() - 80 * 60 * 60 * 1000).toISOString(),
+    }),
+    baseConversation({
+      lastOutboundAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+      metadata: { outboundCount: 2, smsCount: 1 },
     })
   );
 
   assert.equal(decision.actionType, 'queue_call_attempt');
   assert.equal(decision.channel, 'phone');
+});
+
+test('scheduled/booked call outcome state is monitored instead of queued for another call', () => {
+  const decision = decide(
+    baseLead({
+      assignedAgentId: 'agent-1',
+      phone: '+155****0123',
+      status: 'scheduled',
+      leadStage: 'booked',
+      schedulingState: 'scheduled',
+      qualificationStatus: 'qualified',
+      createdAt: new Date(Date.now() - 80 * 60 * 60 * 1000).toISOString(),
+    }),
+    baseConversation({
+      lastOutboundAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+      metadata: { outboundCount: 2, smsCount: 1 },
+    })
+  );
+
+  assert.equal(decision.actionType, 'monitor_meeting');
+});
+
+test('closed not-interested call outcome state is held instead of queued for another call', () => {
+  const decision = decide(
+    baseLead({
+      assignedAgentId: 'agent-1',
+      phone: '+155****0123',
+      status: 'closed',
+      leadStage: 'closed_lost',
+      schedulingState: 'not_interested',
+      qualificationStatus: 'qualified',
+      createdAt: new Date(Date.now() - 80 * 60 * 60 * 1000).toISOString(),
+    }),
+    baseConversation({
+      lastOutboundAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+      metadata: { outboundCount: 2, smsCount: 1 },
+    })
+  );
+
+  assert.equal(decision.actionType, 'hold');
+  assert.equal(decision.payload.schedulingState, 'not_interested');
 });
 
 test('lead with repeated outreach and no phone is escalated to human review', () => {

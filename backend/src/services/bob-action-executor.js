@@ -6,6 +6,7 @@ import { generateTrackingId } from '../utils/crypto.js';
 import leadConversationService from './lead-conversation-service.js';
 import bobOrchestrator from './bob-orchestrator.js';
 import leadAutomationService from './lead-automation-service.js';
+import twilioSmsService from './twilio-sms-service.js';
 
 class BobActionExecutor {
   constructor() {
@@ -346,6 +347,86 @@ class BobActionExecutor {
     });
   }
 
+  async sendSmsReminder(action, lead, conversation) {
+    if (!lead.phone) {
+      await this.markAction(action.id, 'failed', {
+        result: { error: 'Lead has no phone number' },
+      });
+      return;
+    }
+
+    const trackingId = lead.trackingId || generateTrackingId();
+    const bookingLink = this.buildBookingLink(lead, trackingId);
+    const conversationRecord = conversation || (await leadConversationService.ensurePrimaryConversation(lead, 'sms'));
+    const existingMetadata = conversationRecord.metadata || {};
+
+    if (lead.smsOptIn !== true && existingMetadata.smsOptIn !== true) {
+      await this.markAction(action.id, 'failed', {
+        result: { error: 'Lead has not explicitly opted into SMS outreach' },
+      });
+      return;
+    }
+
+    const smsCount = Number(existingMetadata.smsCount || 0) + 1;
+    const smsResult = await twilioSmsService.sendLeadBookingReminder(lead, bookingLink, trackingId);
+    const bodyText = smsResult.success
+      ? smsResult.message
+      : 'Bob attempted to send an SMS booking reminder, but the SMS provider is not ready.';
+
+    await leadConversationService.logSystemEvent({
+      lead,
+      conversationId: conversationRecord.id,
+      channel: 'sms',
+      messageType: 'sms_reminder',
+      subject: smsResult.success ? 'Bob sent an SMS booking reminder' : 'Bob could not send SMS booking reminder',
+      bodyText,
+      metadata: {
+        bobActionId: action.id,
+        providerMessageId: smsResult.messageSid || null,
+        status: smsResult.status || null,
+        success: smsResult.success,
+      },
+    });
+
+    await leadConversationService.updateConversation(conversationRecord.id, {
+      metadata: {
+        ...existingMetadata,
+        smsCount,
+        lastSmsReminderAt: new Date().toISOString(),
+        lastSmsReminderStatus: smsResult.success ? 'sent' : 'failed',
+      },
+      nextAction: smsResult.success ? 'queue_call_attempt' : 'manual_sms_review',
+      nextActionAt: smsResult.success ? new Date(Date.now() + 24 * 60 * 60 * 1000) : null,
+      lastIntent: 'booking_sms_reminder',
+      lastIntentAt: new Date(),
+      lastSummary: smsResult.success
+        ? 'Bob sent an SMS reminder to encourage booking.'
+        : 'Bob could not send the SMS reminder and kept the lead available for review.',
+    });
+
+    await db
+      .update(leads)
+      .set({
+        status: smsResult.success ? 'contacted' : lead.status,
+        leadStage: smsResult.success ? 'nurturing' : lead.leadStage,
+        schedulingState: smsResult.success ? 'needs_follow_up' : lead.schedulingState,
+        nextContactAt: smsResult.success ? new Date(Date.now() + 24 * 60 * 60 * 1000) : lead.nextContactAt,
+        updatedAt: new Date(),
+      })
+      .where(eq(leads.id, lead.id));
+
+    await this.markAction(action.id, smsResult.success ? 'completed' : 'deferred', {
+      executedAt: new Date(),
+      scheduledFor: smsResult.success ? null : new Date(Date.now() + 60 * 60 * 1000),
+      result: {
+        smsCount,
+        providerMessageId: smsResult.messageSid || null,
+        status: smsResult.status || null,
+        error: smsResult.success ? null : smsResult.error,
+      },
+    });
+  }
+
   async queueCallAttempt(action, lead, conversation) {
     const conversationRecord = conversation || (await leadConversationService.ensurePrimaryConversation(lead, 'email'));
     const existingMetadata = conversationRecord.metadata || {};
@@ -458,6 +539,9 @@ class BobActionExecutor {
       case 'send_booking_invite':
       case 'send_booking_reminder':
         await this.queueEmailAction(action, lead);
+        return;
+      case 'send_sms_reminder':
+        await this.sendSmsReminder(action, lead, conversation);
         return;
       case 'queue_call_attempt':
         await this.queueCallAttempt(action, lead, conversation);
