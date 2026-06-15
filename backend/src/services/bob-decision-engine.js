@@ -1,4 +1,5 @@
 import logger from '../utils/logger.js';
+import contactPolicyService from './contact-policy-service.js';
 
 class BobDecisionEngine {
   buildLeadContext(lead, conversation = null) {
@@ -15,7 +16,7 @@ class BobDecisionEngine {
       ageHours,
       hoursSinceLastOutbound,
       outboundCount: Number(metadata.outboundCount || 0),
-      hasMeeting: Boolean(lead?.scheduledAt || lead?.meetingScheduled),
+      hasMeeting: Boolean(lead?.scheduledAt || lead?.meetingScheduled || lead?.status === 'scheduled' || lead?.leadStage === 'booked' || lead?.schedulingState === 'scheduled'),
       isAssigned: Boolean(lead?.assignedAgentId),
       isOptedOut: Boolean(conversation?.optedOut),
       callQueued: Boolean(metadata.callQueuedAt),
@@ -30,6 +31,11 @@ class BobDecisionEngine {
   }
 
   decideNextAction(context) {
+    const decision = this.computeNextAction(context);
+    return this.applyContactPolicy(context, decision);
+  }
+
+  computeNextAction(context) {
     const {
       lead,
       conversation,
@@ -56,6 +62,16 @@ class BobDecisionEngine {
         reason: 'Lead context missing',
         scheduledFor: null,
         payload: {},
+      };
+    }
+
+    if (lead.status === 'closed' || lead.leadStage === 'closed_lost' || schedulingState === 'not_interested') {
+      return {
+        actionType: 'hold',
+        channel: 'system',
+        reason: 'Lead is closed or not interested; no further automation should run',
+        scheduledFor: null,
+        payload: { status: lead.status || 'closed', leadStage, schedulingState },
       };
     }
 
@@ -171,6 +187,50 @@ class BobDecisionEngine {
       };
     }
 
+    if (outboundCount >= 2 && ageHours !== null && ageHours >= 72) {
+      if (lead.phone && Number(context.metadata?.smsCount || 0) === 0 && context.metadata?.smsOptIn === true) {
+        return {
+          actionType: 'send_sms_reminder',
+          channel: 'sms',
+          reason: 'Lead remains unscheduled after the email nurture window; SMS reminder is the next respectful step before phone outreach',
+          scheduledFor: new Date(),
+          payload: {
+            template: 'booking_sms_reminder',
+            requiresPhone: true,
+            outboundCount,
+            qualificationStatus,
+          },
+        };
+      }
+
+      if (lead.phone) {
+        return {
+          actionType: 'queue_call_attempt',
+          channel: 'phone',
+          reason: 'Lead remains unscheduled after the email nurture window; phone outreach is the next best action',
+          scheduledFor: new Date(),
+          payload: {
+            script: 'qualification_and_booking',
+            requiresPhone: true,
+            outboundCount,
+            qualificationStatus,
+          },
+        };
+      }
+
+      return {
+        actionType: 'mark_ready_for_human',
+        channel: 'system',
+        reason: 'Lead needs a higher-touch follow-up, but no phone number is available for an automated call queue',
+        scheduledFor: new Date(),
+        payload: {
+          escalationReason: 'needs_phone_or_manual_follow_up',
+          qualificationStatus,
+          leadStage,
+        },
+      };
+    }
+
     if (['qualified', 'partially_qualified'].includes(qualificationStatus) && ['not_started', 'needs_follow_up'].includes(schedulingState)) {
       return {
         actionType: outboundCount === 0 ? 'send_booking_invite' : 'send_booking_reminder',
@@ -202,35 +262,6 @@ class BobDecisionEngine {
       };
     }
 
-    if (outboundCount >= 2 && ageHours !== null && ageHours >= 72) {
-      if (lead.phone) {
-        return {
-          actionType: 'queue_call_attempt',
-          channel: 'phone',
-          reason: 'Lead remains unscheduled after the email nurture window; phone outreach is the next best action',
-          scheduledFor: new Date(),
-          payload: {
-            script: 'qualification_and_booking',
-            requiresPhone: true,
-            outboundCount,
-            qualificationStatus,
-          },
-        };
-      }
-
-      return {
-        actionType: 'mark_ready_for_human',
-        channel: 'system',
-        reason: 'Lead needs a higher-touch follow-up, but no phone number is available for an automated call queue',
-        scheduledFor: new Date(),
-        payload: {
-          escalationReason: 'needs_phone_or_manual_follow_up',
-          qualificationStatus,
-          leadStage,
-        },
-      };
-    }
-
     return {
       actionType: 'wait',
       channel: conversation?.channel || preferredContactChannel,
@@ -242,6 +273,54 @@ class BobDecisionEngine {
         schedulingState,
       },
     };
+  }
+
+  applyContactPolicy(context, decision) {
+    if (!this.isOutreachDecision(decision)) {
+      return decision;
+    }
+
+    const policyResult = contactPolicyService.evaluate(context, decision);
+
+    if (policyResult.allowed) {
+      return decision;
+    }
+
+    if (policyResult.reasonCode === 'max_email_attempts' || policyResult.reasonCode === 'max_sms_attempts' || policyResult.reasonCode === 'max_call_attempts') {
+      return {
+        actionType: 'mark_ready_for_human',
+        channel: 'system',
+        reason: policyResult.reason,
+        scheduledFor: new Date(),
+        payload: {
+          escalationReason: policyResult.reasonCode,
+          blockedActionType: decision.actionType,
+          blockedChannel: decision.channel,
+        },
+      };
+    }
+
+    return {
+      actionType: 'wait',
+      channel: decision.channel,
+      reason: policyResult.reason,
+      scheduledFor: policyResult.scheduledFor,
+      payload: {
+        reasonCode: policyResult.reasonCode,
+        blockedActionType: decision.actionType,
+        blockedChannel: decision.channel,
+      },
+    };
+  }
+
+  isOutreachDecision(decision) {
+    return [
+      'request_more_info',
+      'send_booking_invite',
+      'send_booking_reminder',
+      'send_sms_reminder',
+      'queue_call_attempt',
+    ].includes(decision?.actionType);
   }
 
   summarizeDecision(lead, decision) {

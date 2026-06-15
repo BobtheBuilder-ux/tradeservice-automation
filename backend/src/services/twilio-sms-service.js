@@ -1,15 +1,74 @@
 import twilio from 'twilio';
 import logger from '../utils/logger.js';
 import { hashForLogging } from '../utils/crypto.js';
+import { buildLeadBookingReminderMessage } from './sms-message-builder.js';
 
 /**
  * Twilio SMS Service - Handles SMS notifications for appointment reminders
  */
 class TwilioSmsService {
-  constructor() {
+  constructor(options = {}) {
     this.client = null;
     this.fromNumber = process.env.TWILIO_PHONE_NUMBER;
-    this.initializeClient();
+    if (options.initialize !== false) {
+      this.initializeClient();
+    }
+  }
+
+  buildLeadBookingReminderMessage(lead = {}, bookingLink) {
+    return buildLeadBookingReminderMessage(lead, bookingLink);
+  }
+
+  async sendLeadBookingReminder(lead, bookingLink, trackingId) {
+    try {
+      if (!this.client) {
+        throw new Error('Twilio client not initialized');
+      }
+
+      if (!lead.phone) {
+        throw new Error('Lead phone number not available');
+      }
+
+      const message = this.buildLeadBookingReminderMessage(lead, bookingLink);
+
+      logger.logLeadProcessing(trackingId, 'sending_lead_booking_sms_reminder', {
+        leadId: lead.id,
+        phone: hashForLogging(lead.phone),
+      });
+
+      const smsResult = await this.client.messages.create({
+        body: message,
+        from: this.fromNumber,
+        to: lead.phone,
+      });
+
+      logger.logLeadProcessing(trackingId, 'lead_booking_sms_reminder_sent', {
+        leadId: lead.id,
+        messageSid: smsResult.sid,
+        status: smsResult.status,
+      });
+
+      return {
+        success: true,
+        messageSid: smsResult.sid,
+        status: smsResult.status,
+        message,
+      };
+    } catch (error) {
+      logger.error(error.message, {
+        context: 'send_lead_booking_sms_reminder',
+        trackingId,
+        leadId: lead?.id,
+        phone: lead?.phone ? hashForLogging(lead.phone) : 'unknown',
+        stack: error.stack,
+      });
+
+      return {
+        success: false,
+        error: error.message,
+        message: 'Failed to send SMS booking reminder',
+      };
+    }
   }
 
   /**
@@ -280,3 +339,4 @@ class TwilioSmsService {
 }
 
 export default new TwilioSmsService();
+export { TwilioSmsService };
