@@ -3,6 +3,9 @@ import { db } from '../db/connection.js';
 import { agents } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
 import { logger } from '../../utils/logger.js';
+import { getJwtSecret } from '../utils/auth-config.js';
+
+const JWT_SECRET = getJwtSecret();
 
 // Middleware to verify JWT token
 export const authenticateToken = async (req, res, next) => {
@@ -18,7 +21,7 @@ export const authenticateToken = async (req, res, next) => {
     const token = authHeader.substring(7); // Remove 'Bearer ' prefix
     
     try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const decoded = jwt.verify(token, JWT_SECRET);
       
       // Fetch user details from database
       const user = await db

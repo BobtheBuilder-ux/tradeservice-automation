@@ -9,13 +9,14 @@ import emailService from '../services/email-service.js';
 import dotenv from 'dotenv';
 import { authLimiter, registerLimiter, verifyEmailLimiter, passwordResetLimiter } from '../middleware/rateLimiter.js';
 import { validateRegistration, validateLogin, validateEmailVerification } from '../middleware/validation.js';
+import { getJwtSecret } from '../utils/auth-config.js';
 
 dotenv.config();
 
 const router = express.Router();
 
 // JWT secret
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+const JWT_SECRET = getJwtSecret();
 
 // Generate JWT token
 const generateToken = (userId, email, role = 'user') => {
@@ -82,9 +83,9 @@ router.post('/register', registerLimiter, validateRegistration, async (req, res)
     const agentToken = generateAgentToken();
     const agentTokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours from now
     
-    console.log('Generated tokens:', {
+    console.log('Generated verification and agent tokens for registration', {
       verificationToken: verificationToken ? 'present' : 'missing',
-      agentToken: agentToken ? agentToken : 'missing',
+      agentToken: agentToken ? 'present' : 'missing',
       agentTokenExpires: agentTokenExpires.toISOString()
     });
 
@@ -346,7 +347,10 @@ router.post('/forgot-password', async (req, res) => {
     const resetToken = generateResetToken(normalizedEmail);
 
     if (process.env.NODE_ENV !== 'production') {
-      console.log('[DEV] Generated reset token for', normalizedEmail, '\n', resetToken);
+      console.log('[DEV] Generated password reset token', {
+        email: normalizedEmail,
+        resetToken: resetToken ? 'present' : 'missing'
+      });
     }
 
     // Store reset token in database
