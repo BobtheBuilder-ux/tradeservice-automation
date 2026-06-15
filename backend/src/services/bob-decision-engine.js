@@ -1,4 +1,5 @@
 import logger from '../utils/logger.js';
+import contactPolicyService from './contact-policy-service.js';
 
 class BobDecisionEngine {
   buildLeadContext(lead, conversation = null) {
@@ -30,6 +31,11 @@ class BobDecisionEngine {
   }
 
   decideNextAction(context) {
+    const decision = this.computeNextAction(context);
+    return this.applyContactPolicy(context, decision);
+  }
+
+  computeNextAction(context) {
     const {
       lead,
       conversation,
@@ -242,6 +248,54 @@ class BobDecisionEngine {
         schedulingState,
       },
     };
+  }
+
+  applyContactPolicy(context, decision) {
+    if (!this.isOutreachDecision(decision)) {
+      return decision;
+    }
+
+    const policyResult = contactPolicyService.evaluate(context, decision);
+
+    if (policyResult.allowed) {
+      return decision;
+    }
+
+    if (policyResult.reasonCode === 'max_email_attempts' || policyResult.reasonCode === 'max_sms_attempts' || policyResult.reasonCode === 'max_call_attempts') {
+      return {
+        actionType: 'mark_ready_for_human',
+        channel: 'system',
+        reason: policyResult.reason,
+        scheduledFor: new Date(),
+        payload: {
+          escalationReason: policyResult.reasonCode,
+          blockedActionType: decision.actionType,
+          blockedChannel: decision.channel,
+        },
+      };
+    }
+
+    return {
+      actionType: 'wait',
+      channel: decision.channel,
+      reason: policyResult.reason,
+      scheduledFor: policyResult.scheduledFor,
+      payload: {
+        reasonCode: policyResult.reasonCode,
+        blockedActionType: decision.actionType,
+        blockedChannel: decision.channel,
+      },
+    };
+  }
+
+  isOutreachDecision(decision) {
+    return [
+      'request_more_info',
+      'send_booking_invite',
+      'send_booking_reminder',
+      'send_sms_reminder',
+      'queue_call_attempt',
+    ].includes(decision?.actionType);
   }
 
   summarizeDecision(lead, decision) {

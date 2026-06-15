@@ -111,6 +111,31 @@ test('qualified lead needing follow-up receives booking reminder after response 
   assert.equal(decision.payload.template, 'booking_reminder');
 });
 
+test('lead with future nextContactAt waits until the contact policy allows outreach', () => {
+  const nextContactAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+  const decision = decide(
+    baseLead({ assignedAgentId: 'agent-1', qualificationStatus: 'qualified', nextContactAt }),
+    baseConversation()
+  );
+
+  assert.equal(decision.actionType, 'wait');
+  assert.equal(decision.payload.reasonCode, 'next_contact_not_due');
+  assert.equal(decision.scheduledFor.toISOString(), nextContactAt);
+});
+
+test('lead at max email attempts is escalated instead of emailed again', () => {
+  const decision = decide(
+    baseLead({ assignedAgentId: 'agent-1', qualificationStatus: 'qualified', schedulingState: 'needs_follow_up' }),
+    baseConversation({
+      lastOutboundAt: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(),
+      metadata: { outboundCount: 4 },
+    })
+  );
+
+  assert.equal(decision.actionType, 'mark_ready_for_human');
+  assert.equal(decision.payload.escalationReason, 'max_email_attempts');
+});
+
 test('lead with repeated outreach and phone queues call attempt after 72 hours', () => {
   const decision = decide(
     baseLead({
