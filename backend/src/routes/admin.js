@@ -7,6 +7,7 @@ import { eq, count, or, inArray, and, desc, sql } from 'drizzle-orm';
 import emailService from '../services/email-service.js';
 import dotenv from 'dotenv';
 import { getJwtSecret } from '../utils/auth-config.js';
+import { buildCallOutcomeLeadPatch, CALL_OUTCOMES, isValidCallOutcome } from '../services/call-outcome-policy.js';
 
 dotenv.config();
 
@@ -464,6 +465,107 @@ router.get('/bob-activity', verifyAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error('Error in get Bob activity route:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Record a queued call outcome for dashboards/agents
+router.patch('/bob-activity/actions/:actionId/call-outcome', verifyAdmin, async (req, res) => {
+  try {
+    const { actionId } = req.params;
+    const { outcome, notes } = req.body;
+
+    if (!isValidCallOutcome(outcome)) {
+      return res.status(400).json({
+        error: 'Unsupported call outcome',
+        allowedOutcomes: CALL_OUTCOMES,
+      });
+    }
+
+    const actionRows = await db.select({
+      id: bobActions.id,
+      leadId: bobActions.leadId,
+      conversationId: bobActions.conversationId,
+      result: bobActions.result,
+      actionType: bobActions.actionType,
+      status: bobActions.status,
+    })
+      .from(bobActions)
+      .where(eq(bobActions.id, actionId))
+      .limit(1);
+
+    const action = actionRows[0];
+    if (!action) {
+      return res.status(404).json({ error: 'Bob action not found' });
+    }
+
+    if (action.actionType !== 'queue_call_attempt') {
+      return res.status(400).json({ error: 'Call outcome can only be recorded for queued call actions' });
+    }
+
+    if (action.status !== 'awaiting_call') {
+      return res.status(400).json({ error: 'Call outcome can only be recorded for actions awaiting a call' });
+    }
+
+    const now = new Date();
+    const leadPatch = {
+      ...buildCallOutcomeLeadPatch(outcome, now),
+      lastUpdatedBy: req.user.id,
+    };
+
+    const [updatedLead] = await db.update(leads)
+      .set(leadPatch)
+      .where(eq(leads.id, action.leadId))
+      .returning();
+
+    await db.update(bobActions)
+      .set({
+        status: 'completed',
+        executedAt: now,
+        updatedAt: now,
+        result: {
+          ...(action.result || {}),
+          callOutcome: outcome,
+          callOutcomeNotes: typeof notes === 'string' ? notes.trim() : null,
+          callOutcomeRecordedAt: now.toISOString(),
+          callOutcomeRecordedBy: req.user.id,
+        },
+      })
+      .where(eq(bobActions.id, actionId));
+
+    if (action.conversationId && updatedLead) {
+      await db.update(leadConversations)
+        .set({
+          lastIntent: `call_outcome_${outcome}`,
+          lastIntentAt: now,
+          humanReviewRequired: updatedLead.requiresHumanReview,
+          conversationStatus: updatedLead.requiresHumanReview ? 'needs_human_review' : 'active_nurture',
+          nextAction: updatedLead.requiresHumanReview
+            ? 'human_review'
+            : updatedLead.nextContactAt
+              ? 'follow_up_after_call'
+              : null,
+          nextActionAt: updatedLead.nextContactAt || null,
+          lastSummary: `Call outcome recorded: ${outcome}${notes ? ` — ${notes}` : ''}`,
+          metadata: sql`coalesce(${leadConversations.metadata}, '{}'::jsonb) || ${JSON.stringify({
+            callQueuedAt: null,
+            lastCallOutcome: outcome,
+            lastCallOutcomeRecordedAt: now.toISOString(),
+            lastCallOutcomeRecordedBy: req.user.id,
+          })}::jsonb`,
+          updatedAt: now,
+        })
+        .where(eq(leadConversations.id, action.conversationId));
+    }
+
+    res.json({
+      success: true,
+      actionId,
+      outcome,
+      lead: updatedLead,
+    });
+  } catch (error) {
+    console.error('Error in call outcome route:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });

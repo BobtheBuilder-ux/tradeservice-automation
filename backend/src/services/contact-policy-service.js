@@ -67,8 +67,8 @@ class ContactPolicyService {
     }
 
     if (SMS_CHANNELS.has(channel)) {
-      if (context.lead?.smsOptIn === false) {
-        return this.block('sms_not_allowed', 'Lead has not opted into SMS outreach');
+      if (context.lead?.smsOptIn !== true && context.metadata?.smsOptIn !== true) {
+        return this.block('sms_not_allowed', 'Lead has not explicitly opted into SMS outreach');
       }
 
       if (Number(context.metadata?.smsCount || 0) >= this.config.maxSmsAttempts) {
