@@ -10,8 +10,8 @@ const runtimeConfig = getRuntimeConfig();
 
 // Validate required environment variables (warn in development, error in production)
 const missingVars = [];
-if (!runtimeConfig.databaseUrl) {
-  missingVars.push('DATABASE_URL');
+if (!runtimeConfig.databaseUrl && !process.env.INSFORGE_API_KEY) {
+  missingVars.push('DATABASE_URL or INSFORGE_API_KEY');
 }
 if (!process.env.HUBSPOT_ACCESS_TOKEN) {
   missingVars.push('HUBSPOT_ACCESS_TOKEN');

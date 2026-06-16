@@ -1,5 +1,4 @@
 import crypto from 'crypto';
-import { calendlyConfig } from '../config/index.js';
 import logger from './logger.js';
 
 /**
