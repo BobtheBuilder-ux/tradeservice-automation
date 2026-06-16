@@ -1,12 +1,9 @@
-import { and, asc, eq, isNull, lte, or } from 'drizzle-orm';
-import { db } from '../config/index.js';
-import { bobActions, emailQueue, leadConversations, leads } from '../db/schema.js';
 import logger from '../utils/logger.js';
 import { generateTrackingId } from '../utils/crypto.js';
 import leadConversationService from './lead-conversation-service.js';
 import bobOrchestrator from './bob-orchestrator.js';
-import leadAutomationService from './lead-automation-service.js';
 import twilioSmsService from './twilio-sms-service.js';
+import insforgeDataService from './insforge-data-service.js';
 
 class BobActionExecutor {
   constructor() {
@@ -183,81 +180,24 @@ class BobActionExecutor {
   }
 
   async getDueActions() {
-    return db
-      .select()
-      .from(bobActions)
-      .where(
-        and(
-          or(eq(bobActions.status, 'pending'), eq(bobActions.status, 'deferred')),
-          or(lte(bobActions.scheduledFor, new Date()), isNull(bobActions.scheduledFor))
-        )
-      )
-      .orderBy(asc(bobActions.scheduledFor), asc(bobActions.createdAt))
-      .limit(this.batchSize);
+    return insforgeDataService.getDueBobActions(this.batchSize, new Date());
   }
 
   async getLead(leadId) {
-    const rows = await db
-      .select({
-        id: leads.id,
-        email: leads.email,
-        firstName: leads.firstName,
-        fullName: leads.fullName,
-        phone: leads.phone,
-        source: leads.source,
-        status: leads.status,
-        assignedAgentId: leads.assignedAgentId,
-        scheduledAt: leads.scheduledAt,
-        meetingScheduled: leads.meetingScheduled,
-        createdAt: leads.createdAt,
-        updatedAt: leads.updatedAt,
-        trackingId: leads.trackingId,
-        qualificationStatus: leads.qualificationStatus,
-        qualificationScore: leads.qualificationScore,
-        leadStage: leads.leadStage,
-        schedulingState: leads.schedulingState,
-        preferredContactChannel: leads.preferredContactChannel,
-        preferredMeetingWindow: leads.preferredMeetingWindow,
-        serviceInterest: leads.serviceInterest,
-        timeline: leads.timeline,
-        budgetRange: leads.budgetRange,
-        locationSummary: leads.locationSummary,
-        qualificationNotes: leads.qualificationNotes,
-        automationPaused: leads.automationPaused,
-        requiresHumanReview: leads.requiresHumanReview,
-        escalationReason: leads.escalationReason,
-      })
-      .from(leads)
-      .where(eq(leads.id, leadId))
-      .limit(1);
-
-    return rows[0] || null;
+    return insforgeDataService.getLeadById(leadId);
   }
 
   async getConversation(conversationId) {
     if (!conversationId) return null;
-
-    const rows = await db
-      .select()
-      .from(leadConversations)
-      .where(eq(leadConversations.id, conversationId))
-      .limit(1);
-
-    return rows[0] || null;
+    return insforgeDataService.getConversationById(conversationId);
   }
 
   async markAction(actionId, status, patch = {}) {
-    const [updated] = await db
-      .update(bobActions)
-      .set({
-        status,
-        updatedAt: new Date(),
-        ...patch,
-      })
-      .where(eq(bobActions.id, actionId))
-      .returning();
-
-    return updated;
+    return insforgeDataService.updateBobAction(actionId, {
+      status,
+      updatedAt: new Date(),
+      ...patch,
+    });
   }
 
   async queueEmailAction(action, lead) {
@@ -284,28 +224,25 @@ class BobActionExecutor {
       },
     });
 
-    const [queuedEmail] = await db
-      .insert(emailQueue)
-      .values({
-        leadId: lead.id,
-        toEmail: lead.email,
-        fromEmail: process.env.EMAIL_FROM || 'noreply@tradeservice-automation.com',
-        subject: email.subject,
-        htmlContent: email.html,
-        textContent: email.text,
-        emailType: email.template,
-        status: 'scheduled',
-        scheduledFor: new Date().toISOString(),
-        trackingId,
-        metadata: {
-          source: 'bob_phase_1',
-          bobActionId: action.id,
-          conversationId: conversation.id,
-          conversationMessageId: message.id,
-          template: email.template,
-        },
-      })
-      .returning();
+    const queuedEmail = await insforgeDataService.createEmailQueue({
+      leadId: lead.id,
+      toEmail: lead.email,
+      fromEmail: process.env.EMAIL_FROM || 'noreply@tradeservice-automation.com',
+      subject: email.subject,
+      htmlContent: email.html,
+      textContent: email.text,
+      emailType: email.template,
+      status: 'scheduled',
+      scheduledFor: new Date().toISOString(),
+      trackingId,
+      metadata: {
+        source: 'bob_phase_1',
+        bobActionId: action.id,
+        conversationId: conversation.id,
+        conversationMessageId: message.id,
+        template: email.template,
+      },
+    });
 
     await leadConversationService.markMessageStatus(message.id, 'queued', {
       metadata: {
@@ -314,27 +251,24 @@ class BobActionExecutor {
       },
     });
 
-    await db
-      .update(leads)
-      .set({
-        status: ['send_booking_invite', 'send_booking_reminder'].includes(action.actionType) ? 'contacted' : lead.status,
-        leadStage:
-          action.actionType === 'request_more_info'
-            ? 'awaiting_information'
-            : ['send_booking_invite', 'send_booking_reminder'].includes(action.actionType)
-              ? 'ready_to_book'
-              : lead.leadStage,
-        schedulingState:
-          action.actionType === 'request_more_info'
-            ? 'needs_follow_up'
-            : ['send_booking_invite', 'send_booking_reminder'].includes(action.actionType)
-              ? 'booking_invited'
-              : lead.schedulingState,
-        lastContactedAt: new Date(),
-        nextContactAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-        updatedAt: new Date(),
-      })
-      .where(eq(leads.id, lead.id));
+    await insforgeDataService.updateLead(lead.id, {
+      status: ['send_booking_invite', 'send_booking_reminder'].includes(action.actionType) ? 'contacted' : lead.status,
+      leadStage:
+        action.actionType === 'request_more_info'
+          ? 'awaiting_information'
+          : ['send_booking_invite', 'send_booking_reminder'].includes(action.actionType)
+            ? 'ready_to_book'
+            : lead.leadStage,
+      schedulingState:
+        action.actionType === 'request_more_info'
+          ? 'needs_follow_up'
+          : ['send_booking_invite', 'send_booking_reminder'].includes(action.actionType)
+            ? 'booking_invited'
+            : lead.schedulingState,
+      lastContactedAt: new Date(),
+      nextContactAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      updatedAt: new Date(),
+    });
 
     await this.markAction(action.id, 'completed', {
       executedAt: new Date(),
@@ -404,16 +338,13 @@ class BobActionExecutor {
         : 'Bob could not send the SMS reminder and kept the lead available for review.',
     });
 
-    await db
-      .update(leads)
-      .set({
-        status: smsResult.success ? 'contacted' : lead.status,
-        leadStage: smsResult.success ? 'nurturing' : lead.leadStage,
-        schedulingState: smsResult.success ? 'needs_follow_up' : lead.schedulingState,
-        nextContactAt: smsResult.success ? new Date(Date.now() + 24 * 60 * 60 * 1000) : lead.nextContactAt,
-        updatedAt: new Date(),
-      })
-      .where(eq(leads.id, lead.id));
+    await insforgeDataService.updateLead(lead.id, {
+      status: smsResult.success ? 'contacted' : lead.status,
+      leadStage: smsResult.success ? 'nurturing' : lead.leadStage,
+      schedulingState: smsResult.success ? 'needs_follow_up' : lead.schedulingState,
+      nextContactAt: smsResult.success ? new Date(Date.now() + 24 * 60 * 60 * 1000) : lead.nextContactAt,
+      updatedAt: new Date(),
+    });
 
     await this.markAction(action.id, smsResult.success ? 'completed' : 'deferred', {
       executedAt: new Date(),
@@ -460,18 +391,15 @@ class BobActionExecutor {
         : 'Bob flagged this lead for phone outreach but no phone number is available.',
     });
 
-    await db
-      .update(leads)
-      .set({
-        status: lead.phone ? 'contacted' : lead.status,
-        leadStage: lead.phone ? 'nurturing' : 'escalated',
-        schedulingState: lead.phone ? 'needs_follow_up' : lead.schedulingState,
-        requiresHumanReview: !lead.phone,
-        escalationReason: !lead.phone ? 'missing_phone_for_call_attempt' : lead.escalationReason,
-        nextContactAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-        updatedAt: new Date(),
-      })
-      .where(eq(leads.id, lead.id));
+    await insforgeDataService.updateLead(lead.id, {
+      status: lead.phone ? 'contacted' : lead.status,
+      leadStage: lead.phone ? 'nurturing' : 'escalated',
+      schedulingState: lead.phone ? 'needs_follow_up' : lead.schedulingState,
+      requiresHumanReview: !lead.phone,
+      escalationReason: !lead.phone ? 'missing_phone_for_call_attempt' : lead.escalationReason,
+      nextContactAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      updatedAt: new Date(),
+    });
 
     await this.markAction(action.id, 'awaiting_call', {
       executedAt: new Date(),
@@ -496,6 +424,7 @@ class BobActionExecutor {
     switch (action.actionType) {
       case 'assign_lead': {
         const trackingId = lead.trackingId || generateTrackingId();
+        const { default: leadAutomationService } = await import('./lead-automation-service.js');
         const result = await leadAutomationService.autoAssignLead(lead.id, trackingId);
 
         if (!result.success) {
@@ -562,15 +491,12 @@ class BobActionExecutor {
           },
         });
 
-        await db
-          .update(leads)
-          .set({
-            requiresHumanReview: true,
-            leadStage: 'escalated',
-            escalationReason: action.payload?.escalationReason || lead.escalationReason || action.reason || null,
-            updatedAt: new Date(),
-          })
-          .where(eq(leads.id, lead.id));
+        await insforgeDataService.updateLead(lead.id, {
+          requiresHumanReview: true,
+          leadStage: 'escalated',
+          escalationReason: action.payload?.escalationReason || lead.escalationReason || action.reason || null,
+          updatedAt: new Date(),
+        });
 
         await this.markAction(action.id, 'awaiting_human', {
           executedAt: new Date(),

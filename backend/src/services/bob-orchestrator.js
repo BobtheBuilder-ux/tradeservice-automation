@@ -1,9 +1,7 @@
-import { and, desc, eq, or } from 'drizzle-orm';
-import { db } from '../config/index.js';
-import { bobActions, leadConversations, leads } from '../db/schema.js';
 import logger from '../utils/logger.js';
 import bobDecisionEngine from './bob-decision-engine.js';
 import leadConversationService from './lead-conversation-service.js';
+import insforgeDataService from './insforge-data-service.js';
 
 class BobOrchestrator {
   constructor() {
@@ -46,24 +44,7 @@ class BobOrchestrator {
   }
 
   async getLatestOpenAction(leadId) {
-    const rows = await db
-      .select()
-      .from(bobActions)
-      .where(
-        and(
-          eq(bobActions.leadId, leadId),
-          or(
-            eq(bobActions.status, 'pending'),
-            eq(bobActions.status, 'deferred'),
-            eq(bobActions.status, 'awaiting_call'),
-            eq(bobActions.status, 'processing')
-          )
-        )
-      )
-      .orderBy(desc(bobActions.createdAt))
-      .limit(1);
-
-    return rows[0] || null;
+    return insforgeDataService.getLatestOpenBobAction(leadId);
   }
 
   async syncLead(lead) {
@@ -72,15 +53,12 @@ class BobOrchestrator {
     const decision = bobDecisionEngine.decideNextAction(context);
     bobDecisionEngine.logDecision(lead, decision);
 
-    await db
-      .update(leadConversations)
-      .set({
-        nextAction: decision.actionType,
-        nextActionAt: decision.scheduledFor || null,
-        lastSummary: bobDecisionEngine.summarizeDecision(lead, decision),
-        updatedAt: new Date(),
-      })
-      .where(eq(leadConversations.id, conversation.id));
+    await insforgeDataService.updateConversation(conversation.id, {
+      nextAction: decision.actionType,
+      nextActionAt: decision.scheduledFor || null,
+      lastSummary: bobDecisionEngine.summarizeDecision(lead, decision),
+      updatedAt: new Date(),
+    });
 
     const existingOpen = await this.getLatestOpenAction(lead.id);
     if (existingOpen && existingOpen.actionType === decision.actionType) {
@@ -93,19 +71,16 @@ class BobOrchestrator {
       };
     }
 
-    const [action] = await db
-      .insert(bobActions)
-      .values({
-        leadId: lead.id,
-        conversationId: conversation.id,
-        actionType: decision.actionType,
-        channel: decision.channel,
-        status: decision.actionType === 'wait' ? 'deferred' : 'pending',
-        reason: decision.reason,
-        payload: decision.payload,
-        scheduledFor: decision.scheduledFor || null,
-      })
-      .returning();
+    const action = await insforgeDataService.createBobAction({
+      leadId: lead.id,
+      conversationId: conversation.id,
+      actionType: decision.actionType,
+      channel: decision.channel,
+      status: decision.actionType === 'wait' ? 'deferred' : 'pending',
+      reason: decision.reason,
+      payload: decision.payload,
+      scheduledFor: decision.scheduledFor || null,
+    });
 
     return {
       leadId: lead.id,
@@ -117,25 +92,7 @@ class BobOrchestrator {
   }
 
   async runCycle(limit = 50) {
-    const leadRows = await db
-      .select({
-        id: leads.id,
-        email: leads.email,
-        firstName: leads.firstName,
-        fullName: leads.fullName,
-        phone: leads.phone,
-        source: leads.source,
-        status: leads.status,
-        assignedAgentId: leads.assignedAgentId,
-        scheduledAt: leads.scheduledAt,
-        meetingScheduled: leads.meetingScheduled,
-        createdAt: leads.createdAt,
-        updatedAt: leads.updatedAt,
-        trackingId: leads.trackingId,
-      })
-      .from(leads)
-      .orderBy(desc(leads.createdAt))
-      .limit(limit);
+    const leadRows = await insforgeDataService.listRecentLeads(limit);
 
     const results = [];
     for (const lead of leadRows) {

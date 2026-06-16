@@ -1,8 +1,14 @@
-import { hubspotClient } from '../config/index.js';
+import { Client as HubSpotClient } from '@hubspot/api-client';
+import dotenv from 'dotenv';
 import logger from '../utils/logger.js';
 import { hashForLogging } from '../utils/crypto.js';
-import { upsertLeadToDatabase } from './database-service.js';
 import { transformLead } from './lead-transformation-service.js';
+
+dotenv.config();
+
+const hubspotClient = process.env.HUBSPOT_ACCESS_TOKEN
+  ? new HubSpotClient({ accessToken: process.env.HUBSPOT_ACCESS_TOKEN })
+  : null;
 
 /**
  * Fetch recent leads from HubSpot CRM
@@ -21,6 +27,10 @@ export async function fetchHubSpotLeads(options = {}, trackingId) {
   });
 
   try {
+    if (!hubspotClient?.crm?.contacts) {
+      throw new Error('HubSpot client is not configured. Set HUBSPOT_ACCESS_TOKEN before enabling HubSpot polling.');
+    }
+
     const searchRequest = {
       filterGroups: [],
       properties: [
@@ -97,6 +107,10 @@ export async function fetchHubSpotLeadById(contactId, trackingId) {
   });
 
   try {
+    if (!hubspotClient?.crm?.contacts) {
+      throw new Error('HubSpot client is not configured. Set HUBSPOT_ACCESS_TOKEN before fetching HubSpot leads.');
+    }
+
     const response = await hubspotClient.crm.contacts.basicApi.getById(
       contactId,
       [
@@ -183,6 +197,7 @@ export async function processHubSpotLead(hubspotContact, trackingId) {
 
     // Step 2: Upsert lead to Database
     try {
+      const { upsertLeadToDatabase } = await import('./database-service.js');
       const databaseResult = await upsertLeadToDatabase(transformedLead, trackingId);
       results.supabase = { success: true, data: databaseResult };
       logger.logLeadProcessing(trackingId, 'database_upsert_completed', {

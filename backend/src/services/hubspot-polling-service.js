@@ -2,11 +2,7 @@ import cron from 'node-cron';
 import { generateTrackingId } from '../utils/crypto.js';
 import logger from '../utils/logger.js';
 import { syncHubSpotLeads, fetchHubSpotLeads } from './hubspot-lead-service.js';
-import { db } from '../config/index.js';
-import { systemConfig } from '../db/schema.js';
-import { eq, desc } from 'drizzle-orm';
-import { WorkflowOrchestrator } from '../../workflow-orchestrator.js';
-import automatedEmailWorkflowService from './automated-email-workflow-service.js';
+import insforgeDataService from './insforge-data-service.js';
 
 /**
  * HubSpot Lead Polling Service
@@ -19,7 +15,21 @@ class HubSpotPollingService {
     this.lastSyncTime = null;
     this.syncInterval = process.env.HUBSPOT_SYNC_INTERVAL || '*/2 * * * *'; // Default: every 2 minutes
     this.maxLeadsPerSync = parseInt(process.env.HUBSPOT_MAX_LEADS_PER_SYNC) || 100;
-    this.workflowOrchestrator = new WorkflowOrchestrator();
+    this.workflowOrchestrator = null;
+  }
+
+  async getWorkflowOrchestrator() {
+    if (!this.workflowOrchestrator) {
+      const { WorkflowOrchestrator } = await import('../../workflow-orchestrator.js');
+      this.workflowOrchestrator = new WorkflowOrchestrator();
+    }
+
+    return this.workflowOrchestrator;
+  }
+
+  async getAutomatedEmailWorkflowService() {
+    const { default: automatedEmailWorkflowService } = await import('./automated-email-workflow-service.js');
+    return automatedEmailWorkflowService;
   }
 
   /**
@@ -33,6 +43,12 @@ class HubSpotPollingService {
     }
 
     try {
+      if (!process.env.HUBSPOT_ACCESS_TOKEN) {
+        logger.warn('HubSpot polling service disabled because HUBSPOT_ACCESS_TOKEN is not configured');
+        console.log('⚠️ [HUBSPOT POLLING] Disabled: HUBSPOT_ACCESS_TOKEN is not configured');
+        return;
+      }
+
       logger.info('Starting HubSpot polling service', {
         interval: this.syncInterval,
         maxLeadsPerSync: this.maxLeadsPerSync
@@ -146,13 +162,10 @@ class HubSpotPollingService {
    */
   async initializeLastSyncTime() {
     try {
-      const result = await db.select()
-        .from(systemConfig)
-        .where(eq(systemConfig.key, 'hubspot_last_sync_time'))
-        .limit(1);
+      const result = await insforgeDataService.getSystemConfig('hubspot_last_sync_time');
 
-      if (result.length > 0 && result[0].value) {
-        this.lastSyncTime = new Date(result[0].value);
+      if (result?.value) {
+        this.lastSyncTime = new Date(result.value);
         logger.info('Initialized last sync time from database', {
           lastSyncTime: this.lastSyncTime
         });
@@ -178,29 +191,11 @@ class HubSpotPollingService {
    */
   async updateLastSyncTime(syncTime) {
     try {
-      // Try to update existing record first
-      const existing = await db.select()
-        .from(systemConfig)
-        .where(eq(systemConfig.key, 'hubspot_last_sync_time'))
-        .limit(1);
-
-      if (existing.length > 0) {
-        // Update existing record
-        await db.update(systemConfig)
-          .set({
-            value: syncTime.toISOString(),
-            updatedAt: new Date()
-          })
-          .where(eq(systemConfig.key, 'hubspot_last_sync_time'));
-      } else {
-        // Insert new record
-        await db.insert(systemConfig)
-          .values({
-            key: 'hubspot_last_sync_time',
-            value: syncTime.toISOString(),
-            description: 'Last sync time for HubSpot polling service'
-          });
-      }
+      await insforgeDataService.upsertSystemConfig(
+        'hubspot_last_sync_time',
+        syncTime.toISOString(),
+        'Last sync time for HubSpot polling service'
+      );
 
       this.lastSyncTime = syncTime;
 
@@ -293,7 +288,8 @@ class HubSpotPollingService {
                 
                 // Trigger automation workflows for new leads
                 try {
-                  const workflowSuccess = await this.workflowOrchestrator.initializeWorkflow(leadResult.leadId);
+                  const workflowOrchestrator = await this.getWorkflowOrchestrator();
+                  const workflowSuccess = await workflowOrchestrator.initializeWorkflow(leadResult.leadId);
                   
                   if (workflowSuccess) {
                     console.log(`✅ AUTOMATION TRIGGERED: Workflows initialized for lead ${leadResult.leadId}`);
@@ -301,6 +297,7 @@ class HubSpotPollingService {
                     
                     // Initialize automated email workflow for new lead
                     try {
+                      const automatedEmailWorkflowService = await this.getAutomatedEmailWorkflowService();
                       const emailWorkflowResult = await automatedEmailWorkflowService.initializeLeadEmailWorkflow(
                         leadResult.leadId,
                         trackingId
