@@ -3,12 +3,10 @@
  * Processes scheduled emails from the email_queue table
  */
 
-import { and, asc, eq, lte } from 'drizzle-orm';
-import { db } from '../db/connection.js';
-import { bobActions, emailQueue } from '../db/schema.js';
 import EmailService from './email-service.js';
 import leadConversationService from './lead-conversation-service.js';
 import logger from '../utils/logger.js';
+import insforgeDataService from './insforge-data-service.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -62,12 +60,7 @@ class EmailQueueProcessor {
   }
 
   async processBatch() {
-    const emails = await db
-      .select()
-      .from(emailQueue)
-      .where(and(eq(emailQueue.status, 'scheduled'), lte(emailQueue.scheduledFor, new Date())))
-      .orderBy(asc(emailQueue.scheduledFor))
-      .limit(this.batchSize);
+    const emails = await insforgeDataService.getDueScheduledEmails(this.batchSize, new Date());
 
     if (emails.length === 0) {
       return [];
@@ -135,7 +128,7 @@ class EmailQueueProcessor {
       };
     }
 
-    await db.update(bobActions).set(patch).where(eq(bobActions.id, bobActionId));
+    await insforgeDataService.updateBobAction(bobActionId, patch);
   }
 
   async processEmail(email) {
@@ -220,7 +213,7 @@ class EmailQueueProcessor {
       ...additionalFields,
     };
 
-    await db.update(emailQueue).set(updateData).where(eq(emailQueue.id, emailId));
+    await insforgeDataService.updateEmailQueue(emailId, updateData);
   }
 
   getStatus() {

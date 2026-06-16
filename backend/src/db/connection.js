@@ -8,34 +8,49 @@ import { getRuntimeConfig } from '../utils/runtime-config.js';
 dotenv.config();
 
 const runtimeConfig = getRuntimeConfig();
+const directDatabaseUrl = runtimeConfig.databaseUrl;
+const directDatabaseMissingMessage =
+  'Direct Postgres DATABASE_URL is not configured. This project is linked to InsForge; migrate this code path to the InsForge SDK/data service or set INSFORGE_DATABASE_URL/DATABASE_URL for legacy Drizzle access.';
 
-// Validate required environment variables
-if (!runtimeConfig.databaseUrl) {
-  throw new Error('DATABASE_URL environment variable is required (or save InsForge URL at /data/.openclaw/secrets/insforge_database_url)');
-}
+// Create PostgreSQL connection pool only when a direct Postgres URL is available.
+// InsForge cloud projects may expose database access through the SDK/API instead
+// of a direct DATABASE_URL, so importing the backend must not crash at startup.
+const pool = directDatabaseUrl
+  ? new Pool({
+      connectionString: directDatabaseUrl,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+      query_timeout: 30000,
+      statement_timeout: 30000,
+    })
+  : null;
 
-// Create PostgreSQL connection pool
-const pool = new Pool({
-  connectionString: runtimeConfig.databaseUrl,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  max: 20, // Maximum number of clients in the pool
-  idleTimeoutMillis: 30000, // Close idle clients after 30 seconds
-  connectionTimeoutMillis: 10000, // Return an error after 10 seconds if connection could not be established
-  query_timeout: 30000, // Query timeout of 30 seconds
-  statement_timeout: 30000, // Statement timeout of 30 seconds
-});
+const unavailableDb = new Proxy(
+  {},
+  {
+    get() {
+      throw new Error(directDatabaseMissingMessage);
+    },
+  }
+);
 
-// Create Drizzle database instance
-export const db = drizzle(pool, { schema });
+// Create Drizzle database instance when direct Postgres is configured.
+export const db = pool ? drizzle(pool, { schema }) : unavailableDb;
 
 // Export the pool for direct access if needed
 export { pool };
 
-// Export schema for use in other files
+// Export schema for legacy Drizzle code paths that still use table definitions.
 export * from './schema.js';
 
 // Health check function
 export async function checkDatabaseConnection() {
+  if (!pool) {
+    return false;
+  }
+
   try {
     const client = await pool.connect();
     await client.query('SELECT 1');
@@ -49,6 +64,10 @@ export async function checkDatabaseConnection() {
 
 // Graceful shutdown
 export async function closeDatabaseConnection() {
+  if (!pool) {
+    return;
+  }
+
   try {
     await pool.end();
     console.log('Database connection pool closed');

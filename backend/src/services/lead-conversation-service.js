@@ -1,51 +1,35 @@
-import { desc, eq } from 'drizzle-orm';
-import { db } from '../config/index.js';
-import { leadConversationMessages, leadConversations } from '../db/schema.js';
 import logger from '../utils/logger.js';
+import insforgeDataService from './insforge-data-service.js';
 
 class LeadConversationService {
   async ensurePrimaryConversation(lead, channel = 'email') {
-    const existing = await db
-      .select()
-      .from(leadConversations)
-      .where(eq(leadConversations.leadId, lead.id))
-      .orderBy(desc(leadConversations.createdAt))
-      .limit(1);
+    const existing = await insforgeDataService.getLatestConversationForLead(lead.id);
 
-    if (existing[0]) {
-      return existing[0];
+    if (existing) {
+      return existing;
     }
 
-    const [conversation] = await db
-      .insert(leadConversations)
-      .values({
-        leadId: lead.id,
-        channel,
-        status: 'active',
-        conversationStatus: 'active_nurture',
-        metadata: {
-          source: lead.source || 'unknown',
-          bootstrap: 'bob_phase_1',
-          outboundCount: 0,
-          callQueueCount: 0,
-        },
-      })
-      .returning();
+    const conversation = await insforgeDataService.createConversation({
+      leadId: lead.id,
+      channel,
+      status: 'active',
+      conversationStatus: 'active_nurture',
+      metadata: {
+        source: lead.source || 'unknown',
+        bootstrap: 'bob_phase_1',
+        outboundCount: 0,
+        callQueueCount: 0,
+      },
+    });
 
     return conversation;
   }
 
   async updateConversation(conversationId, patch = {}) {
-    const [updated] = await db
-      .update(leadConversations)
-      .set({
-        ...patch,
-        updatedAt: new Date(),
-      })
-      .where(eq(leadConversations.id, conversationId))
-      .returning();
-
-    return updated;
+    return insforgeDataService.updateConversation(conversationId, {
+      ...patch,
+      updatedAt: new Date(),
+    });
   }
 
   async logMessage({
@@ -64,25 +48,22 @@ class LeadConversationService {
     errorMessage = null,
     metadata = {},
   }) {
-    const [message] = await db
-      .insert(leadConversationMessages)
-      .values({
-        leadId,
-        conversationId,
-        direction,
-        channel,
-        messageType,
-        subject,
-        bodyText,
-        bodyHtml,
-        status,
-        sentAt,
-        deliveredAt,
-        providerMessageId,
-        errorMessage,
-        metadata,
-      })
-      .returning();
+    const message = await insforgeDataService.createConversationMessage({
+      leadId,
+      conversationId,
+      direction,
+      channel,
+      messageType,
+      subject,
+      bodyText,
+      bodyHtml,
+      status,
+      sentAt,
+      deliveredAt,
+      providerMessageId,
+      errorMessage,
+      metadata,
+    });
 
     return message;
   }
@@ -125,16 +106,10 @@ class LeadConversationService {
   }
 
   async markMessageStatus(messageId, status, patch = {}) {
-    const [updated] = await db
-      .update(leadConversationMessages)
-      .set({
-        status,
-        ...patch,
-      })
-      .where(eq(leadConversationMessages.id, messageId))
-      .returning();
-
-    return updated;
+    return insforgeDataService.updateConversationMessage(messageId, {
+      status,
+      ...patch,
+    });
   }
 
   async markEmailSent({ messageId, providerMessageId, sentAt = new Date() }) {
@@ -152,11 +127,7 @@ class LeadConversationService {
 
   async logSystemEvent({ lead, conversationId, channel = 'system', messageType = 'system_note', subject, bodyText, metadata = {} }) {
     const conversation = conversationId
-      ? (await db
-          .select()
-          .from(leadConversations)
-          .where(eq(leadConversations.id, conversationId))
-          .limit(1))[0]
+      ? await insforgeDataService.getConversationById(conversationId)
       : await this.ensurePrimaryConversation(lead, channel === 'phone' ? 'phone' : 'email');
 
     const message = await this.logMessage({
