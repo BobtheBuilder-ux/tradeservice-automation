@@ -10,6 +10,27 @@ class EmailService {
     this.client = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
   }
 
+  static formatFromAddress(from, fromName = '') {
+    const trimmedFrom = String(from || '').trim();
+    const trimmedName = String(fromName || '').trim();
+
+    if (!trimmedFrom) {
+      throw new Error('EMAIL_FROM is not configured');
+    }
+
+    // If EMAIL_FROM is already in `Name <email@example.com>` format,
+    // do not wrap it again. Double-wrapping creates invalid Resend input.
+    if (/^[^<>]+<[^<>@\s]+@[^<>@\s]+\.[^<>@\s]+>$/.test(trimmedFrom)) {
+      return trimmedFrom;
+    }
+
+    if (!/^[^@\s<>]+@[^@\s<>]+\.[^@\s<>]+$/.test(trimmedFrom)) {
+      throw new Error('Invalid EMAIL_FROM format. Use email@example.com or Name <email@example.com>.');
+    }
+
+    return trimmedName ? `${trimmedName} <${trimmedFrom}>` : trimmedFrom;
+  }
+
   async sendEmail({ to, subject, html, text }) {
     try {
       if (!this.client) {
@@ -21,7 +42,7 @@ class EmailService {
       }
 
       const mailOptions = {
-        from: this.fromName ? `${this.fromName} <${this.from}>` : this.from,
+        from: EmailService.formatFromAddress(this.from, this.fromName),
         to,
         subject,
         html,
@@ -483,4 +504,5 @@ If you did not expect this account creation, please contact support immediately.
   }
 }
 
+export { EmailService };
 export default new EmailService();
