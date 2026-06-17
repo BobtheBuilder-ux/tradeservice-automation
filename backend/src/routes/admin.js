@@ -1,7 +1,4 @@
 import express from 'express';
-import { db } from '../config/index.js';
-import { agents, bobActions, leadConversations, leads } from '../db/schema.js';
-import { eq, count, or, inArray, and, desc, sql } from 'drizzle-orm';
 import dotenv from 'dotenv';
 import { authenticateToken, requireRole } from '../middleware/auth.js';
 import { buildCallOutcomeLeadPatch, CALL_OUTCOMES, isValidCallOutcome } from '../services/call-outcome-policy.js';
@@ -14,29 +11,31 @@ const router = express.Router();
 
 const verifyAdmin = [authenticateToken, requireRole('admin')];
 
+function serializeAgent(agent) {
+  return {
+    id: agent.id,
+    name: agent.fullName || [agent.firstName, agent.lastName].filter(Boolean).join(' ') || agent.email,
+    fullName: agent.fullName,
+    email: agent.email,
+    role: agent.role,
+    email_verified: agent.emailVerified,
+    emailVerified: agent.emailVerified,
+    created_at: agent.createdAt,
+    createdAt: agent.createdAt,
+    last_login: agent.lastLogin,
+    lastLogin: agent.lastLogin,
+    is_active: agent.isActive,
+    isActive: agent.isActive,
+  };
+}
+
 // AGENT MANAGEMENT ENDPOINTS
 
 // Get all agents
 router.get('/agents', verifyAdmin, async (req, res) => {
   try {
-    const agentsResult = await db.select({
-      id: agents.id,
-      name: agents.fullName,
-      email: agents.email,
-      role: agents.role,
-      email_verified: agents.emailVerified,
-      created_at: agents.createdAt,
-      last_login: agents.lastLogin,
-      is_active: agents.isActive
-    })
-    .from(agents)
-    .where(and(
-      or(eq(agents.role, 'agent'), eq(agents.role, 'admin')),
-      eq(agents.isActive, true)
-    ))
-    .orderBy(agents.createdAt);
-
-    res.json({ success: true, agents: agentsResult });
+    const agentsResult = await insforgeDataService.listAdminAgents();
+    res.json({ success: true, agents: agentsResult.map(serializeAgent) });
   } catch (error) {
     console.error('Error fetching agents:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch agents' });
@@ -63,13 +62,8 @@ router.post('/agents', verifyAdmin, async (req, res) => {
 
     const normalizedEmail = email.trim().toLowerCase();
 
-    // Check if user already exists
-    const existingUserResult = await db.select({ id: agents.id })
-      .from(agents)
-      .where(eq(agents.email, normalizedEmail))
-      .limit(1);
-
-    if (existingUserResult.length > 0) {
+    const existingUser = await insforgeDataService.getAgentByEmail(normalizedEmail);
+    if (existingUser) {
       return res.status(400).json({
         error: 'User with this email already exists'
       });
@@ -78,35 +72,32 @@ router.post('/agents', verifyAdmin, async (req, res) => {
     const nameParts = name.trim().split(/\s+/);
 
     // Create portal account record. Authentication is handled by InsForge Google OAuth.
-    const newAgentResult = await db.insert(agents)
-      .values({
-        fullName: name.trim(),
-        firstName: nameParts[0] || name.trim(),
-        lastName: nameParts.slice(1).join(' '),
-        email: normalizedEmail,
-        passwordHash: null,
-        role,
-        emailVerified: true,
-        isActive: true,
-        createdAt: new Date()
-      })
-      .returning();
+    const newAgent = await insforgeDataService.createAgent({
+      fullName: name.trim(),
+      firstName: nameParts[0] || name.trim(),
+      lastName: nameParts.slice(1).join(' '),
+      email: normalizedEmail,
+      passwordHash: null,
+      role,
+      emailVerified: true,
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
 
-    if (!newAgentResult || newAgentResult.length === 0) {
+    if (!newAgent) {
       console.error('Error creating agent');
       return res.status(500).json({
         error: 'Failed to create agent'
       });
     }
 
-    const newAgent = newAgentResult[0];
-
     res.status(201).json({
       success: true,
       message: 'Portal user created successfully. They can now sign in with Google using this email address.',
       agent: {
         id: newAgent.id,
-        name: newAgent.fullName,
+        name: newAgent.fullName || name.trim(),
         email: newAgent.email,
         role: newAgent.role
       },
@@ -130,34 +121,21 @@ router.delete('/agents/:agentId', verifyAdmin, async (req, res) => {
       });
     }
 
-    // Check if agent exists
-    const agentResult = await db.select({ id: agents.id, role: agents.role })
-      .from(agents)
-      .where(eq(agents.id, agentId))
-      .limit(1);
-
-    if (!agentResult || agentResult.length === 0) {
+    const agent = await insforgeDataService.getAgentById(agentId);
+    if (!agent) {
       return res.status(404).json({
         error: 'Agent not found'
       });
     }
 
-    // Unassign all leads from this agent before deletion
-    await db.update(leads)
-      .set({ assignedAgentId: null })
-      .where(eq(leads.assignedAgentId, agentId));
+    const assignedLeads = (await insforgeDataService.listRecentLeads(10000))
+      .filter((lead) => lead.assignedAgentId === agentId);
+    await insforgeDataService.updateLeads(assignedLeads.map((lead) => lead.id), {
+      assignedAgentId: null,
+      updatedAt: new Date(),
+    });
 
-    // Delete the agent
-    const deleteResult = await db.delete(agents)
-      .where(eq(agents.id, agentId))
-      .returning();
-
-    if (!deleteResult || deleteResult.length === 0) {
-      console.error('Error deleting agent');
-      return res.status(500).json({
-        error: 'Failed to delete agent'
-      });
-    }
+    await insforgeDataService.deleteAgent(agentId);
 
     res.json({ message: 'Agent deleted successfully' });
   } catch (error) {
@@ -171,9 +149,8 @@ router.delete('/agents/:agentId', verifyAdmin, async (req, res) => {
 // Get all leads with assignment info
 router.get('/leads', verifyAdmin, async (req, res) => {
   try {
-    const leadsResult = await db.select()
-      .from(leads)
-      .orderBy(leads.createdAt);
+    const leadsResult = await insforgeDataService.listRecentLeads(10000);
+    leadsResult.reverse();
 
     res.json({ leads: leadsResult || [] });
   } catch (error) {
@@ -193,27 +170,17 @@ router.post('/assign-leads', verifyAdmin, async (req, res) => {
       });
     }
 
-    // Verify agent exists
-    const agentResult = await db.select({ id: agents.id })
-      .from(agents)
-      .where(eq(agents.id, agentId))
-      .where(or(eq(agents.role, 'agent'), eq(agents.role, 'admin')))
-      .limit(1);
-
-    if (!agentResult || agentResult.length === 0) {
+    const agent = await insforgeDataService.getAgentById(agentId);
+    if (!agent || !['agent', 'admin'].includes(agent.role)) {
       return res.status(404).json({
         error: 'Agent not found'
       });
     }
 
-    // Update leads with agent assignment
-    const updatedLeads = await db.update(leads)
-      .set({ 
-        assignedAgentId: agentId,
-        updatedAt: new Date()
-      })
-      .where(inArray(leads.id, leadIds))
-      .returning();
+    const updatedLeads = await insforgeDataService.updateLeads(leadIds, {
+      assignedAgentId: agentId,
+      updatedAt: new Date(),
+    });
 
     if (!updatedLeads || updatedLeads.length === 0) {
       console.error('Error assigning leads');
@@ -243,14 +210,10 @@ router.post('/unassign-leads', verifyAdmin, async (req, res) => {
       });
     }
 
-    // Update leads to remove agent assignment
-    const updatedLeads = await db.update(leads)
-      .set({ 
-        assignedAgentId: null,
-        updatedAt: new Date()
-      })
-      .where(inArray(leads.id, leadIds))
-      .returning();
+    const updatedLeads = await insforgeDataService.updateLeads(leadIds, {
+      assignedAgentId: null,
+      updatedAt: new Date(),
+    });
 
     if (!updatedLeads || updatedLeads.length === 0) {
       console.error('Error unassigning leads');
@@ -276,90 +239,57 @@ router.get('/bob-activity', verifyAdmin, async (req, res) => {
   try {
     const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 100);
 
-    const actionRows = await db.select({
-      id: bobActions.id,
-      leadId: bobActions.leadId,
-      conversationId: bobActions.conversationId,
-      actionType: bobActions.actionType,
-      channel: bobActions.channel,
-      status: bobActions.status,
-      reason: bobActions.reason,
-      payload: bobActions.payload,
-      result: bobActions.result,
-      scheduledFor: bobActions.scheduledFor,
-      executedAt: bobActions.executedAt,
-      createdAt: bobActions.createdAt,
-      updatedAt: bobActions.updatedAt,
-      leadEmail: leads.email,
-      leadFullName: leads.fullName,
-      leadFirstName: leads.firstName,
-      leadLastName: leads.lastName,
-      leadPhone: leads.phone,
-      leadStatus: leads.status,
-      leadStage: leads.leadStage,
-      qualificationStatus: leads.qualificationStatus,
-      qualificationScore: leads.qualificationScore,
-      schedulingState: leads.schedulingState,
-      requiresHumanReview: leads.requiresHumanReview,
-      escalationReason: leads.escalationReason,
-      automationPaused: leads.automationPaused,
-      conversationStatus: leadConversations.conversationStatus,
-      lastIntent: leadConversations.lastIntent,
-      humanReviewRequired: leadConversations.humanReviewRequired,
-    })
-      .from(bobActions)
-      .leftJoin(leads, eq(bobActions.leadId, leads.id))
-      .leftJoin(leadConversations, eq(bobActions.conversationId, leadConversations.id))
-      .orderBy(desc(bobActions.createdAt))
-      .limit(limit);
-
-    const reviewRows = await db.select({
-      id: leads.id,
-      email: leads.email,
-      fullName: leads.fullName,
-      firstName: leads.firstName,
-      lastName: leads.lastName,
-      phone: leads.phone,
-      status: leads.status,
-      priority: leads.priority,
-      qualificationStatus: leads.qualificationStatus,
-      qualificationScore: leads.qualificationScore,
-      leadStage: leads.leadStage,
-      schedulingState: leads.schedulingState,
-      serviceInterest: leads.serviceInterest,
-      timeline: leads.timeline,
-      budgetRange: leads.budgetRange,
-      requiresHumanReview: leads.requiresHumanReview,
-      escalationReason: leads.escalationReason,
-      automationPaused: leads.automationPaused,
-      nextContactAt: leads.nextContactAt,
-      updatedAt: leads.updatedAt,
-      createdAt: leads.createdAt,
-    })
-      .from(leads)
-      .where(or(eq(leads.requiresHumanReview, true), eq(leads.automationPaused, true)))
-      .orderBy(desc(leads.updatedAt))
-      .limit(50);
-
-    const [statusCounts, reviewCount] = await Promise.all([
-      db.select({
-        status: bobActions.status,
-        count: count(),
-      })
-        .from(bobActions)
-        .groupBy(bobActions.status),
-      db.select({ count: count() })
-        .from(leads)
-        .where(or(eq(leads.requiresHumanReview, true), eq(leads.automationPaused, true))),
+    const [actions, allLeads, conversations] = await Promise.all([
+      insforgeDataService.listBobActions(limit),
+      insforgeDataService.listRecentLeads(10000),
+      insforgeDataService.listLeadConversations(),
     ]);
 
+    const leadsById = new Map(allLeads.map((lead) => [lead.id, lead]));
+    const conversationsById = new Map(conversations.map((conversation) => [conversation.id, conversation]));
+
+    const actionRows = actions.map((action) => {
+      const lead = leadsById.get(action.leadId) || {};
+      const conversation = conversationsById.get(action.conversationId) || {};
+
+      return {
+        ...action,
+        leadEmail: lead.email,
+        leadFullName: lead.fullName,
+        leadFirstName: lead.firstName,
+        leadLastName: lead.lastName,
+        leadPhone: lead.phone,
+        leadStatus: lead.status,
+        leadStage: lead.leadStage,
+        qualificationStatus: lead.qualificationStatus,
+        qualificationScore: lead.qualificationScore,
+        schedulingState: lead.schedulingState,
+        requiresHumanReview: lead.requiresHumanReview,
+        escalationReason: lead.escalationReason,
+        automationPaused: lead.automationPaused,
+        conversationStatus: conversation.conversationStatus,
+        lastIntent: conversation.lastIntent,
+        humanReviewRequired: conversation.humanReviewRequired,
+      };
+    });
+
+    const reviewRows = allLeads
+      .filter((lead) => lead.requiresHumanReview || lead.automationPaused)
+      .sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())
+      .slice(0, 50);
+
+    const statusCountMap = actions.reduce((counts, action) => {
+      counts[action.status] = (counts[action.status] || 0) + 1;
+      return counts;
+    }, {});
+
     const stats = {
-      totalActions: statusCounts.reduce((sum, row) => sum + Number(row.count || 0), 0),
-      pendingActions: Number(statusCounts.find((row) => row.status === 'pending')?.count || 0),
-      failedActions: Number(statusCounts.find((row) => row.status === 'failed')?.count || 0),
-      awaitingHuman: Number(statusCounts.find((row) => row.status === 'awaiting_human')?.count || 0),
-      awaitingCall: Number(statusCounts.find((row) => row.status === 'awaiting_call')?.count || 0),
-      reviewLeads: Number(reviewCount[0]?.count || 0),
+      totalActions: actions.length,
+      pendingActions: statusCountMap.pending || 0,
+      failedActions: statusCountMap.failed || 0,
+      awaitingHuman: statusCountMap.awaiting_human || 0,
+      awaitingCall: statusCountMap.awaiting_call || 0,
+      reviewLeads: reviewRows.length,
     };
 
     res.json({
@@ -469,19 +399,7 @@ router.patch('/bob-activity/actions/:actionId/call-outcome', verifyAdmin, async 
       });
     }
 
-    const actionRows = await db.select({
-      id: bobActions.id,
-      leadId: bobActions.leadId,
-      conversationId: bobActions.conversationId,
-      result: bobActions.result,
-      actionType: bobActions.actionType,
-      status: bobActions.status,
-    })
-      .from(bobActions)
-      .where(eq(bobActions.id, actionId))
-      .limit(1);
-
-    const action = actionRows[0];
+    const action = await insforgeDataService.getBobActionById(actionId);
     if (!action) {
       return res.status(404).json({ error: 'Bob action not found' });
     }
@@ -500,49 +418,44 @@ router.patch('/bob-activity/actions/:actionId/call-outcome', verifyAdmin, async 
       lastUpdatedBy: req.user.id,
     };
 
-    const [updatedLead] = await db.update(leads)
-      .set(leadPatch)
-      .where(eq(leads.id, action.leadId))
-      .returning();
+    const updatedLead = await insforgeDataService.updateLead(action.leadId, leadPatch);
 
-    await db.update(bobActions)
-      .set({
-        status: 'completed',
-        executedAt: now,
-        updatedAt: now,
-        result: {
-          ...(action.result || {}),
-          callOutcome: outcome,
-          callOutcomeNotes: typeof notes === 'string' ? notes.trim() : null,
-          callOutcomeRecordedAt: now.toISOString(),
-          callOutcomeRecordedBy: req.user.id,
-        },
-      })
-      .where(eq(bobActions.id, actionId));
+    await insforgeDataService.updateBobAction(actionId, {
+      status: 'completed',
+      executedAt: now,
+      updatedAt: now,
+      result: {
+        ...(action.result || {}),
+        callOutcome: outcome,
+        callOutcomeNotes: typeof notes === 'string' ? notes.trim() : null,
+        callOutcomeRecordedAt: now.toISOString(),
+        callOutcomeRecordedBy: req.user.id,
+      },
+    });
 
     if (action.conversationId && updatedLead) {
-      await db.update(leadConversations)
-        .set({
-          lastIntent: `call_outcome_${outcome}`,
-          lastIntentAt: now,
-          humanReviewRequired: updatedLead.requiresHumanReview,
-          conversationStatus: updatedLead.requiresHumanReview ? 'needs_human_review' : 'active_nurture',
-          nextAction: updatedLead.requiresHumanReview
-            ? 'human_review'
-            : updatedLead.nextContactAt
-              ? 'follow_up_after_call'
-              : null,
-          nextActionAt: updatedLead.nextContactAt || null,
-          lastSummary: `Call outcome recorded: ${outcome}${notes ? ` — ${notes}` : ''}`,
-          metadata: sql`coalesce(${leadConversations.metadata}, '{}'::jsonb) || ${JSON.stringify({
-            callQueuedAt: null,
-            lastCallOutcome: outcome,
-            lastCallOutcomeRecordedAt: now.toISOString(),
-            lastCallOutcomeRecordedBy: req.user.id,
-          })}::jsonb`,
-          updatedAt: now,
-        })
-        .where(eq(leadConversations.id, action.conversationId));
+      const conversation = await insforgeDataService.getConversationById(action.conversationId);
+      await insforgeDataService.updateConversation(action.conversationId, {
+        lastIntent: `call_outcome_${outcome}`,
+        lastIntentAt: now,
+        humanReviewRequired: updatedLead.requiresHumanReview,
+        conversationStatus: updatedLead.requiresHumanReview ? 'needs_human_review' : 'active_nurture',
+        nextAction: updatedLead.requiresHumanReview
+          ? 'human_review'
+          : updatedLead.nextContactAt
+            ? 'follow_up_after_call'
+            : null,
+        nextActionAt: updatedLead.nextContactAt || null,
+        lastSummary: `Call outcome recorded: ${outcome}${notes ? ` - ${notes}` : ''}`,
+        metadata: {
+          ...(conversation?.metadata || {}),
+          callQueuedAt: null,
+          lastCallOutcome: outcome,
+          lastCallOutcomeRecordedAt: now.toISOString(),
+          lastCallOutcomeRecordedBy: req.user.id,
+        },
+        updatedAt: now,
+      });
     }
 
     res.json({
@@ -580,44 +493,42 @@ router.patch('/bob-activity/leads/:leadId/review', verifyAdmin, async (req, res)
     if (typeof leadStage === 'string' && leadStage.trim()) patch.leadStage = leadStage.trim();
     if (typeof schedulingState === 'string' && schedulingState.trim()) patch.schedulingState = schedulingState.trim();
 
-    const [updatedLead] = await db.update(leads)
-      .set(patch)
-      .where(eq(leads.id, leadId))
-      .returning();
+    const updatedLead = await insforgeDataService.updateLead(leadId, patch);
 
     if (!updatedLead) {
       return res.status(404).json({ error: 'Lead not found' });
     }
 
-    await db.update(leadConversations)
-      .set({
+    const existingConversations = (await insforgeDataService.listLeadConversations())
+      .filter((conversation) => conversation.leadId === leadId);
+
+    await Promise.all(existingConversations.map((conversation) => insforgeDataService.updateConversation(conversation.id, {
         humanReviewRequired: updatedLead.requiresHumanReview,
         conversationStatus: updatedLead.requiresHumanReview ? 'needs_human_review' : 'active_nurture',
         lastIntent: updatedLead.requiresHumanReview ? 'human_review_requested' : 'human_review_resolved',
         lastIntentAt: new Date(),
         updatedAt: new Date(),
-        metadata: sql`coalesce(${leadConversations.metadata}, '{}'::jsonb) || ${JSON.stringify({
+        metadata: {
+          ...(conversation.metadata || {}),
           lastAdminReviewUpdateAt: new Date().toISOString(),
           lastAdminReviewUpdatedBy: req.user.id,
-        })}::jsonb`,
-      })
-      .where(eq(leadConversations.leadId, leadId));
+        },
+      })));
 
     if (!updatedLead.requiresHumanReview) {
-      await db.update(bobActions)
-        .set({
+      const awaitingActions = (await insforgeDataService.listBobActions(10000))
+        .filter((action) => action.leadId === leadId && action.status === 'awaiting_human');
+
+      await Promise.all(awaitingActions.map((action) => insforgeDataService.updateBobAction(action.id, {
           status: 'completed',
           executedAt: new Date(),
           updatedAt: new Date(),
-          result: sql`coalesce(${bobActions.result}, '{}'::jsonb) || ${JSON.stringify({
+          result: {
+            ...(action.result || {}),
             resolvedByAdminId: req.user.id,
             resolvedAt: new Date().toISOString(),
-          })}::jsonb`,
-        })
-        .where(and(
-          eq(bobActions.leadId, leadId),
-          eq(bobActions.status, 'awaiting_human')
-        ));
+          },
+        })));
     }
 
     res.json({ success: true, lead: updatedLead });
@@ -656,29 +567,16 @@ router.get('/campaigns', verifyAdmin, async (req, res) => {
 // Get admin dashboard statistics
 router.get('/stats', verifyAdmin, async (req, res) => {
   try {
-    // Get agent count
-    const agentCountResult = await db.select({ count: count() })
-      .from(agents)
-      .where(or(eq(agents.role, 'agent'), eq(agents.role, 'admin')));
-
-    // Get lead count
-    const leadCountResult = await db.select({ count: count() })
-      .from(leads);
-
-    // Get unassigned lead count
-    const unassignedCountResult = await db.select({ count: count() })
-      .from(leads)
-      .where(eq(leads.assignedAgentId, null));
-
-    const agentCount = agentCountResult[0]?.count || 0;
-    const leadCount = leadCountResult[0]?.count || 0;
-    const unassignedCount = unassignedCountResult[0]?.count || 0;
+    const [agentsResult, leadsResult] = await Promise.all([
+      insforgeDataService.listAdminAgents(),
+      insforgeDataService.listRecentLeads(10000),
+    ]);
 
     res.json({
       stats: {
-        totalAgents: agentCount || 0,
-        totalLeads: leadCount || 0,
-        unassignedLeads: unassignedCount || 0,
+        totalAgents: agentsResult.length,
+        totalLeads: leadsResult.length,
+        unassignedLeads: leadsResult.filter((lead) => !lead.assignedAgentId).length,
         activeCampaigns: 0 // Mock data for now
       }
     });

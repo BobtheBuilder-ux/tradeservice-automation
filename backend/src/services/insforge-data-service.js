@@ -290,8 +290,20 @@ class InsForgeDataService {
     return updateById(TABLES.leads, leadId, patch);
   }
 
+  async updateLeads(leadIds, patch) {
+    const uniqueLeadIds = [...new Set((leadIds || []).filter(Boolean))];
+    return Promise.all(uniqueLeadIds.map((leadId) => this.updateLead(leadId, patch)));
+  }
+
   async listAgents() {
     return select(TABLES.agents);
+  }
+
+  async listAdminAgents() {
+    const rows = await select(TABLES.agents);
+    return rows
+      .filter((row) => ['agent', 'admin'].includes(row.role) && row.isActive)
+      .sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
   }
 
   async getAgentIntegration(agentId) {
@@ -322,6 +334,10 @@ class InsForgeDataService {
     return rows.filter((row) => row.leadId === leadId).sort(byCreatedDesc)[0] || null;
   }
 
+  async listLeadConversations() {
+    return select(TABLES.leadConversations);
+  }
+
   async getConversationById(conversationId) {
     return selectById(TABLES.leadConversations, conversationId);
   }
@@ -333,6 +349,11 @@ class InsForgeDataService {
 
   async updateConversation(conversationId, patch) {
     return updateById(TABLES.leadConversations, conversationId, patch);
+  }
+
+  async updateConversationsForLead(leadId, patch) {
+    const rows = await selectByColumn(TABLES.leadConversations, 'lead_id', leadId);
+    return Promise.all(rows.map((conversation) => updateById(TABLES.leadConversations, conversation.id, patch)));
   }
 
   async createConversationMessage(values) {
@@ -359,6 +380,11 @@ class InsForgeDataService {
 
   async getBobActionById(actionId) {
     return selectById(TABLES.bobActions, actionId);
+  }
+
+  async listBobActions(limit = 50) {
+    const rows = await select(TABLES.bobActions);
+    return rows.sort(byCreatedDesc).slice(0, limit);
   }
 
   async updateBobAction(actionId, patch) {

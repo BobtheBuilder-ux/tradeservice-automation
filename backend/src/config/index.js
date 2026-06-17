@@ -8,6 +8,8 @@ dotenv.config();
 
 const runtimeConfig = getRuntimeConfig();
 export const hubspotEnabled = process.env.HUBSPOT_ENABLED === 'true' && Boolean(process.env.HUBSPOT_ACCESS_TOKEN);
+export const automatedEmailWorkflowEnabled =
+  process.env.AUTOMATED_EMAIL_WORKFLOW_ENABLED === 'true' && hubspotEnabled;
 
 // Validate required environment variables (warn in development, error in production)
 const missingVars = [];
@@ -58,7 +60,8 @@ export const appConfig = {
   nodeEnv: process.env.NODE_ENV || 'development',
   logLevel: process.env.LOG_LEVEL || 'info',
   insforgeApiBaseUrl: runtimeConfig.insforgeApiBaseUrl,
-  hubspotEnabled
+  hubspotEnabled,
+  automatedEmailWorkflowEnabled
 };
 
 export default {
