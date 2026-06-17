@@ -1,6 +1,7 @@
 import { insforgeAdmin, insforgeClientConfig } from './insforge-client.js';
 
 const TABLES = {
+  agents: 'agents',
   leads: 'leads',
   bobActions: 'bob_actions',
   leadConversations: 'lead_conversations',
@@ -181,6 +182,21 @@ class InsForgeDataService {
     return rows.sort(byCreatedDesc).slice(0, limit);
   }
 
+  async getAgentByEmail(email) {
+    if (!email) return null;
+    const rows = await select(TABLES.agents);
+    return rows.find((row) => row.email?.toLowerCase() === email.toLowerCase()) || null;
+  }
+
+  async createAgent(values) {
+    const [agent] = await insert(TABLES.agents, values);
+    return agent;
+  }
+
+  async updateAgent(agentId, patch) {
+    return updateById(TABLES.agents, agentId, patch);
+  }
+
   async getLeadById(leadId) {
     return selectById(TABLES.leads, leadId);
   }
@@ -227,6 +243,10 @@ class InsForgeDataService {
   async createBobAction(values) {
     const [action] = await insert(TABLES.bobActions, values);
     return action;
+  }
+
+  async getBobActionById(actionId) {
+    return selectById(TABLES.bobActions, actionId);
   }
 
   async updateBobAction(actionId, patch) {

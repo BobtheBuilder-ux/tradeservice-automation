@@ -209,7 +209,25 @@ class BobActionExecutor {
     }
 
     const trackingId = lead.trackingId || generateTrackingId();
-    const email = this.buildEmailContent(action.actionType, lead, trackingId);
+    const draftPayload = action.actionType === 'send_fresh_email' ? action.payload : null;
+    const email = draftPayload
+      ? {
+          subject: draftPayload.subject,
+          html: draftPayload.bodyHtml,
+          text: draftPayload.bodyText,
+          template: draftPayload.emailGoal || 'fresh_email',
+          conversationStatus: draftPayload.conversationStatus || 'awaiting_reply',
+          lastIntent: draftPayload.emailGoal || 'fresh_email_sent',
+        }
+      : this.buildEmailContent(action.actionType, lead, trackingId);
+
+    if (!email.subject || !email.text) {
+      await this.markAction(action.id, 'failed', {
+        result: { error: 'Fresh email draft is missing a subject or body' },
+      });
+      return;
+    }
+
     const { conversation, message } = await leadConversationService.logQueuedOutboundEmail({
       lead,
       subject: email.subject,
@@ -467,6 +485,7 @@ class BobActionExecutor {
       case 'request_more_info':
       case 'send_booking_invite':
       case 'send_booking_reminder':
+      case 'send_fresh_email':
         await this.queueEmailAction(action, lead);
         return;
       case 'send_sms_reminder':
