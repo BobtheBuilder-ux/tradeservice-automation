@@ -55,6 +55,14 @@ export class WorkflowOrchestrator {
    */
   async processWorkflow() {
     try {
+      if (!this.workflowProcessor.isEnabled()) {
+        logger.info('Legacy workflow processing is disabled; skipping workflow_automation batch');
+        return {
+          success: true,
+          ...this.workflowProcessor.disabledResult()
+        };
+      }
+
       logger.info('🔄 Starting workflow processing for all pending leads');
       
       const result = await this.workflowProcessor.processBatch();
@@ -89,6 +97,11 @@ export class WorkflowOrchestrator {
    */
   async processPendingJobs(batchSize = 50) {
     try {
+      if (!this.workflowProcessor.isEnabled()) {
+        logger.info('Legacy workflow processor is disabled; no workflow_automation jobs processed');
+        return 0;
+      }
+
       logger.info(`🔄 Processing pending jobs with batch size: ${batchSize}`);
       
       // Set batch size on processor if provided
@@ -149,6 +162,14 @@ export class WorkflowOrchestrator {
    */
   async startContinuousProcessing() {
     try {
+      if (!this.workflowProcessor.isEnabled()) {
+        logger.info('Legacy workflow continuous processing is disabled; Bob/InsForge workers remain active');
+        return {
+          success: true,
+          message: 'Legacy workflow processing disabled'
+        };
+      }
+
       if (this.isRunning) {
         logger.warn('⚠️ Continuous workflow processing is already running');
         return {

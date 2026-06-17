@@ -25,12 +25,35 @@ class WorkflowProcessor {
     this.smsService = twilioSmsService;
     this.emailTemplateService = emailTemplateService;
     this.trackingId = randomUUID();
+    this.enabled = process.env.ENABLE_LEGACY_WORKFLOW_PROCESSOR === 'true';
+  }
+
+  isEnabled() {
+    return this.enabled;
+  }
+
+  disabledResult() {
+    return {
+      processedCount: 0,
+      successCount: 0,
+      errorCount: 0,
+      disabled: true,
+      reason: 'Legacy workflow processor is disabled. Bob/InsForge workers handle active automation paths.',
+    };
   }
 
   /**
    * Start the workflow processor
    */
   async start() {
+    if (!this.enabled) {
+      logger.warn('Legacy workflow processor is disabled; skipping direct Drizzle workflow_automation polling', {
+        trackingId: this.trackingId,
+        enableWith: 'ENABLE_LEGACY_WORKFLOW_PROCESSOR=true',
+      });
+      return;
+    }
+
     if (this.isRunning) {
       logger.info('Workflow processor is already running', { trackingId: this.trackingId });
       return;
@@ -87,6 +110,10 @@ class WorkflowProcessor {
    * Load configuration from database
    */
   async loadConfiguration() {
+    if (!this.enabled) {
+      return;
+    }
+
     try {
       const config = await db.select({
         key: systemConfig.key,
@@ -129,6 +156,17 @@ class WorkflowProcessor {
    * Setup real-time listener for immediate job processing
    */
   setupRealtimeListener() {
+    if (!this.enabled) {
+      return;
+    }
+
+    if (typeof supabase === 'undefined') {
+      logger.warn('Legacy Supabase realtime client is not configured; workflow realtime listener skipped', {
+        trackingId: this.trackingId,
+      });
+      return;
+    }
+
     // Listen for workflow job notifications
     supabase
       .channel('workflow_jobs')
@@ -164,6 +202,10 @@ class WorkflowProcessor {
    * Process a batch of pending workflow jobs
    */
   async processBatch() {
+    if (!this.enabled) {
+      return this.disabledResult();
+    }
+
     let processedCount = 0;
     let successCount = 0;
     let errorCount = 0;
@@ -235,7 +277,7 @@ class WorkflowProcessor {
    * Process a single workflow job
    */
   async processJob(job) {
-    const jobTrackingId = uuidv4();
+    const jobTrackingId = randomUUID();
     const startTime = Date.now();
 
     try {

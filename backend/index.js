@@ -544,8 +544,12 @@ app.listen(PORT, async () => {
     logWithTimestamp('info', '🔄 Initializing workflow processing system');
     
     // Start continuous workflow processing with 5-minute intervals
-    await workflowOrchestrator.startContinuousProcessing(5);
-    logWithTimestamp('info', '✅ Continuous workflow processing started with 5-minute intervals');
+    const workflowStart = await workflowOrchestrator.startContinuousProcessing(5);
+    if (workflowStart?.message === 'Legacy workflow processing disabled') {
+      logWithTimestamp('info', 'ℹ️ Legacy workflow processing disabled; Bob/InsForge workers remain active');
+    } else {
+      logWithTimestamp('info', '✅ Continuous workflow processing started with 5-minute intervals');
+    }
     
     // Process any pending jobs immediately on startup
     const initialProcessedCount = await workflowOrchestrator.processPendingJobs(50);
