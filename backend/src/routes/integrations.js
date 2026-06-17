@@ -1,10 +1,8 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import { db } from '../config/index.js';
-import { agentIntegrations } from '../db/schema.js';
-import { eq } from 'drizzle-orm';
 import { authenticateToken } from '../middleware/auth.js';
 import { getJwtSecret } from '../utils/auth-config.js';
+import insforgeDataService from '../services/insforge-data-service.js';
 
 const router = express.Router();
 const JWT_SECRET = getJwtSecret();
@@ -13,41 +11,13 @@ const verifyToken = authenticateToken;
 
 // Helper: upsert agent integration tokens
 async function upsertAgentIntegration(agentId, update) {
-  const existing = await db
-    .select()
-    .from(agentIntegrations)
-    .where(eq(agentIntegrations.agentId, agentId))
-    .limit(1);
-
-  if (existing && existing.length > 0) {
-    const updated = await db
-      .update(agentIntegrations)
-      .set({ ...update, connectedAt: new Date() })
-      .where(eq(agentIntegrations.agentId, agentId))
-      .returning();
-    return updated[0];
-  } else {
-    const inserted = await db
-      .insert(agentIntegrations)
-      .values({ agentId, ...update, connectedAt: new Date() })
-      .returning();
-    return inserted[0];
-  }
+  return insforgeDataService.upsertAgentIntegration(agentId, update);
 }
 
 // GET /api/integrations/status
 router.get('/status', verifyToken, async (req, res) => {
   try {
-    const rows = await db
-      .select({
-        calendlyAccessToken: agentIntegrations.calendlyAccessToken,
-        connectedAt: agentIntegrations.connectedAt,
-      })
-      .from(agentIntegrations)
-      .where(eq(agentIntegrations.agentId, req.user.id))
-      .limit(1);
-
-    const integ = rows[0] || {};
+    const integ = await insforgeDataService.getAgentIntegration(req.user.id) || {};
     res.json({
       calendly: {
         connected: Boolean(integ.calendlyAccessToken),

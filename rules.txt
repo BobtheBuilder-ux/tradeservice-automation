@@ -1,5 +1,3 @@
-This project only uses a supabase remote database
-Do not create or start a docker in this project
 When there are multiple issue, fix it one at a time
 Always check for errors before complete project
 Ensure your todo list has been completed and executed properly
