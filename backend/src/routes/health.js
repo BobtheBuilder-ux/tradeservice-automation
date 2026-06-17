@@ -1,5 +1,5 @@
 import express from 'express';
-import { hubspotClient } from '../config/index.js';
+import { hubspotClient, hubspotEnabled } from '../config/index.js';
 import { checkDatabaseConnection } from '../db/connection.js';
 import logger from '../utils/logger.js';
 
@@ -18,7 +18,7 @@ router.get('/', async (req, res) => {
     version: '1.0.0',
     services: {
       database: 'unknown',
-      hubspot: 'unknown'
+      hubspot: hubspotEnabled ? 'unknown' : 'disabled'
     }
   };
 
@@ -32,13 +32,14 @@ router.get('/', async (req, res) => {
       logger.warn('Database health check failed', { error: dbError.message });
     }
 
-    // Check HubSpot connection
-    try {
-      await hubspotClient.crm.contacts.basicApi.getPage(1);
-      healthCheck.services.hubspot = 'ok';
-    } catch (hubspotError) {
-      healthCheck.services.hubspot = 'error';
-      logger.warn('HubSpot health check failed', { error: hubspotError.message });
+    if (hubspotEnabled) {
+      try {
+        await hubspotClient.crm.contacts.basicApi.getPage(1);
+        healthCheck.services.hubspot = 'ok';
+      } catch (hubspotError) {
+        healthCheck.services.hubspot = 'error';
+        logger.warn('HubSpot health check failed', { error: hubspotError.message });
+      }
     }
 
     // Determine overall status
@@ -78,7 +79,7 @@ router.get('/detailed', async (req, res) => {
         configured: !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
       },
       hubspot: {
-        configured: !!process.env.HUBSPOT_API_KEY
+        configured: hubspotEnabled
       },
       calendly: {
         configured: !!process.env.CALENDLY_WEBHOOK_SECRET
@@ -100,20 +101,26 @@ router.get('/detailed', async (req, res) => {
       error: supabaseError?.message
     };
 
-    // Test HubSpot connection with more details
     const hubspotStart = Date.now();
-    try {
-      await hubspotClient.crm.contacts.basicApi.getPage(1);
+    if (!hubspotEnabled) {
       detailedHealth.services.hubspot = {
-        status: 'ok',
-        responseTime: Date.now() - hubspotStart
+        status: 'disabled',
+        responseTime: 0
       };
-    } catch (hubspotError) {
-      detailedHealth.services.hubspot = {
-        status: 'error',
-        responseTime: Date.now() - hubspotStart,
-        error: hubspotError.message
-      };
+    } else {
+      try {
+        await hubspotClient.crm.contacts.basicApi.getPage(1);
+        detailedHealth.services.hubspot = {
+          status: 'ok',
+          responseTime: Date.now() - hubspotStart
+        };
+      } catch (hubspotError) {
+        detailedHealth.services.hubspot = {
+          status: 'error',
+          responseTime: Date.now() - hubspotStart,
+          error: hubspotError.message
+        };
+      }
     }
 
     // Determine overall status

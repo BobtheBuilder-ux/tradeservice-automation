@@ -31,7 +31,7 @@ import followUpAutomationService from './src/services/follow-up-automation-servi
 import automatedEmailWorkflowService from './src/services/automated-email-workflow-service.js';
 import bobOrchestrator from './src/services/bob-orchestrator.js';
 import bobActionExecutor from './src/services/bob-action-executor.js';
-import { calendlyConfig, db } from './src/config/index.js';
+import { calendlyConfig, db, hubspotEnabled } from './src/config/index.js';
 import { leadProcessingLogs } from './src/db/schema.js';
 import logger from './utils/logger.js';
 
@@ -71,7 +71,9 @@ const workflowOrchestrator = new WorkflowOrchestrator();
 const newLeadMonitor = new NewLeadMonitor();
 logWithTimestamp('info', '🚀 Workflow Orchestrator initialized');
 logWithTimestamp('info', '🚀 New Lead Monitor initialized');
-logWithTimestamp('info', '🚀 HubSpot Polling Service initialized');
+if (hubspotEnabled) {
+  logWithTimestamp('info', '🚀 HubSpot Polling Service initialized');
+}
 logWithTimestamp('info', '🚀 Email Queue Processor initialized');
 
 // Create Express app
@@ -146,7 +148,9 @@ app.use('/api/leads', leadsRoutes);
 app.use('/api/feedback', feedbackRoutes);
 app.use('/api/integrations', integrationsRoutes);
 app.use('/api/test', testRoutes);
-app.use('/webhook/hubspot', hubspotWebhookRoutes);
+if (hubspotEnabled) {
+  app.use('/webhook/hubspot', hubspotWebhookRoutes);
+}
 app.use('/webhook/calendly', calendlyWebhookRoutes);
 app.use('/webhook/zapier', zapierWebhookRoutes);
 app.use('/webhook/n8n', n8nWebhookRoutes);
@@ -510,12 +514,13 @@ app.listen(PORT, HOST, async () => {
     logWithTimestamp('error', '❌ Failed to start new lead monitor', { error: error.message, stack: error.stack });
   }
 
-  // Start the HubSpot polling service
-  try {
-    hubspotPollingService.start();
-    logWithTimestamp('info', '✅ HubSpot polling service started successfully');
-  } catch (error) {
-    logWithTimestamp('error', '❌ Failed to start HubSpot polling service', { error: error.message, stack: error.stack });
+  if (hubspotEnabled) {
+    try {
+      hubspotPollingService.start();
+      logWithTimestamp('info', '✅ HubSpot polling service started successfully');
+    } catch (error) {
+      logWithTimestamp('error', '❌ Failed to start HubSpot polling service', { error: error.message, stack: error.stack });
+    }
   }
 
   // Start the email queue processor
@@ -586,7 +591,7 @@ app.listen(PORT, HOST, async () => {
   console.log(`⏰ Workflow Processing: Active (5-minute intervals)`);
   console.log(`📅 Reminder Scheduler: Active`);
   console.log(`👁️  New Lead Monitor: Active (2-minute intervals)`);
-  console.log(`🔄 HubSpot Polling: Active`);
+  console.log(`🔄 HubSpot Polling: ${hubspotEnabled ? 'Active' : 'Disabled'}`);
   console.log(`📧 Email Queue Processor: Active`);
   console.log(`🔄 Follow-up Automation: Active (30-minute intervals)`);
   console.log(`📬 Automated Email Workflow: Active (5-minute intervals)`);
