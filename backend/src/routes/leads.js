@@ -117,7 +117,27 @@ router.post('/', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
-    const { email, firstName, lastName, phone, source = 'manual', priority = 'medium' } = req.body;
+    const {
+      email,
+      firstName,
+      lastName,
+      phone,
+      source = 'manual',
+      priority = 'medium',
+      assignedAgentId,
+      qualificationStatus = 'unqualified',
+      qualificationScore,
+      leadStage = 'new_inquiry',
+      schedulingState = 'not_started',
+      preferredContactChannel = 'email',
+      preferredMeetingWindow,
+      serviceInterest,
+      timeline,
+      budgetRange,
+      locationSummary,
+      qualificationNotes,
+      runAutomation = false,
+    } = req.body;
 
     if (!email) {
       return res.status(400).json({ error: 'Email is required' });
@@ -132,7 +152,7 @@ router.post('/', verifyToken, async (req, res) => {
     }
 
     // Create the new lead
-    const newLead = await insforgeDataService.createLead({
+    const leadPayload = {
       email: normalizedEmail,
       firstName: firstName || null,
       lastName: lastName || null,
@@ -140,13 +160,32 @@ router.post('/', verifyToken, async (req, res) => {
       source,
       priority,
       status: 'new',
+      assignedAgentId: assignedAgentId || null,
+      qualificationStatus,
+      qualificationScore: qualificationScore === '' || qualificationScore === undefined ? null : Number(qualificationScore),
+      leadStage,
+      schedulingState,
+      preferredContactChannel,
+      preferredMeetingWindow: preferredMeetingWindow || null,
+      serviceInterest: serviceInterest || null,
+      timeline: timeline || null,
+      budgetRange: budgetRange || null,
+      locationSummary: locationSummary || null,
+      qualificationNotes: qualificationNotes || null,
       lastUpdatedBy: req.user.id,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
-    });
+    };
+
+    const newLead = await insforgeDataService.createLead(leadPayload);
 
     if (!newLead) {
       return res.status(500).json({ error: 'Failed to create lead' });
+    }
+
+    let automation = null;
+    if (runAutomation) {
+      automation = await bobOrchestrator.syncLead(newLead);
     }
 
     console.log('New lead created:', {
@@ -157,7 +196,8 @@ router.post('/', verifyToken, async (req, res) => {
 
     res.status(201).json({ 
       message: 'Lead created successfully',
-      lead: newLead
+      lead: newLead,
+      automation
     });
   } catch (error) {
     console.error('Error creating lead:', error);

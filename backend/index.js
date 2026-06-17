@@ -20,6 +20,7 @@ import leadsRoutes from './src/routes/leads.js';
 import adminRoutes from './src/routes/admin.js';
 import feedbackRoutes from './src/routes/feedback.js';
 import integrationsRoutes from './src/routes/integrations.js';
+import testRoutes from './src/routes/test.js';
 
 import { WorkflowOrchestrator } from './workflow-orchestrator.js';
 import reminderScheduler from './src/services/reminder-scheduler.js';
@@ -76,6 +77,7 @@ logWithTimestamp('info', '🚀 Email Queue Processor initialized');
 // Create Express app
 const app = express();
 const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || '0.0.0.0';
 
 // Trust proxy for production deployment (Render, Heroku, etc.)
 // This allows express-rate-limit to properly identify users behind proxies
@@ -143,6 +145,7 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/leads', leadsRoutes);
 app.use('/api/feedback', feedbackRoutes);
 app.use('/api/integrations', integrationsRoutes);
+app.use('/api/test', testRoutes);
 app.use('/webhook/hubspot', hubspotWebhookRoutes);
 app.use('/webhook/calendly', calendlyWebhookRoutes);
 app.use('/webhook/zapier', zapierWebhookRoutes);
@@ -485,9 +488,9 @@ app.use('*', (req, res) => {
 });
 
 // Start server
-app.listen(PORT, async () => {
+app.listen(PORT, HOST, async () => {
   logWithTimestamp('info', '🚀 Starting Backend API Server with Integrated Workflow Management');
-  logWithTimestamp('info', `🌐 Server running on port ${PORT}`);
+  logWithTimestamp('info', `🌐 Server running on ${HOST}:${PORT}`);
   logWithTimestamp('info', `🔧 Environment: ${process.env.NODE_ENV || 'development'}`);
   
   // Start the automated reminder scheduler
