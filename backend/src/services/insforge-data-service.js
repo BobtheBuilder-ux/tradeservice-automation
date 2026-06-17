@@ -205,6 +205,10 @@ class InsForgeDataService {
     return updateById(TABLES.leads, leadId, patch);
   }
 
+  async listAgents() {
+    return select('agents');
+  }
+
   async getLatestConversationForLead(leadId) {
     const rows = await select(TABLES.leadConversations);
     return rows.filter((row) => row.leadId === leadId).sort(byCreatedDesc)[0] || null;
