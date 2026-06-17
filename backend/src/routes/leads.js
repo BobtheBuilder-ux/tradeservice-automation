@@ -1,10 +1,11 @@
 import express from 'express';
 import { db } from '../config/index.js';
 import { leads, agents, agentIntegrations } from '../db/schema.js';
-import { eq, desc, isNull, and, count } from 'drizzle-orm';
+import { eq, isNull, and, count } from 'drizzle-orm';
 import leadAutomationService from '../services/lead-automation-service.js';
 import bobOrchestrator from '../services/bob-orchestrator.js';
 import { authenticateToken } from '../middleware/auth.js';
+import insforgeDataService from '../services/insforge-data-service.js';
 
 const router = express.Router();
 const verifyToken = authenticateToken;
@@ -12,21 +13,7 @@ const verifyToken = authenticateToken;
 // GET /api/leads - Get leads based on user role
 router.get('/', verifyToken, async (req, res) => {
   try {
-    let leadsData;
-    
-    if (req.user.role === 'admin') {
-      // Admins can see all leads
-      leadsData = await db.select()
-        .from(leads)
-        .orderBy(desc(leads.createdAt));
-    } else {
-      // Agents can only see leads assigned to them
-      leadsData = await db.select()
-        .from(leads)
-        .where(eq(leads.assignedAgentId, req.user.id))
-        .orderBy(desc(leads.createdAt));
-    }
-
+    const leadsData = await insforgeDataService.listLeadsForUser(req.user);
     res.json({ leads: leadsData || [] });
   } catch (error) {
     console.error('Error in leads route:', error);
@@ -39,16 +26,12 @@ router.patch('/:leadId/qualification', verifyToken, async (req, res) => {
   try {
     const { leadId } = req.params;
 
-    const existingLead = await db.select()
-      .from(leads)
-      .where(eq(leads.id, leadId))
-      .limit(1);
+    const lead = await insforgeDataService.getLeadById(leadId);
 
-    if (!existingLead || existingLead.length === 0) {
+    if (!lead) {
       return res.status(404).json({ error: 'Lead not found' });
     }
 
-    const lead = existingLead[0];
     if (req.user.role !== 'admin' && lead.assignedAgentId !== req.user.id) {
       return res.status(403).json({ error: 'You can only update leads assigned to you' });
     }
@@ -93,18 +76,15 @@ router.patch('/:leadId/qualification', verifyToken, async (req, res) => {
     patch.lastUpdatedBy = req.user.id;
     patch.updatedAt = new Date();
 
-    const updatedLead = await db.update(leads)
-      .set(patch)
-      .where(eq(leads.id, leadId))
-      .returning();
+    const updatedLead = await insforgeDataService.updateLead(leadId, patch);
 
-    if (updatedLead && updatedLead[0]) {
-      await bobOrchestrator.syncLead(updatedLead[0]);
+    if (updatedLead) {
+      await bobOrchestrator.syncLead(updatedLead);
     }
 
     res.json({
       message: 'Lead qualification updated successfully',
-      lead: updatedLead[0]
+      lead: updatedLead
     });
   } catch (error) {
     console.error('Error updating lead qualification:', error);
@@ -120,21 +100,7 @@ router.get('/unassigned', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
-    const unassignedLeads = await db.select({
-      id: leads.id,
-      email: leads.email,
-      firstName: leads.firstName,
-      lastName: leads.lastName,
-      fullName: leads.fullName,
-      phone: leads.phone,
-      source: leads.source,
-      status: leads.status,
-      priority: leads.priority,
-      createdAt: leads.createdAt
-    })
-    .from(leads)
-    .where(isNull(leads.assignedAgentId))
-    .orderBy(desc(leads.createdAt));
+    const unassignedLeads = await insforgeDataService.listUnassignedLeads();
 
     res.json({ leads: unassignedLeads || [] });
   } catch (error) {
@@ -151,62 +117,87 @@ router.post('/', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
-    const { email, firstName, lastName, phone, source = 'manual', priority = 'medium' } = req.body;
+    const {
+      email,
+      firstName,
+      lastName,
+      phone,
+      source = 'manual',
+      priority = 'medium',
+      assignedAgentId,
+      qualificationStatus = 'unqualified',
+      qualificationScore,
+      leadStage = 'new_inquiry',
+      schedulingState = 'not_started',
+      preferredContactChannel = 'email',
+      preferredMeetingWindow,
+      serviceInterest,
+      timeline,
+      budgetRange,
+      locationSummary,
+      qualificationNotes,
+      runAutomation = false,
+    } = req.body;
 
     if (!email) {
       return res.status(400).json({ error: 'Email is required' });
     }
 
     // Check if lead with this email already exists
-    const existingLead = await db.select({ id: leads.id })
-      .from(leads)
-      .where(eq(leads.email, email))
-      .limit(1);
+    const normalizedEmail = email.trim().toLowerCase();
+    const existingLead = await insforgeDataService.getLeadByEmail(normalizedEmail);
 
-    if (existingLead && existingLead.length > 0) {
+    if (existingLead) {
       return res.status(409).json({ error: 'Lead with this email already exists' });
     }
 
     // Create the new lead
-    const newLead = await db.insert(leads).values({
-      email,
+    const leadPayload = {
+      email: normalizedEmail,
       firstName: firstName || null,
       lastName: lastName || null,
       phone: phone || null,
       source,
       priority,
       status: 'new',
+      assignedAgentId: assignedAgentId || null,
+      qualificationStatus,
+      qualificationScore: qualificationScore === '' || qualificationScore === undefined ? null : Number(qualificationScore),
+      leadStage,
+      schedulingState,
+      preferredContactChannel,
+      preferredMeetingWindow: preferredMeetingWindow || null,
+      serviceInterest: serviceInterest || null,
+      timeline: timeline || null,
+      budgetRange: budgetRange || null,
+      locationSummary: locationSummary || null,
+      qualificationNotes: qualificationNotes || null,
       lastUpdatedBy: req.user.id,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
-    }).returning({
-      id: leads.id,
-      email: leads.email,
-      firstName: leads.firstName,
-      lastName: leads.lastName,
-      fullName: leads.fullName,
-      phone: leads.phone,
-      source: leads.source,
-      status: leads.status,
-      priority: leads.priority,
-      assignedAgentId: leads.assignedAgentId,
-      createdAt: leads.createdAt,
-      updatedAt: leads.updatedAt
-    });
+    };
 
-    if (!newLead || newLead.length === 0) {
+    const newLead = await insforgeDataService.createLead(leadPayload);
+
+    if (!newLead) {
       return res.status(500).json({ error: 'Failed to create lead' });
     }
 
+    let automation = null;
+    if (runAutomation) {
+      automation = await bobOrchestrator.syncLead(newLead);
+    }
+
     console.log('New lead created:', {
-      id: newLead[0].id,
-      email: newLead[0].email,
-      name: `${newLead[0].firstName || ''} ${newLead[0].lastName || ''}`.trim()
+      id: newLead.id,
+      email: newLead.email,
+      name: `${newLead.firstName || ''} ${newLead.lastName || ''}`.trim()
     });
 
     res.status(201).json({ 
       message: 'Lead created successfully',
-      lead: newLead[0]
+      lead: newLead,
+      automation
     });
   } catch (error) {
     console.error('Error creating lead:', error);
@@ -222,24 +213,7 @@ router.get('/agents/available', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
-    const availableAgents = await db.select({
-      id: agents.id,
-      agentId: agents.agentId,
-      email: agents.email,
-      firstName: agents.firstName,
-      lastName: agents.lastName,
-      fullName: agents.fullName,
-      role: agents.role,
-      isActive: agents.isActive,
-      lastLogin: agents.lastLogin
-    })
-    .from(agents)
-    .where(and(
-      eq(agents.isActive, true),
-      eq(agents.emailVerified, true),
-      eq(agents.role, 'agent')
-    ))
-    .orderBy(agents.firstName, agents.lastName);
+    const availableAgents = await insforgeDataService.listAvailableAgents();
 
     res.json({ agents: availableAgents || [] });
   } catch (error) {

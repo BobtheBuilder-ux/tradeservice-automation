@@ -3,6 +3,7 @@ import { insforgeAdmin, insforgeClientConfig } from './insforge-client.js';
 const TABLES = {
   agents: 'agents',
   leads: 'leads',
+  agentIntegrations: 'agent_integrations',
   bobActions: 'bob_actions',
   leadConversations: 'lead_conversations',
   leadConversationMessages: 'lead_conversation_messages',
@@ -21,6 +22,7 @@ const CAMEL_TO_SNAKE_OVERRIDES = {
   maxRetries: 'max_retries',
   messageId: 'message_id',
   leadId: 'lead_id',
+  agentId: 'agent_id',
   conversationId: 'conversation_id',
   actionType: 'action_type',
   scheduledFor: 'scheduled_for',
@@ -30,6 +32,8 @@ const CAMEL_TO_SNAKE_OVERRIDES = {
   firstName: 'first_name',
   fullName: 'full_name',
   assignedAgentId: 'assigned_agent_id',
+  calendlyAccessToken: 'calendly_access_token',
+  connectedAt: 'connected_at',
   scheduledAt: 'scheduled_at',
   meetingScheduled: 'meeting_scheduled',
   trackingId: 'tracking_id',
@@ -137,6 +141,12 @@ async function selectById(table, id) {
   return rows[0] || null;
 }
 
+async function selectByColumn(table, column, value) {
+  assertReady();
+  const result = await insforgeAdmin.database.from(table).select('*').eq(column, value);
+  return (await unwrap(result, `select ${table} by ${column}`)).map(fromDbRecord);
+}
+
 async function insert(table, values) {
   assertReady();
   const records = Array.isArray(values) ? values : [values];
@@ -156,6 +166,12 @@ async function updateByColumn(table, column, value, patch) {
   const result = await insforgeAdmin.database.from(table).update(toDbRecord(patch)).eq(column, value).select();
   const rows = (await unwrap(result, `update ${table}`)).map(fromDbRecord);
   return rows[0] || null;
+}
+
+async function deleteById(table, id) {
+  assertReady();
+  const result = await insforgeAdmin.database.from(table).delete().eq('id', id);
+  await unwrap(result, `delete ${table}`);
 }
 
 function byCreatedDesc(a, b) {
@@ -182,10 +198,75 @@ class InsForgeDataService {
     return rows.sort(byCreatedDesc).slice(0, limit);
   }
 
+  async listLeadsForUser(user) {
+    const rows = await select(TABLES.leads);
+    const visibleRows = user?.role === 'admin'
+      ? rows
+      : rows.filter((row) => row.assignedAgentId === user?.id);
+
+    return visibleRows.sort(byCreatedDesc);
+  }
+
+  async listUnassignedLeads() {
+    const rows = await select(TABLES.leads);
+    return rows
+      .filter((row) => !row.assignedAgentId)
+      .sort(byCreatedDesc)
+      .map((row) => ({
+        id: row.id,
+        email: row.email,
+        firstName: row.firstName,
+        lastName: row.lastName,
+        fullName: row.fullName,
+        phone: row.phone,
+        source: row.source,
+        status: row.status,
+        priority: row.priority,
+        createdAt: row.createdAt,
+      }));
+  }
+
+  async getLeadByEmail(email) {
+    if (!email) return null;
+    const rows = await selectByColumn(TABLES.leads, 'email', email.trim().toLowerCase());
+    return rows[0] || null;
+  }
+
+  async createLead(values) {
+    const [lead] = await insert(TABLES.leads, values);
+    return lead;
+  }
+
   async getAgentByEmail(email) {
     if (!email) return null;
     const rows = await select(TABLES.agents);
     return rows.find((row) => row.email?.toLowerCase() === email.toLowerCase()) || null;
+  }
+
+  async getAgentById(agentId) {
+    return selectById(TABLES.agents, agentId);
+  }
+
+  async listAvailableAgents() {
+    const rows = await select(TABLES.agents);
+    return rows
+      .filter((row) => row.isActive && row.emailVerified && row.role === 'agent')
+      .sort((a, b) => {
+        const first = (a.firstName || '').localeCompare(b.firstName || '');
+        if (first !== 0) return first;
+        return (a.lastName || '').localeCompare(b.lastName || '');
+      })
+      .map((row) => ({
+        id: row.id,
+        agentId: row.agentId,
+        email: row.email,
+        firstName: row.firstName,
+        lastName: row.lastName,
+        fullName: row.fullName,
+        role: row.role,
+        isActive: row.isActive,
+        lastLogin: row.lastLogin,
+      }));
   }
 
   async createAgent(values) {
@@ -197,6 +278,10 @@ class InsForgeDataService {
     return updateById(TABLES.agents, agentId, patch);
   }
 
+  async deleteAgent(agentId) {
+    await deleteById(TABLES.agents, agentId);
+  }
+
   async getLeadById(leadId) {
     return selectById(TABLES.leads, leadId);
   }
@@ -206,7 +291,30 @@ class InsForgeDataService {
   }
 
   async listAgents() {
-    return select('agents');
+    return select(TABLES.agents);
+  }
+
+  async getAgentIntegration(agentId) {
+    const rows = await selectByColumn(TABLES.agentIntegrations, 'agent_id', agentId);
+    return rows[0] || null;
+  }
+
+  async upsertAgentIntegration(agentId, patch) {
+    const existing = await this.getAgentIntegration(agentId);
+    const values = {
+      ...patch,
+      connectedAt: new Date(),
+    };
+
+    if (existing) {
+      return updateById(TABLES.agentIntegrations, existing.id, values);
+    }
+
+    const [created] = await insert(TABLES.agentIntegrations, {
+      agentId,
+      ...values,
+    });
+    return created;
   }
 
   async getLatestConversationForLead(leadId) {

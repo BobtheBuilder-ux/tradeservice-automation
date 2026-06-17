@@ -3,6 +3,7 @@ import { generateTrackingId } from '../utils/crypto.js';
 import logger from '../utils/logger.js';
 import { syncHubSpotLeads, fetchHubSpotLeads } from './hubspot-lead-service.js';
 import insforgeDataService from './insforge-data-service.js';
+import { hubspotEnabled } from '../config/index.js';
 
 /**
  * HubSpot Lead Polling Service
@@ -43,9 +44,7 @@ class HubSpotPollingService {
     }
 
     try {
-      if (!process.env.HUBSPOT_ACCESS_TOKEN) {
-        logger.warn('HubSpot polling service disabled because HUBSPOT_ACCESS_TOKEN is not configured');
-        console.log('⚠️ [HUBSPOT POLLING] Disabled: HUBSPOT_ACCESS_TOKEN is not configured');
+      if (!hubspotEnabled) {
         return;
       }
 

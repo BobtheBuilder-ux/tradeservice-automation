@@ -7,13 +7,14 @@ import { getRuntimeConfig } from '../utils/runtime-config.js';
 dotenv.config();
 
 const runtimeConfig = getRuntimeConfig();
+export const hubspotEnabled = process.env.HUBSPOT_ENABLED === 'true' && Boolean(process.env.HUBSPOT_ACCESS_TOKEN);
 
 // Validate required environment variables (warn in development, error in production)
 const missingVars = [];
 if (!runtimeConfig.databaseUrl && !process.env.INSFORGE_API_KEY) {
   missingVars.push('DATABASE_URL or INSFORGE_API_KEY');
 }
-if (!process.env.HUBSPOT_ACCESS_TOKEN) {
+if (process.env.HUBSPOT_ENABLED === 'true' && !process.env.HUBSPOT_ACCESS_TOKEN) {
   missingVars.push('HUBSPOT_ACCESS_TOKEN');
 }
 if (missingVars.length > 0) {
@@ -29,7 +30,7 @@ export { db };
 export { checkDatabaseConnection };
 
 // HubSpot client configuration
-export const hubspotClient = process.env.HUBSPOT_ACCESS_TOKEN
+export const hubspotClient = hubspotEnabled
   ? new HubSpotClient({
       accessToken: process.env.HUBSPOT_ACCESS_TOKEN
     })
@@ -56,7 +57,8 @@ export const appConfig = {
   port: process.env.PORT || 3000,
   nodeEnv: process.env.NODE_ENV || 'development',
   logLevel: process.env.LOG_LEVEL || 'info',
-  insforgeApiBaseUrl: runtimeConfig.insforgeApiBaseUrl
+  insforgeApiBaseUrl: runtimeConfig.insforgeApiBaseUrl,
+  hubspotEnabled
 };
 
 export default {
