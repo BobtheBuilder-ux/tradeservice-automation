@@ -61,30 +61,12 @@ class ApiClient {
   }
 
   // Authentication methods
-  async register(userData) {
-    const response = await this.request('/api/auth/register', {
-      method: 'POST',
-      body: JSON.stringify(userData),
-    });
-    
-    if (response.token) {
-      this.setAuthToken(response.token);
-    }
-    
-    return response;
+  async register() {
+    throw new Error('Password registration has been removed. Use Google sign-in.');
   }
 
-  async login(credentials) {
-    const response = await this.request('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify(credentials),
-    });
-    
-    if (response.token) {
-      this.setAuthToken(response.token);
-    }
-    
-    return response;
+  async login() {
+    throw new Error('Password login has been removed. Use Google sign-in.');
   }
 
   async logout() {
@@ -92,32 +74,20 @@ class ApiClient {
     return { success: true };
   }
 
-  async forgotPassword(email) {
-    return await this.request('/api/auth/forgot-password', {
-      method: 'POST',
-      body: JSON.stringify({ email }),
-    });
+  async forgotPassword() {
+    throw new Error('Password reset has been removed. Use Google sign-in.');
   }
 
-  async resetPassword(token, newPassword) {
-    return await this.request('/api/auth/reset-password', {
-      method: 'POST',
-      body: JSON.stringify({ token, newPassword }),
-    });
+  async resetPassword() {
+    throw new Error('Password reset has been removed. Use Google sign-in.');
   }
 
-  async verifyEmail(token) {
-    return await this.request('/api/auth/verify-email', {
-      method: 'POST',
-      body: JSON.stringify({ token }),
-    });
+  async verifyEmail() {
+    throw new Error('Email verification is handled by Google and InsForge.');
   }
 
-  async testEmail(email) {
-    return await this.request('/api/auth/test-email', {
-      method: 'POST',
-      body: JSON.stringify({ email }),
-    });
+  async testEmail() {
+    throw new Error('Legacy authentication test email has been removed.');
   }
 
   // Health check

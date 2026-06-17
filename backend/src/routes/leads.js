@@ -2,54 +2,12 @@ import express from 'express';
 import { db } from '../config/index.js';
 import { leads, agents, agentIntegrations } from '../db/schema.js';
 import { eq, desc, isNull, and, count } from 'drizzle-orm';
-import jwt from 'jsonwebtoken';
 import leadAutomationService from '../services/lead-automation-service.js';
 import bobOrchestrator from '../services/bob-orchestrator.js';
-import { getJwtSecret } from '../utils/auth-config.js';
+import { authenticateToken } from '../middleware/auth.js';
 
 const router = express.Router();
-const JWT_SECRET = getJwtSecret();
-
-// Middleware to verify JWT token
-const verifyToken = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'No token provided' });
-    }
-
-    const token = authHeader.substring(7);
-    const decoded = jwt.verify(token, JWT_SECRET);
-    
-    // Get user from database
-    const user = await db.select({
-      id: agents.id,
-      agentId: agents.agentId,
-      email: agents.email,
-      firstName: agents.firstName,
-      lastName: agents.lastName,
-      role: agents.role,
-      emailVerified: agents.emailVerified
-    })
-    .from(agents)
-    .where(eq(agents.id, decoded.userId))
-    .limit(1);
-
-    if (!user || user.length === 0) {
-      return res.status(401).json({ error: 'User not found' });
-    }
-
-    if (!user[0].emailVerified) {
-      return res.status(401).json({ error: 'Email not verified' });
-    }
-
-    req.user = user[0];
-    next();
-  } catch (error) {
-    console.error('Token verification failed:', error);
-    return res.status(401).json({ error: 'Invalid token' });
-  }
-};
+const verifyToken = authenticateToken;
 
 // GET /api/leads - Get leads based on user role
 router.get('/', verifyToken, async (req, res) => {

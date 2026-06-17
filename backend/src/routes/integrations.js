@@ -1,48 +1,15 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
-import { getJwtSecret } from '../utils/auth-config.js';
 import { db } from '../config/index.js';
-import { agentIntegrations, agents } from '../db/schema.js';
+import { agentIntegrations } from '../db/schema.js';
 import { eq } from 'drizzle-orm';
+import { authenticateToken } from '../middleware/auth.js';
+import { getJwtSecret } from '../utils/auth-config.js';
 
 const router = express.Router();
 const JWT_SECRET = getJwtSecret();
 
-// JWT middleware (lighter than leads.js: does not require emailVerified)
-const verifyToken = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'No token provided' });
-    }
-    const token = authHeader.substring(7);
-    const decoded = jwt.verify(token, JWT_SECRET);
-
-    const user = await db
-      .select({
-        id: agents.id,
-        agentId: agents.agentId,
-        email: agents.email,
-        firstName: agents.firstName,
-        lastName: agents.lastName,
-        role: agents.role,
-        emailVerified: agents.emailVerified,
-      })
-      .from(agents)
-      .where(eq(agents.id, decoded.userId))
-      .limit(1);
-
-    if (!user || user.length === 0) {
-      return res.status(401).json({ error: 'User not found' });
-    }
-
-    req.user = user[0];
-    next();
-  } catch (error) {
-    console.error('Token verification failed:', error);
-    return res.status(401).json({ error: 'Invalid token' });
-  }
-};
+const verifyToken = authenticateToken;
 
 // Helper: upsert agent integration tokens
 async function upsertAgentIntegration(agentId, update) {

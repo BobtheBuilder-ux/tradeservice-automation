@@ -1,162 +1,156 @@
 import { useState, useEffect } from 'react';
 import { apiClient } from './api';
+import { insforge } from './insforge';
 
-// Authentication state management
+const AUTH_TOKEN_STORAGE_KEY = 'auth_token';
+
+export function getInsForgeAccessToken() {
+  if (typeof window === 'undefined') return null;
+
+  const headers = insforge.getHttpClient().getHeaders();
+  const authorization = headers.Authorization || headers.authorization || '';
+  if (!authorization.startsWith('Bearer ')) return null;
+
+  return authorization.slice(7);
+}
+
+export function syncApiClientWithInsForge() {
+  const token = getInsForgeAccessToken();
+  apiClient.setAuthToken(token);
+  return token;
+}
+
 class AuthManager {
   constructor() {
     this.user = null;
     this.isAuthenticated = false;
     this.listeners = [];
+    this.initialized = false;
   }
 
-  // Subscribe to auth state changes
   onAuthStateChange(callback) {
     this.listeners.push(callback);
-    // Return unsubscribe function
     return () => {
       this.listeners = this.listeners.filter(listener => listener !== callback);
     };
   }
 
-  // Notify all listeners of auth state change
   notifyListeners() {
     this.listeners.forEach(callback => {
       callback(this.user, this.isAuthenticated);
     });
   }
 
-  // Initialize auth state from stored token
   async initialize() {
-    const token = apiClient.getAuthToken();
-    console.log('Initializing auth, token from localStorage:', token ? 'present' : 'not found');
-    if (token) {
-      try {
-        console.log('Verifying token with /api/auth/me endpoint');
-        // Verify token is still valid by checking user info
-        const response = await apiClient.request('/api/auth/me');
-        this.isAuthenticated = true;
-        this.user = response.user;
-        this.notifyListeners();
-        console.log('Token verified successfully, user:', this.user);
-      } catch (error) {
-        console.error('Token verification failed:', error);
-        // Token is invalid, clear it
-        await this.signOut();
-      }
-    } else {
-      console.log('No token found, user not authenticated');
-    }
-  }
+    if (this.initialized && this.user) return;
 
-  // Sign up new user
-  async signUp(userData) {
     try {
-      const response = await apiClient.register(userData);
-      
-      if (response.token) {
-        console.log('Sign up successful, saving auth token to localStorage');
-        apiClient.setAuthToken(response.token);
-        this.user = response.user || { email: userData.email };
-        this.isAuthenticated = true;
-        this.notifyListeners();
-        console.log('User authenticated:', this.user);
+      const { data, error } = await insforge.auth.getCurrentUser();
+      if (error || !data?.user) {
+        this.clearLocalState();
+        return;
       }
-      
-      return { data: response, error: null };
+
+      const token = syncApiClientWithInsForge();
+      if (!token) {
+        this.clearLocalState();
+        return;
+      }
+
+      const response = await apiClient.request('/api/auth/me');
+      this.user = response.user;
+      this.isAuthenticated = true;
+      this.initialized = true;
+      this.notifyListeners();
     } catch (error) {
-      console.error('Sign up error:', error);
-      return { data: null, error: { message: error.message } };
+      console.error('Google authentication initialization failed:', error);
+      await this.signOut();
     }
   }
 
-  // Sign in existing user
-  async signIn(credentials) {
-    try {
-      const response = await apiClient.login(credentials);
-      
-      if (response.token) {
-        console.log('Sign in successful, saving auth token to localStorage');
-        apiClient.setAuthToken(response.token);
-        this.user = response.user || { email: credentials.email };
-        this.isAuthenticated = true;
-        this.notifyListeners();
-        console.log('User authenticated:', this.user);
-      }
-      
-      return { data: response, error: null };
-    } catch (error) {
-      console.error('Sign in error:', error);
-      return { data: null, error: { message: error.message } };
+  async signInWithGoogle() {
+    const redirectTo = typeof window !== 'undefined'
+      ? `${window.location.origin}/login`
+      : '/login';
+
+    const { error } = await insforge.auth.signInWithOAuth('google', {
+      redirectTo,
+      additionalParams: { prompt: 'select_account' },
+    });
+
+    if (error) {
+      return { data: null, error: { message: error.message || 'Google sign-in failed' } };
     }
+
+    return { data: { provider: 'google' }, error: null };
   }
 
-  // Sign out user
+  async signIn() {
+    return this.signInWithGoogle();
+  }
+
+  async signUp() {
+    return this.signInWithGoogle();
+  }
+
   async signOut() {
     try {
-      console.log('Signing out user, clearing token from localStorage');
-      await apiClient.logout();
-      apiClient.setAuthToken(null);
-      this.user = null;
-      this.isAuthenticated = false;
-      this.notifyListeners();
-      console.log('User signed out successfully');
-      return { error: null };
+      await insforge.auth.signOut();
     } catch (error) {
-      console.error('Sign out error:', error);
-      return { error: { message: error.message } };
+      console.error('InsForge sign out failed:', error);
     }
+
+    this.clearLocalState();
+    this.notifyListeners();
+    return { error: null };
   }
 
-  // Reset password
-  async resetPassword(email) {
-    try {
-      const response = await apiClient.forgotPassword(email);
-      return { data: response, error: null };
-    } catch (error) {
-      return { data: null, error: { message: error.message } };
+  clearLocalState() {
+    apiClient.setAuthToken(null);
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
     }
+    this.user = null;
+    this.isAuthenticated = false;
+    this.initialized = true;
   }
 
-  // Update password with reset token
-  async updatePassword(token, newPassword) {
-    try {
-      const response = await apiClient.resetPassword(token, newPassword);
-      return { data: response, error: null };
-    } catch (error) {
-      return { data: null, error: { message: error.message } };
-    }
+  async resetPassword() {
+    return {
+      data: null,
+      error: { message: 'Password reset is no longer used. Please sign in with Google.' },
+    };
   }
 
-  // Verify email
-  async verifyEmail(token) {
-    try {
-      const response = await apiClient.verifyEmail(token);
-      return { data: response, error: null };
-    } catch (error) {
-      return { data: null, error: { message: error.message } };
-    }
+  async updatePassword() {
+    return {
+      data: null,
+      error: { message: 'Password login is no longer used. Please sign in with Google.' },
+    };
   }
 
-  // Get current user
+  async verifyEmail() {
+    return {
+      data: null,
+      error: { message: 'Email verification is handled by Google and InsForge.' },
+    };
+  }
+
   getUser() {
     return this.user;
   }
 
-  // Check if user is authenticated
   isUserAuthenticated() {
     return this.isAuthenticated;
   }
 }
 
-// Create and export singleton instance
 export const authManager = new AuthManager();
 
-// Initialize auth state when module loads (client-side only)
 if (typeof window !== 'undefined') {
   authManager.initialize();
 }
 
-// Validate user permissions based on role
 export const validatePermissions = (user) => {
   if (!user) {
     return {
@@ -169,10 +163,10 @@ export const validatePermissions = (user) => {
     };
   }
 
-  const role = user.role || 'user';
+  const role = user.role || 'agent';
   
   return {
-    canViewLeads: ['admin', 'agent', 'user'].includes(role),
+    canViewLeads: ['admin', 'agent'].includes(role),
     canEditLeads: ['admin', 'agent'].includes(role),
     canDeleteLeads: ['admin'].includes(role),
     canManageAgents: ['admin'].includes(role),
@@ -181,38 +175,33 @@ export const validatePermissions = (user) => {
   };
 };
 
-// React hook for authentication
 export const useAuth = () => {
   const [user, setUser] = useState(authManager.getUser());
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Initialize auth state only if not already initialized
     const initAuth = async () => {
-      if (!authManager.getUser()) {
-        await authManager.initialize();
-      }
+      await authManager.initialize();
       setUser(authManager.getUser());
       setLoading(false);
     };
 
     initAuth();
 
-    // Subscribe to auth state changes
-    const unsubscribe = authManager.onAuthStateChange((user, isAuthenticated) => {
-      setUser(user);
+    const unsubscribe = authManager.onAuthStateChange((nextUser) => {
+      setUser(nextUser);
       setLoading(false);
     });
 
     return unsubscribe;
-  }, []); // Empty dependency array to prevent re-initialization
+  }, []);
 
   return { user, loading, isAuthenticated: !!user };
 };
 
-// Export individual functions for backward compatibility
-export const signUp = (userData) => authManager.signUp(userData);
-export const signIn = (credentials) => authManager.signIn(credentials);
+export const signUp = () => authManager.signUp();
+export const signIn = () => authManager.signInWithGoogle();
+export const signInWithGoogle = () => authManager.signInWithGoogle();
 export const signOut = () => authManager.signOut();
 export const resetPassword = (email) => authManager.resetPassword(email);
 export const updatePassword = (token, newPassword) => authManager.updatePassword(token, newPassword);
@@ -221,5 +210,4 @@ export const getUser = () => authManager.getUser();
 export const isAuthenticated = () => authManager.isUserAuthenticated();
 export const onAuthStateChange = (callback) => authManager.onAuthStateChange(callback);
 
-// Export the manager class
 export default AuthManager;

@@ -1,81 +1,18 @@
 import express from 'express';
-import jwt from 'jsonwebtoken';
-import bcrypt from 'bcryptjs';
 import { db } from '../config/index.js';
 import { agents, bobActions, leadConversations, leads } from '../db/schema.js';
 import { eq, count, or, inArray, and, desc, sql } from 'drizzle-orm';
-import emailService from '../services/email-service.js';
 import dotenv from 'dotenv';
-import { getJwtSecret } from '../utils/auth-config.js';
+import { authenticateToken, requireRole } from '../middleware/auth.js';
 import { buildCallOutcomeLeadPatch, CALL_OUTCOMES, isValidCallOutcome } from '../services/call-outcome-policy.js';
+import insforgeDataService from '../services/insforge-data-service.js';
+import { buildFreshEmailActionPayload } from '../services/fresh-email-draft-service.js';
 
 dotenv.config();
 
 const router = express.Router();
 
-const JWT_SECRET = getJwtSecret();
-
-// Middleware to verify admin access
-const verifyAdmin = async (req, res, next) => {
-  try {
-    const authHeader = req.headers.authorization;
-    
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({
-        error: 'No valid authorization token provided'
-      });
-    }
-
-    const token = authHeader.substring(7);
-    const decoded = jwt.verify(token, JWT_SECRET);
-    
-    // Get user from database to verify admin role
-    const userResult = await db.select({
-      id: agents.id,
-      email: agents.email,
-      role: agents.role,
-      emailVerified: agents.emailVerified
-    })
-    .from(agents)
-    .where(eq(agents.id, decoded.userId))
-    .limit(1);
-
-    if (!userResult || userResult.length === 0 || !userResult[0].emailVerified) {
-      return res.status(401).json({
-        error: 'User not found or not verified'
-      });
-    }
-
-    const user = userResult[0];
-
-    if (user.role !== 'admin') {
-      return res.status(403).json({
-        error: 'Admin access required'
-      });
-    }
-
-    req.user = user;
-    next();
-  } catch (jwtError) {
-    return res.status(401).json({
-      error: 'Invalid or expired token'
-    });
-  }
-};
-
-// Generate random password for new agents
-const generateRandomPassword = () => {
-  return Math.random().toString(36).slice(-12) + Math.random().toString(36).slice(-12);
-};
-
-// Generate password reset token
-const generateResetToken = (email) => {
-  return jwt.sign(
-    { type: 'reset', email, timestamp: Date.now() },
-    JWT_SECRET,
-    { expiresIn: '24h' }
-  );
-};
+const verifyAdmin = [authenticateToken, requireRole('admin')];
 
 // AGENT MANAGEMENT ENDPOINTS
 
@@ -124,10 +61,12 @@ router.post('/agents', verifyAdmin, async (req, res) => {
       });
     }
 
+    const normalizedEmail = email.trim().toLowerCase();
+
     // Check if user already exists
     const existingUserResult = await db.select({ id: agents.id })
       .from(agents)
-      .where(eq(agents.email, email))
+      .where(eq(agents.email, normalizedEmail))
       .limit(1);
 
     if (existingUserResult.length > 0) {
@@ -136,24 +75,19 @@ router.post('/agents', verifyAdmin, async (req, res) => {
       });
     }
 
-    // Generate temporary password and reset token
-    const tempPassword = generateRandomPassword();
-    const hashedPassword = await bcrypt.hash(tempPassword, 12);
-    const resetToken = generateResetToken(email);
+    const nameParts = name.trim().split(/\s+/);
 
-    // Create user with reset token
+    // Create portal account record. Authentication is handled by InsForge Google OAuth.
     const newAgentResult = await db.insert(agents)
       .values({
-        fullName: name,
-        email,
-        passwordHash: hashedPassword,
+        fullName: name.trim(),
+        firstName: nameParts[0] || name.trim(),
+        lastName: nameParts.slice(1).join(' '),
+        email: normalizedEmail,
+        passwordHash: null,
         role,
-        emailVerified: true, // Auto-verify admin-created accounts
-        verificationToken: resetToken,
-        agentToken: resetToken,
-        agentTokenExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
-        resetToken: resetToken,
-        resetTokenExpires: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        emailVerified: true,
+        isActive: true,
         createdAt: new Date()
       })
       .returning();
@@ -167,46 +101,17 @@ router.post('/agents', verifyAdmin, async (req, res) => {
 
     const newAgent = newAgentResult[0];
 
-    // Send credentials email
-    try {
-      const emailResult = await emailService.sendAgentCredentialsEmail(
-        email,
-        name,
-        tempPassword,
-        resetToken
-      );
-
-      if (!emailResult.success) {
-        console.error('Failed to send credentials email:', emailResult.error);
-        // Don't fail the creation if email fails, just log it
-      }
-
-      res.status(201).json({
-        message: 'Agent created successfully and credentials sent via email',
-        agent: {
-          id: newAgent.id,
-          name: newAgent.name,
-          email: newAgent.email,
-          role: newAgent.role
-        },
-        emailSent: emailResult.success
-      });
-    } catch (emailError) {
-      console.error('Error sending credentials email:', emailError);
-      
-      // Still return success for agent creation
-      res.status(201).json({
-        message: 'Agent created successfully, but failed to send credentials email',
-        agent: {
-          id: newAgent.id,
-          name: newAgent.name,
-          email: newAgent.email,
-          role: newAgent.role
-        },
-        emailSent: false,
-        emailError: 'Failed to send credentials email'
-      });
-    }
+    res.status(201).json({
+      success: true,
+      message: 'Portal user created successfully. They can now sign in with Google using this email address.',
+      agent: {
+        id: newAgent.id,
+        name: newAgent.fullName,
+        email: newAgent.email,
+        role: newAgent.role
+      },
+      authProvider: 'insforge_google'
+    });
   } catch (error) {
     console.error('Error in create agent route:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -466,6 +371,88 @@ router.get('/bob-activity', verifyAdmin, async (req, res) => {
   } catch (error) {
     console.error('Error in get Bob activity route:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Create a fresh Bob email draft for admin approval
+router.post('/bob-activity/email-drafts', verifyAdmin, async (req, res) => {
+  try {
+    const { leadId, goal = 'booking_invite', bookingLink } = req.body;
+
+    if (!leadId) {
+      return res.status(400).json({ success: false, error: 'leadId is required' });
+    }
+
+    const lead = await insforgeDataService.getLeadById(leadId);
+    if (!lead) {
+      return res.status(404).json({ success: false, error: 'Lead not found' });
+    }
+
+    const payload = buildFreshEmailActionPayload({
+      lead,
+      goal,
+      bookingLink,
+      requestedBy: req.user.id,
+    });
+
+    const draftAction = await insforgeDataService.createBobAction({
+      leadId: lead.id,
+      conversationId: null,
+      actionType: 'draft_fresh_email',
+      channel: 'email',
+      status: payload.safety.approvedForQueue ? 'awaiting_approval' : 'needs_revision',
+      reason: `Fresh ${payload.emailGoal} email draft generated for review`,
+      payload,
+      scheduledFor: null,
+    });
+
+    res.status(201).json({
+      success: true,
+      draft: draftAction,
+      safety: payload.safety,
+    });
+  } catch (error) {
+    console.error('Error creating Bob fresh email draft:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+});
+
+// Approve a fresh Bob email draft and queue it for the Bob executor
+router.post('/bob-activity/email-drafts/:actionId/approve', verifyAdmin, async (req, res) => {
+  try {
+    const { actionId } = req.params;
+    const draftAction = await insforgeDataService.getBobActionById(actionId);
+
+    if (!draftAction || draftAction.actionType !== 'draft_fresh_email') {
+      return res.status(404).json({ success: false, error: 'Fresh email draft not found' });
+    }
+
+    if (draftAction.payload?.safety?.errors?.length) {
+      return res.status(400).json({
+        success: false,
+        error: 'Draft has safety errors and cannot be approved until revised',
+        safety: draftAction.payload.safety,
+      });
+    }
+
+    const approvedAction = await insforgeDataService.updateBobAction(actionId, {
+      actionType: 'send_fresh_email',
+      status: 'pending',
+      scheduledFor: new Date(),
+      result: {
+        approvedBy: req.user.id,
+        approvedAt: new Date().toISOString(),
+      },
+      updatedAt: new Date(),
+    });
+
+    res.json({
+      success: true,
+      action: approvedAction,
+    });
+  } catch (error) {
+    console.error('Error approving Bob fresh email draft:', error);
+    res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
