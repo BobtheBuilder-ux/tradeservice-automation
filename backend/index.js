@@ -31,7 +31,7 @@ import followUpAutomationService from './src/services/follow-up-automation-servi
 import automatedEmailWorkflowService from './src/services/automated-email-workflow-service.js';
 import bobOrchestrator from './src/services/bob-orchestrator.js';
 import bobActionExecutor from './src/services/bob-action-executor.js';
-import { calendlyConfig, db, hubspotEnabled } from './src/config/index.js';
+import { calendlyConfig, db, automatedEmailWorkflowEnabled, hubspotEnabled } from './src/config/index.js';
 import { leadProcessingLogs } from './src/db/schema.js';
 import logger from './utils/logger.js';
 
@@ -539,12 +539,15 @@ app.listen(PORT, HOST, async () => {
     logWithTimestamp('error', '❌ Failed to start follow-up automation service', { error: error.message, stack: error.stack });
   }
 
-  // Start the automated email workflow service
-  try {
-    automatedEmailWorkflowService.startContinuousMonitoring();
-    logWithTimestamp('info', '✅ Automated email workflow service started successfully');
-  } catch (error) {
-    logWithTimestamp('error', '❌ Failed to start automated email workflow service', { error: error.message, stack: error.stack });
+  if (automatedEmailWorkflowEnabled) {
+    try {
+      automatedEmailWorkflowService.startContinuousMonitoring();
+      logWithTimestamp('info', '✅ Automated email workflow service started successfully');
+    } catch (error) {
+      logWithTimestamp('error', '❌ Failed to start automated email workflow service', { error: error.message, stack: error.stack });
+    }
+  } else {
+    logWithTimestamp('info', 'ℹ️ Legacy automated email workflow service disabled; Bob/InsForge email queue remains active');
   }
   
   // Initialize workflow processing

@@ -11,6 +11,7 @@ import logger from '../utils/logger.js';
 import { generateTrackingId } from '../utils/crypto.js';
 import emailTemplateService from './email-template-service.js';
 import { hashForLogging } from '../utils/crypto.js';
+import { automatedEmailWorkflowEnabled } from '../config/index.js';
 
 class AutomatedEmailWorkflowService {
   constructor() {
@@ -370,6 +371,11 @@ class AutomatedEmailWorkflowService {
    * Start continuous monitoring for lead status updates
    */
   async startContinuousMonitoring() {
+    if (!automatedEmailWorkflowEnabled) {
+      logger.info('Legacy automated email workflow monitoring is disabled; skipping Drizzle workflow_automation polling');
+      return;
+    }
+
     if (this.isRunning) {
       logger.warn('Email workflow monitoring is already running');
       return;
