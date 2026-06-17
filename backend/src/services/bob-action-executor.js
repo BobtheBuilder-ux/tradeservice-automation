@@ -200,6 +200,69 @@ class BobActionExecutor {
     });
   }
 
+  async assignLeadWithInsForge(lead, trackingId) {
+    if (!lead?.id) {
+      return { success: false, error: 'Lead not found', lead: null, agent: null };
+    }
+
+    if (lead.assignedAgentId) {
+      return {
+        success: true,
+        message: 'Lead already assigned',
+        lead,
+        agent: null,
+        alreadyAssigned: true,
+      };
+    }
+
+    const [agents, leads] = await Promise.all([
+      insforgeDataService.listAgents(),
+      insforgeDataService.listRecentLeads(1000),
+    ]);
+
+    const activeAgents = agents.filter((agent) => agent.isActive !== false && ['agent', 'admin'].includes(agent.role || 'agent'));
+
+    if (activeAgents.length === 0) {
+      return { success: false, error: 'No active agents available for assignment', lead: null, agent: null };
+    }
+
+    const leadCounts = leads.reduce((acc, row) => {
+      if (row.assignedAgentId) {
+        acc[row.assignedAgentId] = (acc[row.assignedAgentId] || 0) + 1;
+      }
+      return acc;
+    }, {});
+
+    const selectedAgent = activeAgents
+      .sort((a, b) => (leadCounts[a.id] || 0) - (leadCounts[b.id] || 0) || String(a.createdAt || '').localeCompare(String(b.createdAt || '')))[0];
+
+    const updatedLead = await insforgeDataService.updateLead(lead.id, {
+      assignedAgentId: selectedAgent.id,
+      status: 'assigned',
+      updatedAt: new Date(),
+    });
+
+    logger.info('✅ Lead assigned through InsForge data service', {
+      trackingId,
+      leadId: lead.id,
+      agentId: selectedAgent.id,
+      previousLeadCount: leadCounts[selectedAgent.id] || 0,
+    });
+
+    return {
+      success: true,
+      message: 'Lead automatically assigned successfully',
+      lead: updatedLead,
+      agent: {
+        id: selectedAgent.id,
+        agentId: selectedAgent.agentId,
+        name: selectedAgent.fullName || selectedAgent.firstName || selectedAgent.name || 'Assigned agent',
+        email: selectedAgent.email,
+        previousLeadCount: leadCounts[selectedAgent.id] || 0,
+      },
+    };
+  }
+
   async queueEmailAction(action, lead) {
     if (!lead.email) {
       await this.markAction(action.id, 'failed', {
@@ -442,8 +505,7 @@ class BobActionExecutor {
     switch (action.actionType) {
       case 'assign_lead': {
         const trackingId = lead.trackingId || generateTrackingId();
-        const { default: leadAutomationService } = await import('./lead-automation-service.js');
-        const result = await leadAutomationService.autoAssignLead(lead.id, trackingId);
+        const result = await this.assignLeadWithInsForge(lead, trackingId);
 
         if (!result.success) {
           await this.markAction(action.id, 'deferred', {

@@ -290,6 +290,10 @@ class InsForgeDataService {
     return updateById(TABLES.leads, leadId, patch);
   }
 
+  async listAgents() {
+    return select(TABLES.agents);
+  }
+
   async getAgentIntegration(agentId) {
     const rows = await selectByColumn(TABLES.agentIntegrations, 'agent_id', agentId);
     return rows[0] || null;
