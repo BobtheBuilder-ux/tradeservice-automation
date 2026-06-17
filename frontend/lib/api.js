@@ -28,6 +28,7 @@ class ApiClient {
   }
 
   async request(endpoint, options = {}) {
+    const { silent = false, ...fetchOptions } = options;
     // Ensure endpoint starts with /api for backend routes
     const apiEndpoint = endpoint.startsWith('/api') ? endpoint : `/api${endpoint}`;
     const url = `${this.baseURL}${apiEndpoint}`;
@@ -36,9 +37,9 @@ class ApiClient {
     const config = {
       headers: {
         'Content-Type': 'application/json',
-        ...options.headers,
+        ...fetchOptions.headers,
       },
-      ...options,
+      ...fetchOptions,
     };
 
     if (token) {
@@ -55,7 +56,9 @@ class ApiClient {
 
       return data;
     } catch (error) {
-      console.error('API request failed:', error);
+      if (!silent) {
+        console.error('[ApiClient.request] Request failed:', error);
+      }
       throw error;
     }
   }

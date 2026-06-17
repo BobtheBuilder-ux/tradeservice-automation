@@ -7,7 +7,7 @@ export const authenticateToken = async (req, res, next) => {
     next();
   } catch (error) {
     if (error.statusCode === 401) {
-      return res.status(401).json({ error: error.message || 'Authentication required' });
+      return res.status(401).json({ error: 'Session expired. Please sign in again.' });
     }
 
     logger.error('InsForge authentication middleware error:', error);
