@@ -60,11 +60,17 @@ export function assertPortalAccess(user, requiredRole) {
   }
 }
 
-export async function getInsForgeUserFromToken(accessToken) {
+export function createInsForgeUserClient(accessToken) {
   const client = createClient({
     baseUrl: insforgeClientConfig.baseUrl,
-    accessToken,
+    isServerMode: true,
   });
+  client.setAccessToken(accessToken);
+  return client;
+}
+
+export async function getInsForgeUserFromToken(accessToken) {
+  const client = createInsForgeUserClient(accessToken);
 
   const { data, error } = await client.auth.getCurrentUser();
   if (error || !data?.user) {

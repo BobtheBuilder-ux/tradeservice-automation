@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   assertPortalAccess,
   buildPortalUser,
+  createInsForgeUserClient,
   getBearerToken,
   normalizePortalRole,
   parseAdminEmails,
@@ -20,6 +21,11 @@ test('parseAdminEmails normalizes comma-separated admin email list', () => {
   assert.equal(emails.has('owner@9qc.ca'), true);
   assert.equal(emails.has('admin@9qc.ca'), true);
   assert.equal(emails.has(''), false);
+});
+
+test('createInsForgeUserClient configures server-mode session validation with provided access token', () => {
+  const client = createInsForgeUserClient('test-access-token');
+  assert.equal(client.getHttpClient().getHeaders().Authorization, 'Bearer test-access-token');
 });
 
 test('buildPortalUser maps Google user to admin when email is configured as admin', () => {

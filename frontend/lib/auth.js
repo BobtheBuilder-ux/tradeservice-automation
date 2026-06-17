@@ -57,14 +57,22 @@ class AuthManager {
         return;
       }
 
-      const response = await apiClient.request('/api/auth/me');
+      let response;
+      try {
+        response = await apiClient.request('/api/auth/me', { silent: true });
+      } catch {
+        this.clearLocalState();
+        this.notifyListeners();
+        return;
+      }
+
       this.user = response.user;
       this.isAuthenticated = true;
       this.initialized = true;
       this.notifyListeners();
-    } catch (error) {
-      console.error('Google authentication initialization failed:', error);
-      await this.signOut();
+    } catch {
+      this.clearLocalState();
+      this.notifyListeners();
     }
   }
 
