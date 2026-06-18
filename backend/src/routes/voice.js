@@ -1,7 +1,11 @@
 import express from 'express';
 import twilio from 'twilio';
 import voiceCallScriptService from '../services/voice-call-script-service.js';
-import { buildCompletedCallActionPatch, shouldSendPostCallBookingSms } from '../services/voice-call-outcome-service.js';
+import {
+  buildCompletedCallActionPatch,
+  buildTerminalCallActionPatch,
+  shouldSendPostCallBookingSms,
+} from '../services/voice-call-outcome-service.js';
 import voiceCallWorker from '../services/voice-call-worker.js';
 import insforgeDataService from '../services/insforge-data-service.js';
 import leadConversationService from '../services/lead-conversation-service.js';
@@ -55,6 +59,10 @@ function sendTwiML(res, twiml) {
   res.type('text/xml').send(twiml);
 }
 
+function getBookingLink() {
+  return process.env.CALENDLY_SCHEDULING_URL || process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK;
+}
+
 async function logCallReply({ action, lead, conversationId, step, reply, callSid }) {
   if (!lead) return null;
   return leadConversationService.logSystemEvent({
@@ -71,6 +79,38 @@ async function logCallReply({ action, lead, conversationId, step, reply, callSid
       direction: 'inbound',
     },
   });
+}
+
+async function sendCallFollowUpSms({ lead, action, conversationId, outcome, callSid }) {
+  if (!lead?.phone) return null;
+  const bookingLink = getBookingLink();
+  if (!bookingLink) return null;
+
+  const trackingId = `call_${callSid || action?.id || lead.id}`;
+  const smsResult = outcome === 'callback_requested'
+    ? await twilioSmsService.sendCallbackConfirmation(lead, bookingLink, trackingId)
+    : await twilioSmsService.sendLeadBookingReminder(lead, bookingLink, trackingId);
+
+  if (conversationId) {
+    await leadConversationService.logSystemEvent({
+      lead,
+      conversationId,
+      channel: 'sms',
+      messageType: outcome === 'callback_requested' ? 'callback_confirmation_sms' : 'booking_link_sms',
+      subject: smsResult.success ? 'Bob sent an SMS follow-up after the call' : 'Bob could not send SMS follow-up after the call',
+      bodyText: smsResult.success ? smsResult.message : `SMS failed after call: ${smsResult.error}`,
+      metadata: {
+        bobActionId: action?.id,
+        callSid: callSid || null,
+        outcome,
+        providerMessageId: smsResult.messageSid || null,
+        status: smsResult.status || null,
+        success: smsResult.success,
+      },
+    });
+  }
+
+  return smsResult;
 }
 
 router.post('/calls/start', authenticateToken, requireRole('admin'), async (req, res) => {
@@ -166,12 +206,9 @@ router.post('/gather', requireTwilioSignature, async (req, res) => {
       });
     }
 
-    if (lead && next.outcome === 'send_booking_link') {
-      const bookingLink = process.env.CALENDLY_SCHEDULING_URL || process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK;
-      if (lead.phone && bookingLink) {
-        await twilioSmsService.sendLeadBookingReminder(lead, bookingLink, `call_${callSid || actionId}`);
-      }
-    }
+    const smsResult = next.done && ['send_booking_link', 'callback_requested'].includes(next.outcome)
+      ? await sendCallFollowUpSms({ lead, action, conversationId, outcome: next.outcome, callSid })
+      : null;
 
     if (actionId) {
       await insforgeDataService.updateBobAction(actionId, {
@@ -184,6 +221,11 @@ router.post('/gather', requireTwilioSignature, async (req, res) => {
           outcome: next.outcome || null,
           extracted: mergedExtracted,
           lastReply: reply,
+          bookingSmsAttempted: smsResult ? true : action?.result?.bookingSmsAttempted || false,
+          bookingSmsSent: smsResult ? Boolean(smsResult.success) : action?.result?.bookingSmsSent || false,
+          bookingSmsMessageSid: smsResult?.messageSid || action?.result?.bookingSmsMessageSid || null,
+          bookingSmsStatus: smsResult?.status || action?.result?.bookingSmsStatus || null,
+          bookingSmsError: smsResult?.success === false ? smsResult.error : action?.result?.bookingSmsError || null,
         },
         updatedAt: new Date(),
       });
@@ -225,7 +267,7 @@ router.post('/status', requireTwilioSignature, async (req, res) => {
       let smsResult = null;
 
       if (lead && shouldSendPostCallBookingSms(existingAction, callStatus)) {
-        const bookingLink = process.env.CALENDLY_SCHEDULING_URL || process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK;
+        const bookingLink = getBookingLink();
         if (bookingLink) {
           smsResult = await twilioSmsService.sendLeadBookingReminder(lead, bookingLink, `post_call_${req.body?.CallSid || actionId}`);
           if (existingAction?.conversationId) {
@@ -256,6 +298,33 @@ router.post('/status', requireTwilioSignature, async (req, res) => {
           callDuration: req.body?.CallDuration || null,
           smsResult,
         }));
+      } else if (terminalStatus) {
+        const patch = buildTerminalCallActionPatch({
+          action: existingAction,
+          callSid: req.body?.CallSid,
+          callStatus,
+          callDuration: req.body?.CallDuration || null,
+        });
+        await insforgeDataService.updateBobAction(actionId, patch);
+
+        if (lead && patch.result.retryExhausted) {
+          await insforgeDataService.updateLead(lead.id, {
+            requiresHumanReview: true,
+            escalationReason: `voice_call_${callStatus || 'failed'}_retry_limit`,
+            updatedAt: new Date(),
+          });
+        }
+
+        if (existingAction?.conversationId) {
+          await insforgeDataService.updateConversation(existingAction.conversationId, {
+            nextAction: patch.result.retryExhausted ? 'needs_human_review' : 'retry_voice_call',
+            nextActionAt: patch.scheduledFor || null,
+            lastSummary: patch.result.retryExhausted
+              ? `Bob voice call ended with ${callStatus}; retry limit reached.`
+              : `Bob voice call ended with ${callStatus}; retry scheduled.`,
+            updatedAt: new Date(),
+          });
+        }
       } else {
         await insforgeDataService.updateBobAction(actionId, {
           status: terminalStatus ? 'awaiting_call' : 'calling',

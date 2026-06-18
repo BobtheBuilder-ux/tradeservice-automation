@@ -232,6 +232,18 @@ class InsForgeDataService {
     return rows[0] || null;
   }
 
+  async getLeadByPhone(phone) {
+    if (!phone) return null;
+    const normalizedPhone = String(phone).trim();
+    const rows = await selectByColumn(TABLES.leads, 'phone', normalizedPhone);
+    if (rows[0]) return rows[0];
+
+    const digits = normalizedPhone.replace(/\D/g, '');
+    if (!digits) return null;
+    const allRows = await select(TABLES.leads);
+    return allRows.find((row) => String(row.phone || '').replace(/\D/g, '') === digits) || null;
+  }
+
   async createLead(values) {
     const [lead] = await insert(TABLES.leads, values);
     return lead;

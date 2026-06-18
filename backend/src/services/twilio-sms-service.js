@@ -46,6 +46,72 @@ class TwilioSmsService {
     return buildLeadBookingReminderMessage(lead, bookingLink);
   }
 
+  getSmsStatusCallbackUrl() {
+    const baseUrl = process.env.CALL_PUBLIC_BASE_URL || process.env.BACKEND_URL;
+    if (!baseUrl) return null;
+    return new URL('/api/sms/status', baseUrl).toString();
+  }
+
+  buildMessagePayload(payload = {}) {
+    const statusCallback = this.getSmsStatusCallbackUrl();
+    return {
+      ...payload,
+      ...(statusCallback ? { statusCallback } : {}),
+    };
+  }
+
+  async sendMessage({ to, body, trackingId, context = 'send_sms_message', metadata = {} }) {
+    try {
+      if (!this.client) {
+        throw new Error('Twilio client not initialized');
+      }
+
+      if (!to) {
+        throw new Error('SMS recipient phone number not available');
+      }
+
+      logger.logLeadProcessing(trackingId, 'sending_sms_message', {
+        ...metadata,
+        phone: hashForLogging(to),
+        context,
+      });
+
+      const smsResult = await this.client.messages.create(this.buildMessagePayload({
+        body,
+        from: this.fromNumber,
+        to,
+      }));
+
+      logger.logLeadProcessing(trackingId, 'sms_message_sent', {
+        ...metadata,
+        messageSid: smsResult.sid,
+        status: smsResult.status,
+        context,
+      });
+
+      return {
+        success: true,
+        messageSid: smsResult.sid,
+        status: smsResult.status,
+        message: body,
+      };
+    } catch (error) {
+      logger.error(error.message, {
+        context,
+        trackingId,
+        phone: to ? hashForLogging(to) : 'unknown',
+        stack: error.stack,
+        ...metadata,
+      });
+
+      return {
+        success: false,
+        error: error.message,
+        message: 'Failed to send SMS message',
+      };
+    }
+  }
+
   async sendLeadBookingReminder(lead, bookingLink, trackingId) {
     try {
       if (!this.client) {
@@ -63,11 +129,11 @@ class TwilioSmsService {
         phone: hashForLogging(lead.phone),
       });
 
-      const smsResult = await this.client.messages.create({
+      const smsResult = await this.client.messages.create(this.buildMessagePayload({
         body: message,
         from: this.fromNumber,
         to: lead.phone,
-      });
+      }));
 
       logger.logLeadProcessing(trackingId, 'lead_booking_sms_reminder_sent', {
         leadId: lead.id,
@@ -96,6 +162,18 @@ class TwilioSmsService {
         message: 'Failed to send SMS booking reminder',
       };
     }
+  }
+
+  async sendCallbackConfirmation(lead, bookingLink, trackingId) {
+    const firstName = lead?.first_name || lead?.firstName || lead?.full_name || lead?.fullName || 'there';
+    const linkText = bookingLink ? ` You can also choose a time here: ${bookingLink}` : '';
+    return this.sendMessage({
+      to: lead?.phone,
+      body: `Hi ${firstName}, this is Bob from 9QC Inc. Thanks for speaking with me. A team member will follow up for a better time.${linkText}`,
+      trackingId,
+      context: 'send_callback_confirmation_sms',
+      metadata: { leadId: lead?.id },
+    });
   }
 
   /**
@@ -167,11 +245,11 @@ class TwilioSmsService {
         meetingTime: meeting.start_time
       });
 
-      const smsResult = await this.client.messages.create({
+      const smsResult = await this.client.messages.create(this.buildMessagePayload({
         body: message,
         from: this.fromNumber,
         to: lead.phone
-      });
+      }));
 
       logger.logLeadProcessing(trackingId, 'sms_reminder_sent', {
         leadId: lead.id,
@@ -240,11 +318,11 @@ class TwilioSmsService {
         meetingId: meeting.id
       });
 
-      const smsResult = await this.client.messages.create({
+      const smsResult = await this.client.messages.create(this.buildMessagePayload({
         body: message,
         from: this.fromNumber,
         to: lead.phone
-      });
+      }));
 
       return {
         success: true,
@@ -301,11 +379,11 @@ class TwilioSmsService {
         meetingId: meeting.id
       });
 
-      const smsResult = await this.client.messages.create({
+      const smsResult = await this.client.messages.create(this.buildMessagePayload({
         body: message,
         from: this.fromNumber,
         to: lead.phone
-      });
+      }));
 
       return {
         success: true,

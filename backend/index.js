@@ -22,6 +22,7 @@ import feedbackRoutes from './src/routes/feedback.js';
 import integrationsRoutes from './src/routes/integrations.js';
 import testRoutes from './src/routes/test.js';
 import voiceRoutes from './src/routes/voice.js';
+import smsRoutes from './src/routes/sms.js';
 
 import { WorkflowOrchestrator } from './workflow-orchestrator.js';
 import reminderScheduler from './src/services/reminder-scheduler.js';
@@ -159,6 +160,7 @@ app.use('/api/feedback', feedbackRoutes);
 app.use('/api/integrations', integrationsRoutes);
 app.use('/api/test', testRoutes);
 app.use('/api/voice', voiceRoutes);
+app.use('/api/sms', smsRoutes);
 if (hubspotEnabled) {
   app.use('/webhook/hubspot', hubspotWebhookRoutes);
 }
