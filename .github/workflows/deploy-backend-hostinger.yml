@@ -1,0 +1,69 @@
+name: Deploy Backend to Hostinger
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - 'docker-compose.backend.yml'
+      - '.github/workflows/deploy-backend-hostinger.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: hostinger-backend-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build and deploy backend Docker container
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${{ secrets.HOSTINGER_SSH_HOST }}"
+          test -n "${{ secrets.HOSTINGER_SSH_USER }}"
+          test -n "${{ secrets.HOSTINGER_SSH_PORT }}"
+          test -n "${{ secrets.HOSTINGER_SSH_KEY }}"
+          test -n "${{ secrets.HOSTINGER_DEPLOY_PATH }}"
+
+      - name: Configure SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.HOSTINGER_SSH_KEY }}" > ~/.ssh/hostinger_deploy_key
+          chmod 600 ~/.ssh/hostinger_deploy_key
+          ssh-keyscan -p "${{ secrets.HOSTINGER_SSH_PORT }}" -H "${{ secrets.HOSTINGER_SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy backend on Hostinger VPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/hostinger_deploy_key \
+            -p "${{ secrets.HOSTINGER_SSH_PORT }}" \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            "${{ secrets.HOSTINGER_SSH_USER }}@${{ secrets.HOSTINGER_SSH_HOST }}" \
+            "DEPLOY_PATH='${{ secrets.HOSTINGER_DEPLOY_PATH }}' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          cd "$DEPLOY_PATH"
+          git fetch origin main
+          git checkout main
+          git reset --hard origin/main
+
+          docker compose -f docker-compose.backend.yml up -d --build --force-recreate tradeservice-backend
+
+          sleep 12
+          docker ps --filter name=tradeservice-backend --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
+          curl -fsS https://automation.setmymeet.ca/health
+          REMOTE
