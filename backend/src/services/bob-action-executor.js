@@ -54,6 +54,23 @@ class BobActionExecutor {
   }
 
   buildBookingLink(lead, trackingId) {
+    const configuredCalendlyUrl = process.env.CALENDLY_SCHEDULING_URL || process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK;
+    if (configuredCalendlyUrl) {
+      const schedulingUrl = new URL(configuredCalendlyUrl);
+      if (lead.fullName || lead.firstName) {
+        schedulingUrl.searchParams.set('name', lead.fullName || [lead.firstName, lead.lastName].filter(Boolean).join(' '));
+      }
+      if (lead.email) {
+        schedulingUrl.searchParams.set('email', lead.email);
+      }
+      schedulingUrl.searchParams.set('utm_source', 'bob_automation');
+      schedulingUrl.searchParams.set('utm_medium', 'automation');
+      schedulingUrl.searchParams.set('utm_campaign', 'lead_booking');
+      schedulingUrl.searchParams.set('utm_content', lead.id || trackingId);
+      schedulingUrl.searchParams.set('trackingId', trackingId);
+      return schedulingUrl.toString();
+    }
+
     const baseUrl = process.env.BACKEND_URL || 'http://localhost:3001';
     const params = new URLSearchParams({
       name: lead.fullName || lead.firstName || '',
@@ -69,6 +86,7 @@ class BobActionExecutor {
     const firstName = lead.firstName || lead.fullName || 'there';
     const preferredWindow = lead.preferredMeetingWindow ? ` Preferred time window: ${lead.preferredMeetingWindow}.` : '';
     const serviceLine = lead.serviceInterest ? `I’d love to learn more about your interest in ${lead.serviceInterest}. ` : '';
+    const locationLine = lead.locationSummary ? `I also noted your location as ${lead.locationSummary}. ` : '';
 
     if (type === 'send_follow_up_email') {
       return {
@@ -97,7 +115,7 @@ class BobActionExecutor {
         html: `
           <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;line-height:1.6;color:#1f2937;">
             <h2 style="margin-bottom:12px;">Hi ${firstName},</h2>
-            <p>${serviceLine}Before I point you to the best next step, I want to make sure we’re sending you in the right direction.</p>
+            <p>${serviceLine}${locationLine}Before I point you to the best next step, I want to make sure we’re sending you in the right direction.</p>
             <p>Could you reply with these quick details?</p>
             <ul>
               <li>What service or outcome are you looking for?</li>
@@ -122,6 +140,7 @@ class BobActionExecutor {
           <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;line-height:1.6;color:#1f2937;">
             <h2 style="margin-bottom:12px;">Hi ${firstName},</h2>
             <p>I’m checking back in because it looks like you’re still a good fit for a consultation, but your meeting isn’t booked yet.</p>
+            <p>${serviceLine}${preferredWindow}</p>
             <p>You can reserve a time here:</p>
             <p style="margin:24px 0;">
               <a href="${bookingLink}" style="background:#111827;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Book my consultation</a>
@@ -130,7 +149,7 @@ class BobActionExecutor {
             <p>Best,<br />Bob</p>
           </div>
         `,
-        text: `Hi ${firstName},\n\nIt looks like you're still a good fit for a consultation, but your meeting isn’t booked yet.\n\nReserve a time here: ${bookingLink}\n\nIf you want help narrowing down a time window first, just reply and I’ll help.\n\nBest,\nBob`,
+        text: `Hi ${firstName},\n\nIt looks like you're still a good fit for a consultation, but your meeting isn’t booked yet.\n\n${serviceLine}${preferredWindow}\n\nReserve a time here: ${bookingLink}\n\nIf you want help narrowing down a time window first, just reply and I’ll help.\n\nBest,\nBob`,
         template: 'booking_reminder',
         conversationStatus: 'ready_to_book',
         lastIntent: 'booking_reminder_sent',
@@ -144,6 +163,7 @@ class BobActionExecutor {
           <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;line-height:1.6;color:#1f2937;">
             <h2 style="margin-bottom:12px;">Hi ${firstName},</h2>
             <p>Thanks for the details so far. The best next step is to get your consultation on the calendar.</p>
+            <p>${serviceLine}${locationLine}${preferredWindow}</p>
             <p>You can book here:</p>
             <p style="margin:24px 0;">
               <a href="${bookingLink}" style="background:#111827;color:#fff;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;">Book my meeting</a>
@@ -152,7 +172,7 @@ class BobActionExecutor {
             <p>Best,<br />Bob</p>
           </div>
         `,
-        text: `Hi ${firstName},\n\nThanks for the details so far. The best next step is to get your consultation on the calendar.\n\nBook here: ${bookingLink}\n\nIf you’d rather reply with your availability first, that works too.\n\nBest,\nBob`,
+        text: `Hi ${firstName},\n\nThanks for the details so far. The best next step is to get your consultation on the calendar.\n\n${serviceLine}${locationLine}${preferredWindow}\n\nBook here: ${bookingLink}\n\nIf you’d rather reply with your availability first, that works too.\n\nBest,\nBob`,
         template: 'booking_invite',
         conversationStatus: 'ready_to_book',
         lastIntent: 'booking_invite_sent',
@@ -282,7 +302,7 @@ class BobActionExecutor {
           conversationStatus: draftPayload.conversationStatus || 'awaiting_reply',
           lastIntent: draftPayload.emailGoal || 'fresh_email_sent',
         }
-      : this.buildEmailContent(action.actionType, lead, trackingId);
+      : this.buildEmailContent(action.actionType, lead, trackingId, action.payload || {});
 
     if (!email.subject || !email.text) {
       await this.markAction(action.id, 'failed', {
@@ -439,6 +459,69 @@ class BobActionExecutor {
     });
   }
 
+  async sendMeetingSmsReminder(action, lead, conversation) {
+    if (!lead.phone) {
+      await this.markAction(action.id, 'failed', {
+        result: { error: 'Lead has no phone number' },
+      });
+      return;
+    }
+
+    const trackingId = lead.trackingId || action.payload?.trackingId || generateTrackingId();
+    const conversationRecord = conversation || (await leadConversationService.ensurePrimaryConversation(lead, 'sms'));
+    const meeting = {
+      id: action.payload?.calendlyEventUri || action.id,
+      start_time: action.payload?.startTime || lead.scheduledAt,
+      location: action.payload?.location || lead.meetingLocation || null,
+      meeting_url: action.payload?.meetingUrl || null,
+    };
+
+    if (!meeting.start_time) {
+      await this.markAction(action.id, 'failed', {
+        result: { error: 'Meeting reminder is missing a start time' },
+      });
+      return;
+    }
+
+    const smsResult = await twilioSmsService.sendAppointmentReminder(lead, meeting, trackingId);
+
+    await leadConversationService.logSystemEvent({
+      lead,
+      conversationId: conversationRecord.id,
+      channel: 'sms',
+      messageType: 'meeting_sms_reminder',
+      subject: smsResult.success ? 'Bob sent a meeting SMS reminder' : 'Bob could not send meeting SMS reminder',
+      bodyText: smsResult.success ? smsResult.message : `Meeting SMS reminder failed: ${smsResult.error}`,
+      metadata: {
+        bobActionId: action.id,
+        calendlyEventUri: action.payload?.calendlyEventUri || null,
+        providerMessageId: smsResult.messageSid || null,
+        status: smsResult.status || null,
+        success: smsResult.success,
+      },
+    });
+
+    await leadConversationService.updateConversation(conversationRecord.id, {
+      nextAction: smsResult.success ? 'monitor_meeting' : 'manual_sms_review',
+      nextActionAt: null,
+      lastIntent: 'meeting_sms_reminder',
+      lastIntentAt: new Date(),
+      lastSummary: smsResult.success
+        ? 'Bob sent the post-booking SMS meeting reminder.'
+        : 'Bob could not send the post-booking SMS meeting reminder.',
+    });
+
+    await this.markAction(action.id, smsResult.success ? 'completed' : 'deferred', {
+      executedAt: new Date(),
+      scheduledFor: smsResult.success ? null : new Date(Date.now() + 60 * 60 * 1000),
+      result: {
+        providerMessageId: smsResult.messageSid || null,
+        status: smsResult.status || null,
+        error: smsResult.success ? null : smsResult.error,
+      },
+    });
+  }
+
   async queueCallAttempt(action, lead, conversation) {
     const conversationRecord = conversation || (await leadConversationService.ensurePrimaryConversation(lead, 'email'));
     const existingMetadata = conversationRecord.metadata || {};
@@ -552,6 +635,9 @@ class BobActionExecutor {
         return;
       case 'send_sms_reminder':
         await this.sendSmsReminder(action, lead, conversation);
+        return;
+      case 'send_meeting_sms_reminder':
+        await this.sendMeetingSmsReminder(action, lead, conversation);
         return;
       case 'queue_call_attempt':
         await this.queueCallAttempt(action, lead, conversation);

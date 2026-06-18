@@ -6,7 +6,7 @@ import {
   buildTerminalCallActionPatch,
 } from '../src/services/voice-call-outcome-service.js';
 
-test('shouldSendPostCallBookingSms sends booking link after answered incomplete call', () => {
+test('shouldSendPostCallBookingSms does not send booking link after incomplete call', () => {
   const action = {
     result: {
       providerStatus: 'answered',
@@ -15,11 +15,11 @@ test('shouldSendPostCallBookingSms sends booking link after answered incomplete 
     },
   };
 
-  assert.equal(shouldSendPostCallBookingSms(action, 'completed'), true);
+  assert.equal(shouldSendPostCallBookingSms(action, 'completed'), false);
 });
 
 test('shouldSendPostCallBookingSms does not resend when booking link was already requested', () => {
-  const action = { result: { outcome: 'send_booking_link', bookingSmsAttempted: true } };
+  const action = { result: { outcome: 'calendly_booking_requested', bookingSmsAttempted: true } };
 
   assert.equal(shouldSendPostCallBookingSms(action, 'completed'), false);
 });

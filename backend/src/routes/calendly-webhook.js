@@ -83,27 +83,8 @@ const router = express.Router();
  * Calendly webhook event handler
  * POST /webhook/calendly
  */
-// Custom middleware to capture raw body for signature verification
-const captureRawBody = (req, res, next) => {
-  let data = '';
-  req.setEncoding('utf8');
-  req.on('data', chunk => {
-    data += chunk;
-  });
-  req.on('end', () => {
-    req.rawBody = data;
-    try {
-      req.body = JSON.parse(data);
-    } catch (err) {
-      req.body = {};
-    }
-    next();
-  });
-};
-
 router.post('/', 
   validateRequest,
-  captureRawBody,
   async (req, res) => {
   const signature = req.get('Calendly-Webhook-Signature');
   const rawBody = req.rawBody;
@@ -162,7 +143,7 @@ router.post('/',
       
       // Construct normalized webhook data
       webhookData = {
-        event: event || payload.event?.uri?.includes('invitee') ? 'invitee.created' : 'unknown',
+        event: event || (payload.event?.uri?.includes('invitee') ? 'invitee.created' : 'unknown'),
         time: raw.time || new Date().toISOString(),
         payload: payload
       };

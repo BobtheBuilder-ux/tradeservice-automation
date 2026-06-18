@@ -65,7 +65,7 @@ class VoiceCallScriptService {
             step: 'callback_requested',
             done: true,
             outcome: 'callback_requested',
-            prompt: 'No problem. I’ll make a note that a callback is better and send you the booking link by text if available. Thank you.',
+          prompt: 'No problem. I’ll make a note that a callback is better and text the Calendly link if available. Thank you.',
             extracted: { callbackRequested: true },
           };
         }
@@ -92,17 +92,16 @@ class VoiceCallScriptService {
         return {
           step: 'booking_offer',
           done: false,
-          prompt: 'Thanks for sharing that. The best next step is a short consultation. Would you like me to text you the booking link now?',
+          prompt: 'Thanks for sharing that. The best next step is a short Zoom consultation. Would you like me to help book a day and time now?',
           extracted: { locationSummary: normalized },
         };
       case 'booking_offer':
         if (this.isYes(normalized)) {
           return {
-            step: 'booking_link_requested',
-            done: true,
-            outcome: 'send_booking_link',
-            prompt: 'Perfect. I’ll text you the booking link now so you can choose a time that works for you. Thank you.',
-            extracted: { wantsBookingLink: true },
+            step: 'booking_time',
+            done: false,
+            prompt: 'Perfect. What day and time works best for you? For example, you can say tomorrow at 3 PM, or Friday at 10 AM.',
+            extracted: { wantsDirectBooking: true },
           };
         }
         return {
@@ -111,6 +110,14 @@ class VoiceCallScriptService {
           outcome: 'needs_human_review',
           prompt: 'No problem. I’ll pass this to the team so they can follow up with the best next step. Thank you.',
           extracted: { needsHumanReview: true },
+        };
+      case 'booking_time':
+        return {
+          step: 'direct_booking_requested',
+          done: true,
+          outcome: 'direct_booking_requested',
+          prompt: 'Thank you. I’ll check that time now.',
+          extracted: { preferredBookingTimeText: normalized },
         };
       default:
         return this.initialStep(context.lead || {});

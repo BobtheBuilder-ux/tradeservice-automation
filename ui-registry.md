@@ -18,6 +18,26 @@ Last updated: 2026-06-17
 **Pattern notes:**
 Utility test forms use a constrained `max-w` page shell, one primary card, compact labels, shared `.form-input`/`.form-select`, icon+text action buttons, and bordered status panels. Keep future test tools in this quiet gray/white dashboard style with green success and red error feedback.
 
+### Live Automation Test Form
+
+File: frontend/pages/live-automation-test.js
+Last updated: 2026-06-18
+
+| Property         | Class                                                                 |
+| ---------------- | --------------------------------------------------------------------- |
+| Background       | bg-gray-50, bg-white                                                  |
+| Border           | border border-gray-200, border-red-200, border-yellow-200             |
+| Border radius    | rounded-md through shared card/form classes                           |
+| Text — primary   | text-gray-950, text-gray-900, text-gray-800                           |
+| Text — secondary | text-gray-500, text-gray-600, text-gray-700                           |
+| Spacing          | px-4 py-8, grid gap-6, card-body space-y-5, table px-4 py-3           |
+| Hover state      | shared btn-primary and btn-secondary hover states                     |
+| Shadow           | shadow-sm through shared card class                                   |
+| Accent usage     | red live-provider badge, yellow warning panel, green tick panel       |
+
+**Pattern notes:**
+Live automation test tools use a two-column desktop layout with a compact control form on the left and live status/output panels on the right. Keep destructive or provider-backed actions protected by confirmation copy, explicit consent checkboxes, and red/yellow caution states; action history should stay table-based with small status pills and compact icon+text controls. The selectable live-test channels are email, SMS, and voice call; meeting reminders are post-booking SMS actions triggered by Calendly confirmation, not pre-booking email reminder toggles. Per-action controls such as Skip should use the shared secondary button style inside the action table.
+
 ### Bob Voice Call Controls
 
 File: frontend/pages/admin-dashboard.js

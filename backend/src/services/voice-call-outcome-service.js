@@ -8,11 +8,7 @@ function wasAnswered(action = {}, callStatus) {
 }
 
 function shouldSendPostCallBookingSms(action = {}, callStatus = '') {
-  if (callStatus !== 'completed') return false;
-  if (action?.result?.bookingSmsAttempted) return false;
-  if (action?.result?.outcome === 'send_booking_link') return false;
-  if (hasTerminalOutcome(action) && action?.result?.outcome !== 'incomplete_call') return false;
-  return wasAnswered(action, callStatus);
+  return false;
 }
 
 function resolveCompletedOutcome(action = {}) {

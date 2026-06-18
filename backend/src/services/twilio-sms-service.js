@@ -176,6 +176,51 @@ class TwilioSmsService {
     });
   }
 
+  async sendCalendlyBookingLink(lead, bookingLink, trackingId) {
+    const firstName = lead?.first_name || lead?.firstName || lead?.full_name || lead?.fullName || 'there';
+    const serviceText = lead?.serviceInterest ? ` for ${lead.serviceInterest}` : '';
+
+    return this.sendMessage({
+      to: lead?.phone,
+      body: `Hi ${firstName}, this is Bob from 9QC Inc. Please book your Zoom consultation${serviceText} here: ${bookingLink}. Once booked, I’ll text the Zoom meeting details. Reply STOP to opt out.`,
+      trackingId,
+      context: 'send_calendly_booking_link_sms',
+      metadata: { leadId: lead?.id },
+    });
+  }
+
+  async sendCalendlyMeetingDetails(lead, meeting, trackingId) {
+    const firstName = lead?.first_name || lead?.firstName || lead?.full_name || lead?.fullName || 'there';
+    const startTime = meeting?.start_time || meeting?.startTime;
+    const meetingDate = startTime ? new Date(startTime) : null;
+    const formattedTime = meetingDate
+      ? meetingDate.toLocaleString('en-US', {
+          weekday: 'short',
+          month: 'short',
+          day: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true,
+        })
+      : 'your selected time';
+    const locationText = meeting?.meeting_url
+      ? ` Zoom link: ${meeting.meeting_url}`
+      : meeting?.location
+        ? ` Location: ${meeting.location}`
+        : '';
+
+    return this.sendMessage({
+      to: lead?.phone,
+      body: `Hi ${firstName}, your consultation is booked for ${formattedTime}.${locationText} - Bob from 9QC Inc.`,
+      trackingId,
+      context: 'send_calendly_meeting_details_sms',
+      metadata: {
+        leadId: lead?.id,
+        meetingId: meeting?.id,
+      },
+    });
+  }
+
   /**
    * Initialize Twilio client
    */
@@ -236,7 +281,8 @@ class TwilioSmsService {
         hour12: true
       });
 
-      const message = `Hi ${lead.first_name || lead.full_name || 'there'}! This is a reminder about your upcoming appointment on ${formattedDate} at ${formattedTime}. ${meeting.location ? `Location: ${meeting.location}` : ''} ${meeting.meeting_url ? `Join here: ${meeting.meeting_url}` : ''} - NASCO Canada Trade Services`;
+      const firstName = lead.first_name || lead.firstName || lead.full_name || lead.fullName || 'there';
+      const message = `Hi ${firstName}, this is a reminder about your upcoming consultation on ${formattedDate} at ${formattedTime}. ${meeting.location ? `Location: ${meeting.location}` : ''} ${meeting.meeting_url ? `Join here: ${meeting.meeting_url}` : ''} - Bob from 9QC Inc.`;
 
       logger.logLeadProcessing(trackingId, 'sending_sms_reminder', {
         leadId: lead.id,

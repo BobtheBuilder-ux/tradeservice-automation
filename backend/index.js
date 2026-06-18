@@ -135,7 +135,14 @@ app.use('/webhook', (req, res, next) => {
   }
   next();
 });
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({
+  limit: '10mb',
+  verify: (req, res, buf) => {
+    if (req.originalUrl?.startsWith('/webhook/calendly')) {
+      req.rawBody = buf.toString('utf8');
+    }
+  },
+}));
 app.use(express.urlencoded({ extended: true }));
 
 // Request logging middleware with enhanced console output

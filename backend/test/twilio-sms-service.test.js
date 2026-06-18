@@ -65,6 +65,89 @@ test('sendCallbackConfirmation texts callback note and booking link', async () =
   assert.match(createdMessages[0].body, /https:\/\/calendly\.test\/book/);
 });
 
+test('sendCalendlyBookingLink texts Calendly booking URL', async () => {
+  const createdMessages = [];
+  const service = new TwilioSmsService({ initialize: false });
+  service.fromNumber = '+15550001111';
+  service.client = {
+    messages: {
+      create: async (payload) => {
+        createdMessages.push(payload);
+        return { sid: 'SM456', status: 'queued' };
+      },
+    },
+  };
+
+  const result = await service.sendCalendlyBookingLink(
+    { id: 'lead-1', firstName: 'Sarah', phone: '+15550002222', serviceInterest: 'export documentation' },
+    'https://calendly.test/tradeservices/30min',
+    'track-2'
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(createdMessages[0].to, '+15550002222');
+  assert.match(createdMessages[0].body, /Sarah/);
+  assert.match(createdMessages[0].body, /https:\/\/calendly\.test\/tradeservices\/30min/);
+  assert.match(createdMessages[0].body, /Zoom consultation/);
+});
+
+test('sendCalendlyMeetingDetails texts Zoom link after Calendly booking', async () => {
+  const createdMessages = [];
+  const service = new TwilioSmsService({ initialize: false });
+  service.fromNumber = '+15550001111';
+  service.client = {
+    messages: {
+      create: async (payload) => {
+        createdMessages.push(payload);
+        return { sid: 'SM789', status: 'queued' };
+      },
+    },
+  };
+
+  const result = await service.sendCalendlyMeetingDetails(
+    { id: 'lead-1', firstName: 'Sarah', phone: '+15550002222' },
+    {
+      id: 'meeting-1',
+      startTime: '2026-06-18T18:00:00.000Z',
+      meeting_url: 'https://zoom.us/j/123',
+    },
+    'track-3'
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(createdMessages[0].to, '+15550002222');
+  assert.match(createdMessages[0].body, /Sarah/);
+  assert.match(createdMessages[0].body, /https:\/\/zoom\.us\/j\/123/);
+});
+
+test('sendAppointmentReminder uses Bob and 9QC branding', async () => {
+  const createdMessages = [];
+  const service = new TwilioSmsService({ initialize: false });
+  service.fromNumber = '+15550001111';
+  service.client = {
+    messages: {
+      create: async (payload) => {
+        createdMessages.push(payload);
+        return { sid: 'SM999', status: 'queued' };
+      },
+    },
+  };
+
+  const result = await service.sendAppointmentReminder(
+    { id: 'lead-1', firstName: 'Sarah', phone: '+15550002222' },
+    {
+      id: 'meeting-1',
+      start_time: '2026-06-18T18:00:00.000Z',
+      meeting_url: 'https://zoom.us/j/123',
+    },
+    'track-4'
+  );
+
+  assert.equal(result.success, true);
+  assert.match(createdMessages[0].body, /Sarah/);
+  assert.match(createdMessages[0].body, /Bob from 9QC Inc/);
+});
+
 test('buildMessagePayload omits status callback when public backend URL is not configured', () => {
   delete process.env.CALL_PUBLIC_BASE_URL;
   delete process.env.BACKEND_URL;

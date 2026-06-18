@@ -1,42 +1,23 @@
-import { calendlyConfig, db } from '../config/index.js';
-import { leads, meetings } from '../db/schema.js';
-import { eq, desc } from 'drizzle-orm';
 import logger from '../utils/logger.js';
 import { hashForLogging } from '../utils/crypto.js';
-import { updateLeadStatus } from './database-service.js';
-import meetingService from './meeting-service.js';
-import EmailService from './email-service.js';
+import insforgeDataService from './insforge-data-service.js';
+import leadConversationService from './lead-conversation-service.js';
+import twilioSmsService from './twilio-sms-service.js';
 
-/**
- * Process Calendly webhook events with comprehensive validation and consistency checks
- * @param {Object} webhookData - Calendly webhook payload
- * @param {string} trackingId - Tracking ID for logging
- * @returns {Object} Processing results
- */
 export async function processCalendlyEvent(webhookData, trackingId) {
-  // Validate webhook data structure
-  const validationResult = validateWebhookData(webhookData, trackingId);
+  const validationResult = validateWebhookData(webhookData);
   if (!validationResult.isValid) {
     const error = new Error(`Invalid webhook data: ${validationResult.errors.join(', ')}`);
     logger.logError(error, {
       context: 'calendly_webhook_validation',
       trackingId,
-      errors: validationResult.errors
+      errors: validationResult.errors,
     });
     throw error;
   }
 
   const eventType = webhookData.event;
   const payload = webhookData.payload;
-
-  logger.logLeadProcessing(trackingId, 'calendly_event_processing_started', {
-    event: eventType,
-    eventTypeUri: payload?.event_type?.uri,
-    inviteeEmail: payload?.invitee?.email ? hashForLogging(payload.invitee.email) : '[MISSING]',
-    eventUri: payload?.event?.uri,
-    validationWarnings: validationResult.warnings
-  });
-
   const results = {
     event: eventType,
     trackingId,
@@ -49,41 +30,35 @@ export async function processCalendlyEvent(webhookData, trackingId) {
     dataConsistencyChecks: {
       duplicateCheck: false,
       leadExists: false,
-      meetingExists: false
-    }
+      meetingExists: false,
+    },
   };
 
-  try {
-    // Perform data consistency checks before processing
-    await performDataConsistencyChecks(payload, results, trackingId);
+  logger.logLeadProcessing(trackingId, 'calendly_event_processing_started', {
+    event: eventType,
+    inviteeEmail: payload?.invitee?.email ? hashForLogging(payload.invitee.email) : '[MISSING]',
+    eventUri: payload?.event?.uri,
+    validationWarnings: validationResult.warnings,
+  });
 
+  try {
     switch (eventType) {
       case 'invitee.created':
         results.processed = await handleInviteeCreated(payload, trackingId, results);
         break;
-      
       case 'invitee.canceled':
         results.processed = await handleInviteeCanceled(payload, trackingId, results);
         break;
-      
-      case 'invitee_no_show.created':
-        results.processed = await handleInviteeNoShow(payload, trackingId, results);
-        break;
-      
       case 'invitee.rescheduled':
         results.processed = await handleInviteeRescheduled(payload, trackingId, results);
         break;
-      
+      case 'invitee_no_show.created':
+        results.processed = await handleInviteeNoShow(payload, trackingId, results);
+        break;
       default:
-        logger.logWebhookProcessing(trackingId, eventType, 'event_type_not_handled', {
-          event: eventType
-        });
-        results.processed = false;
+        logger.logWebhookProcessing(trackingId, eventType, 'event_type_not_handled', { event: eventType });
         break;
     }
-
-    // Perform post-processing consistency validation
-    await validatePostProcessingState(payload, results, trackingId);
 
     logger.logLeadProcessing(trackingId, 'calendly_event_processing_completed', {
       event: eventType,
@@ -91,35 +66,24 @@ export async function processCalendlyEvent(webhookData, trackingId) {
       leadUpdated: results.leadUpdated,
       meetingCreated: results.meetingCreated,
       meetingUpdated: results.meetingUpdated,
-      consistencyChecks: results.dataConsistencyChecks
     });
 
     return results;
-
   } catch (error) {
+    results.errors.push(error.message);
     logger.logError(error, {
       context: 'calendly_event_processing',
       trackingId,
       event: eventType,
-      consistencyChecks: results.dataConsistencyChecks
     });
-    
-    results.errors.push(error.message);
     throw error;
   }
 }
 
-/**
- * Validate webhook data structure and required fields
- * @param {Object} webhookData - Webhook data to validate
- * @param {string} trackingId - Tracking ID for logging
- * @returns {Object} Validation result with isValid, errors, and warnings
- */
-function validateWebhookData(webhookData, trackingId) {
+function validateWebhookData(webhookData) {
   const errors = [];
   const warnings = [];
 
-  // Check required top-level fields
   if (!webhookData || typeof webhookData !== 'object') {
     errors.push('Webhook data must be an object');
     return { isValid: false, errors, warnings };
@@ -129,729 +93,412 @@ function validateWebhookData(webhookData, trackingId) {
     errors.push('Missing or invalid event type');
   }
 
-  if (!webhookData.payload || typeof webhookData.payload !== 'object') {
-    errors.push('Missing or invalid payload');
-  }
-
   const payload = webhookData.payload;
-  if (payload) {
-    // Check for required payload fields based on event type
-    if (!payload.invitee || typeof payload.invitee !== 'object') {
-      errors.push('Missing or invalid invitee data');
-    } else {
-      if (!payload.invitee.email || typeof payload.invitee.email !== 'string') {
-        errors.push('Missing or invalid invitee email');
-      }
-      if (!payload.invitee.uri || typeof payload.invitee.uri !== 'string') {
-        warnings.push('Missing invitee URI');
-      }
-    }
+  if (!payload || typeof payload !== 'object') {
+    errors.push('Missing or invalid payload');
+    return { isValid: errors.length === 0, errors, warnings };
+  }
 
-    if (!payload.event || typeof payload.event !== 'object') {
-      errors.push('Missing or invalid event data');
-    } else {
-      if (!payload.event.uri || typeof payload.event.uri !== 'string') {
-        errors.push('Missing or invalid event URI');
-      }
-      
-      // Check time fields for scheduling events
-      if (['invitee.created', 'invitee.rescheduled'].includes(webhookData.event)) {
-        if (!payload.event.start_time || !payload.event.end_time) {
-          errors.push('Missing required start_time or end_time for scheduling event');
-        }
-      }
-    }
+  if (!payload.invitee || typeof payload.invitee !== 'object') {
+    errors.push('Missing or invalid invitee data');
+  } else if (!payload.invitee.email || typeof payload.invitee.email !== 'string') {
+    errors.push('Missing or invalid invitee email');
+  }
 
-    if (!payload.event_type || typeof payload.event_type !== 'object') {
-      warnings.push('Missing event_type data');
+  if (!payload.event || typeof payload.event !== 'object') {
+    errors.push('Missing or invalid event data');
+  } else if (!payload.event.uri || typeof payload.event.uri !== 'string') {
+    errors.push('Missing or invalid event URI');
+  }
+
+  if (['invitee.created', 'invitee.rescheduled'].includes(webhookData.event)) {
+    if (!payload.event?.start_time || !payload.event?.end_time) {
+      errors.push('Missing required start_time or end_time for scheduling event');
     }
   }
 
-  return {
-    isValid: errors.length === 0,
-    errors,
-    warnings
-  };
-}
-
-/**
- * Perform data consistency checks before processing
- * @param {Object} payload - Event payload
- * @param {Object} results - Results object to update
- * @param {string} trackingId - Tracking ID for logging
- */
-async function performDataConsistencyChecks(payload, results, trackingId) {
-  try {
-    const inviteeEmail = payload.invitee?.email;
-    const eventUri = payload.event?.uri;
-    
-    if (inviteeEmail) {
-      // Check if lead exists
-      const existingLead = await findLeadByEmail(inviteeEmail, trackingId);
-      results.dataConsistencyChecks.leadExists = !!existingLead;
-      
-      if (existingLead) {
-        logger.info('Lead found for consistency check', {
-          trackingId,
-          leadId: existingLead.id,
-          email: hashForLogging(inviteeEmail)
-        });
-      }
-    }
-    
-    if (eventUri) {
-      // Check if meeting already exists
-      const eventId = eventUri.split('/').pop();
-      const existingMeeting = await db
-        .select({ id: meetings.id, status: meetings.status })
-        .from(meetings)
-        .where(eq(meetings.calendlyEventId, eventId))
-        .limit(1);
-        
-      results.dataConsistencyChecks.meetingExists = existingMeeting.length > 0;
-      results.dataConsistencyChecks.duplicateCheck = true;
-      
-      if (existingMeeting.length > 0) {
-        logger.info('Existing meeting found for consistency check', {
-          trackingId,
-          meetingId: existingMeeting[0].id,
-          status: existingMeeting[0].status,
-          eventId
-        });
-      }
-    }
-    
-  } catch (error) {
-    logger.warn('Data consistency check failed', {
-      trackingId,
-      error: error.message
-    });
-    // Don't throw - consistency checks are informational
+  if (!payload.event_type || typeof payload.event_type !== 'object') {
+    warnings.push('Missing event_type data');
   }
+
+  return { isValid: errors.length === 0, errors, warnings };
 }
 
-/**
- * Validate post-processing state for data consistency
- * @param {Object} payload - Event payload
- * @param {Object} results - Processing results
- * @param {string} trackingId - Tracking ID for logging
- */
-async function validatePostProcessingState(payload, results, trackingId) {
-  try {
-    const inviteeEmail = payload.invitee?.email;
-    const eventUri = payload.event?.uri;
-    
-    if (results.processed && inviteeEmail) {
-      // Verify lead state is consistent
-      const lead = await findLeadByEmail(inviteeEmail, trackingId);
-      if (!lead) {
-        logger.warn('Post-processing validation: Lead not found after processing', {
-          trackingId,
-          email: hashForLogging(inviteeEmail)
-        });
-      }
-    }
-    
-    if (results.meetingCreated && eventUri) {
-      // Verify meeting was actually created
-      const eventId = eventUri.split('/').pop();
-      const meeting = await db
-        .select({ id: meetings.id })
-        .from(meetings)
-        .where(eq(meetings.calendlyEventId, eventId))
-        .limit(1);
-        
-      if (meeting.length === 0) {
-        logger.error('Post-processing validation: Meeting not found after creation', {
-          trackingId,
-          eventId
-        });
-      }
-    }
-    
-  } catch (error) {
-    logger.warn('Post-processing validation failed', {
-      trackingId,
-      error: error.message
-    });
-    // Don't throw - validation is informational
+function getCalendlyLocationText(location) {
+  if (!location) return null;
+  if (Array.isArray(location)) return location.filter(Boolean).join(', ');
+  if (typeof location === 'object') {
+    return location.join_url || location.location || location.type || JSON.stringify(location);
   }
+  return String(location);
 }
 
-/**
- * Handle invitee.created event (meeting scheduled) with enhanced consistency checks
- * @param {Object} payload - Event payload
- * @param {string} trackingId - Tracking ID for logging
- * @param {Object} results - Results object to update
- * @returns {boolean} Success status
- */
-async function handleInviteeCreated(payload, trackingId, results) {
-  try {
-    const invitee = payload.invitee;
-    const event = payload.event;
-    
-    logger.logWebhookProcessing(trackingId, 'invitee.created', 'handler_start', {
-      inviteeEmail: invitee.email ? hashForLogging(invitee.email) : '[MISSING]',
-      eventStartTime: event.start_time,
-      eventEndTime: event.end_time
-    });
+function getCalendlyJoinUrl(location) {
+  if (!location || typeof location !== 'object' || Array.isArray(location)) return null;
+  return location.join_url || null;
+}
 
-    // Find lead by email
-    const lead = await findLeadByEmail(invitee.email, trackingId);
-    
-    if (lead) {
-      // Check for duplicate meeting before creation
-      if (results.dataConsistencyChecks.meetingExists) {
-        logger.warn('Meeting already exists, skipping creation', {
-          trackingId,
-          leadId: lead.id
-        });
-        results.meetingUpdated = true;
-        return true;
-      }
+function getInviteeName(invitee = {}) {
+  return invitee.name || [invitee.first_name, invitee.last_name].filter(Boolean).join(' ') || 'Calendly Invitee';
+}
 
-      // Ensure invitee.uri is available - fetch if missing
-      let inviteeUri = invitee.uri;
-      if (!inviteeUri && event.uri) {
-        try {
-          // Extract event ID from event URI and construct invitee URI
-          const eventId = event.uri.split('/').pop();
-          // For now, we'll use the event URI as fallback since we don't have the actual invitee URI
-          // In a real implementation, you would call Calendly API to get the invitee details
-          inviteeUri = `${event.uri}/invitees/${invitee.email ? hashForLogging(invitee.email) : 'unknown'}`;
-          
-          logger.info('Generated fallback invitee URI', {
-            trackingId,
-            eventUri: event.uri,
-            generatedInviteeUri: inviteeUri
-          });
-        } catch (error) {
-          logger.warn('Failed to generate invitee URI', {
-            trackingId,
-            error: error.message,
-            eventUri: event.uri
-          });
-        }
-      }
-
-      // Create meeting record in the new meetings table
-      const meetingData = {
-        uri: event.uri,
-        name: payload.event_type?.name || 'Consultation Meeting',
-        description: payload.event_type?.description || '',
-        start_time: event.start_time,
-        end_time: event.end_time,
-        timezone: invitee.timezone || 'UTC',
-        location: event.location || {},
-        event_type: payload.event_type,
-        invitee: {
-          ...invitee,
-          uri: inviteeUri
-        }
-      };
-      
-      const meeting = await meetingService.createMeeting(meetingData, lead.id, trackingId);
-      results.meetingCreated = true;
-      
-      // Update lead with scheduling information (legacy fields for compatibility)
-      await updateLeadWithCalendlyData(lead.id, {
-        status: 'scheduled',
-        calendly_event_uri: event.uri,
-        calendly_invitee_uri: inviteeUri,
-        scheduled_at: event.start_time,
-        meeting_end_time: event.end_time,
-        meeting_location: Array.isArray(event.location) ? event.location.join(', ') : 
-                          (typeof event.location === 'object' ? event.location.location || JSON.stringify(event.location) : event.location) || null,
-        calendly_event_type: payload.event_type?.name,
-        calendly_questions: invitee.questions_and_answers || [],
-        calendly_tracking_data: {
-          utm_campaign: invitee.tracking?.utm_campaign,
-          utm_source: invitee.tracking?.utm_source,
-          utm_medium: invitee.tracking?.utm_medium,
-          utm_content: invitee.tracking?.utm_content,
-          utm_term: invitee.tracking?.utm_term
-        }
-      }, trackingId);
-      results.leadUpdated = true;
-      
-      // Send meeting confirmation email
-      try {
-        logger.info('Sending meeting confirmation email', {
-          trackingId,
-          leadId: lead.id,
-          email: hashForLogging(invitee.email)
-        });
-        
-        await EmailService.sendMeetingConfirmationEmail(
-          invitee.email,
-          invitee.name || `${invitee.first_name || ''} ${invitee.last_name || ''}`.trim(),
-          {
-            title: payload.event_type?.name || 'Consultation Meeting',
-            startTime: event.start_time,
-            endTime: event.end_time,
-            location: Array.isArray(event.location) ? event.location.join(', ') : 
-                     (typeof event.location === 'object' ? event.location.location || JSON.stringify(event.location) : event.location) || 'Online Meeting'
-          }
-        );
-        
-        logger.info('Meeting confirmation email sent successfully', {
-          trackingId,
-          leadId: lead.id
-        });
-      } catch (emailError) {
-        logger.warn('Failed to send meeting confirmation email', {
-          trackingId,
-          leadId: lead.id,
-          error: emailError.message
-        });
-        // Don't fail the entire process if email fails
-      }
-      
-      logger.logLeadProcessing(trackingId, 'lead_updated_with_scheduling', {
-        leadId: lead.id,
-        meetingId: meeting.id,
-        scheduledAt: event.start_time
-      });
-      
-      return true;
-    } else {
-      logger.logLeadProcessing(trackingId, 'lead_not_found_for_scheduling', {
-        inviteeEmail: invitee.email ? hashForLogging(invitee.email) : '[MISSING]'
-      });
-      
-      // Create a new lead record for the scheduled meeting
-      const newLead = await createLeadFromCalendlyEvent(payload, trackingId);
-      results.leadUpdated = true;
-      
-      // Create meeting record for the new lead
-      const meetingData = {
-        uri: event.uri,
-        name: payload.event_type?.name || 'Consultation Meeting',
-        description: payload.event_type?.description || '',
-        start_time: event.start_time,
-        end_time: event.end_time,
-        timezone: invitee.timezone || 'UTC',
-        location: event.location || {},
-        event_type: payload.event_type,
-        invitee: {
-          ...invitee,
-          uri: invitee.uri || `${event.uri}/invitees/${invitee.email ? hashForLogging(invitee.email) : 'unknown'}`
-        }
-      };
-      
-      const meeting = await meetingService.createMeeting(meetingData, newLead.id, trackingId);
-      results.meetingCreated = true;
-      
-      // Send meeting confirmation email
-      try {
-        logger.info('Sending meeting confirmation email for new lead', {
-          trackingId,
-          leadId: newLead.id,
-          email: hashForLogging(invitee.email)
-        });
-        
-        await EmailService.sendMeetingConfirmationEmail(
-          invitee.email,
-          invitee.name || `${invitee.first_name || ''} ${invitee.last_name || ''}`.trim(),
-          {
-            title: payload.event_type?.name || 'Consultation Meeting',
-            startTime: event.start_time,
-            endTime: event.end_time,
-            location: Array.isArray(event.location) ? event.location.join(', ') : 
-                     (typeof event.location === 'object' ? event.location.location || JSON.stringify(event.location) : event.location) || 'Online Meeting'
-          }
-        );
-        
-        logger.info('Meeting confirmation email sent successfully for new lead', {
-          trackingId,
-          leadId: newLead.id
-        });
-      } catch (emailError) {
-        logger.warn('Failed to send meeting confirmation email for new lead', {
-          trackingId,
-          leadId: newLead.id,
-          error: emailError.message
-        });
-        // Don't fail the entire process if email fails
-      }
-      
-      logger.logLeadProcessing(trackingId, 'new_lead_created_with_meeting', {
-        leadId: newLead.id,
-        meetingId: meeting.id,
-        scheduledAt: event.start_time
-      });
-      
-      return true;
-    }
-
-  } catch (error) {
-    logger.logError(error, {
-      context: 'handle_invitee_created',
-      trackingId
-    });
-    throw error;
+function getMeetingReminderScheduledFor(startTime, now = new Date()) {
+  const start = new Date(startTime);
+  if (Number.isNaN(start.getTime())) {
+    return new Date(now.getTime() + 5 * 60 * 1000);
   }
-}
 
-/**
- * Handle invitee.canceled event (meeting canceled) with enhanced consistency checks
- * @param {Object} payload - Event payload
- * @param {string} trackingId - Tracking ID for logging
- * @param {Object} results - Results object to update
- * @returns {boolean} Success status
- */
-async function handleInviteeCanceled(payload, trackingId, results) {
-  try {
-    const invitee = payload.invitee;
-    
-    logger.logWebhookProcessing(trackingId, 'invitee.canceled', 'handler_start', {
-      inviteeEmail: invitee.email ? hashForLogging(invitee.email) : '[MISSING]',
-      canceledAt: invitee.canceled_at
-    });
-
-    // Find lead by email
-    const lead = await findLeadByEmail(invitee.email, trackingId);
-    
-    if (lead) {
-      // Check if meeting exists before updating
-      if (!results.dataConsistencyChecks.meetingExists) {
-        logger.warn('Meeting not found for cancellation', {
-          trackingId,
-          leadId: lead.id
-        });
-        return false;
-      }
-
-      // Update meeting status in meetings table
-      const eventId = payload.event.uri.split('/').pop();
-      await meetingService.updateMeetingStatus(eventId, 'canceled', {
-        canceledAt: new Date(),
-        cancelReason: invitee.cancellation?.reason || 'Canceled by invitee'
-      }, trackingId);
-      results.meetingUpdated = true;
-      
-      // Update lead status (legacy compatibility)
-      await updateLeadWithCalendlyData(lead.id, {
-        status: 'canceled',
-        canceled_at: invitee.canceled_at,
-        cancellation_reason: invitee.cancellation?.reason || null
-      }, trackingId);
-      results.leadUpdated = true;
-      
-      logger.logLeadProcessing(trackingId, 'lead_updated_with_cancellation', {
-        leadId: lead.id,
-        canceledAt: invitee.canceled_at
-      });
-      
-      return true;
-    } else {
-      logger.logLeadProcessing(trackingId, 'lead_not_found_for_cancellation', {
-        inviteeEmail: invitee.email ? hashForLogging(invitee.email) : '[MISSING]'
-      });
-      return false;
-    }
-
-  } catch (error) {
-    logger.logError(error, {
-      context: 'handle_invitee_canceled',
-      trackingId
-    });
-    throw error;
+  const oneHourBefore = new Date(start.getTime() - 60 * 60 * 1000);
+  if (oneHourBefore.getTime() <= now.getTime()) {
+    return new Date(now.getTime() + 5 * 60 * 1000);
   }
+
+  return oneHourBefore;
 }
 
-/**
- * Handle invitee_no_show.created event (meeting no-show) with enhanced consistency checks
- * @param {Object} payload - Event payload
- * @param {string} trackingId - Tracking ID for logging
- * @param {Object} results - Results object to update
- * @returns {boolean} Success status
- */
-async function handleInviteeNoShow(payload, trackingId, results) {
-  try {
-    const invitee = payload.invitee;
-    
-    logger.logWebhookProcessing(trackingId, 'invitee.no_show', 'handler_start', {
-      inviteeEmail: invitee.email ? hashForLogging(invitee.email) : '[MISSING]'
-    });
-
-    // Find lead by email
-    const lead = await findLeadByEmail(invitee.email, trackingId);
-    
-    if (lead) {
-      // Check if meeting exists before updating
-      if (!results.dataConsistencyChecks.meetingExists) {
-        logger.warn('Meeting not found for no-show update', {
-          trackingId,
-          leadId: lead.id
-        });
-        return false;
-      }
-
-      // Update meeting status
-      const eventId = payload.event.uri.split('/').pop();
-      await meetingService.updateMeetingStatus(eventId, 'no_show', {
-        noShowAt: new Date()
-      }, trackingId);
-      results.meetingUpdated = true;
-
-      await updateLeadWithCalendlyData(lead.id, {
-        status: 'no_show',
-        no_show_at: new Date().toISOString()
-      }, trackingId);
-      results.leadUpdated = true;
-      
-      logger.logLeadProcessing(trackingId, 'lead_updated_with_no_show', {
-        leadId: lead.id
-      });
-      
-      return true;
-    } else {
-      logger.logLeadProcessing(trackingId, 'lead_not_found_for_no_show', {
-        inviteeEmail: invitee.email ? hashForLogging(invitee.email) : '[MISSING]'
-      });
-      return false;
-    }
-
-  } catch (error) {
-    logger.logError(error, {
-      context: 'handle_invitee_no_show',
-      trackingId
-    });
-    throw error;
-  }
-}
-
-/**
- * Handle invitee.rescheduled event (meeting rescheduled) with enhanced consistency checks
- * @param {Object} payload - Event payload
- * @param {string} trackingId - Tracking ID for logging
- * @param {Object} results - Results object to update
- * @returns {boolean} Success status
- */
-async function handleInviteeRescheduled(payload, trackingId, results) {
-  try {
-    const invitee = payload.invitee;
-    const event = payload.event;
-    
-    logger.logWebhookProcessing(trackingId, 'invitee.rescheduled', 'handler_start', {
-      inviteeEmail: invitee.email ? hashForLogging(invitee.email) : '[MISSING]',
-      newStartTime: event.start_time,
-      rescheduledAt: invitee.rescheduled_at
-    });
-
-    // Find lead by email
-    const lead = await findLeadByEmail(invitee.email, trackingId);
-    
-    if (lead) {
-      // Check if meeting exists before updating
-      if (!results.dataConsistencyChecks.meetingExists) {
-        logger.warn('Meeting not found for reschedule update', {
-          trackingId,
-          leadId: lead.id
-        });
-        return false;
-      }
-
-      // Update meeting with new schedule
-      const eventId = payload.event.uri.split('/').pop();
-      await meetingService.updateMeetingStatus(eventId, 'rescheduled', {
-        startTime: new Date(event.start_time),
-        endTime: new Date(event.end_time),
-        rescheduledAt: new Date(invitee.rescheduled_at || new Date())
-      }, trackingId);
-      results.meetingUpdated = true;
-
-      await updateLeadWithCalendlyData(lead.id, {
-        status: 'rescheduled',
-        scheduled_at: event.start_time,
-        meeting_end_time: event.end_time,
-        rescheduled_at: invitee.rescheduled_at,
-        previous_scheduled_at: lead.scheduled_at // Keep track of previous time
-      }, trackingId);
-      results.leadUpdated = true;
-      
-      logger.logLeadProcessing(trackingId, 'lead_updated_with_reschedule', {
-        leadId: lead.id,
-        newScheduledAt: event.start_time
-      });
-      
-      return true;
-    } else {
-      logger.logLeadProcessing(trackingId, 'lead_not_found_for_reschedule', {
-        inviteeEmail: invitee.email ? hashForLogging(invitee.email) : '[MISSING]'
-      });
-      return false;
-    }
-
-  } catch (error) {
-    logger.logError(error, {
-      context: 'handle_invitee_rescheduled',
-      trackingId
-    });
-    throw error;
-  }
-}
-
-/**
- * Find lead by email address
- * @param {string} email - Email address
- * @param {string} trackingId - Tracking ID for logging
- * @returns {Object|null} Lead record or null
- */
 async function findLeadByEmail(email, trackingId) {
-  if (!email) {
-    return null;
-  }
-
-  try {
-    logger.logLeadProcessing(trackingId, 'searching_lead_by_email', {
-      email: hashForLogging(email)
+  if (!email) return null;
+  logger.logLeadProcessing(trackingId, 'searching_lead_by_email', {
+    email: hashForLogging(email),
+  });
+  const lead = await insforgeDataService.getLeadByEmail(email);
+  if (lead) {
+    logger.logLeadProcessing(trackingId, 'lead_found_by_email', {
+      leadId: lead.id,
+      email: hashForLogging(email),
     });
-
-    const [lead] = await db
-       .select()
-       .from(leads)
-       .where(eq(leads.email, email))
-       .orderBy(desc(leads.createdAt))
-       .limit(1);
-
-    if (lead) {
-      logger.logLeadProcessing(trackingId, 'lead_found_by_email', {
-        leadId: lead.id,
-        email: hashForLogging(email)
-      });
-      return lead;
-    }
-
-    return null;
-
-  } catch (error) {
-    logger.logError(error, {
-      context: 'find_lead_by_email',
-      trackingId,
-      email: hashForLogging(email)
-    });
-    throw error;
   }
+  return lead;
 }
 
-/**
- * Update lead with Calendly data
- * @param {string} leadId - Lead ID
- * @param {Object} calendlyData - Calendly event data
- * @param {string} trackingId - Tracking ID for logging
- * @returns {Object} Updated lead
- */
-async function updateLeadWithCalendlyData(leadId, calendlyData, trackingId) {
+async function updateLeadSafely(leadId, patch, fallbackPatch, trackingId) {
   try {
-    logger.logLeadProcessing(trackingId, 'updating_lead_with_calendly_data', {
+    return await insforgeDataService.updateLead(leadId, patch);
+  } catch (error) {
+    logger.warn('Full Calendly lead update failed; retrying with minimal patch', {
+      trackingId,
       leadId,
-      status: calendlyData.status
+      error: error.message,
     });
-
-    const updateData = {
-      ...calendlyData,
-      updatedAt: new Date(),
-      lastCalendlyUpdate: new Date()
-    };
-
-    const [lead] = await db
-      .update(leads)
-      .set(updateData)
-      .where(eq(leads.id, leadId))
-      .returning();
-
-    if (!lead) {
-      throw new Error(`Lead not found: ${leadId}`);
-    }
-
-    logger.logLeadProcessing(trackingId, 'lead_updated_with_calendly_data', {
-      leadId: lead.id,
-      status: lead.status
-    });
-
-    return lead;
-
-  } catch (error) {
-    logger.logError(error, {
-      context: 'update_lead_with_calendly_data',
-      trackingId,
-      leadId
-    });
-    throw error;
+    return insforgeDataService.updateLead(leadId, fallbackPatch);
   }
 }
 
-/**
- * Create a new lead record from Calendly event (for cases where lead doesn't exist)
- * @param {Object} payload - Calendly event payload
- * @param {string} trackingId - Tracking ID for logging
- * @returns {Object} Created lead
- */
 async function createLeadFromCalendlyEvent(payload, trackingId) {
-  try {
-    const invitee = payload.invitee;
-    const event = payload.event;
-    
-    logger.logLeadProcessing(trackingId, 'creating_lead_from_calendly', {
-      inviteeEmail: invitee.email ? hashForLogging(invitee.email) : '[MISSING]'
+  const invitee = payload.invitee;
+  const event = payload.event;
+  const nameParts = getInviteeName(invitee).split(' ');
+
+  const lead = await insforgeDataService.createLead({
+    email: invitee.email.trim().toLowerCase(),
+    firstName: invitee.first_name || nameParts[0] || null,
+    lastName: invitee.last_name || nameParts.slice(1).join(' ') || null,
+    fullName: getInviteeName(invitee),
+    source: 'calendly_direct',
+    priority: 'high',
+    status: 'scheduled',
+    qualificationStatus: 'qualified',
+    qualificationScore: 90,
+    leadStage: 'booked',
+    schedulingState: 'scheduled',
+    preferredContactChannel: 'email',
+    meetingScheduled: true,
+    scheduledAt: event.start_time,
+    meetingEndTime: event.end_time,
+    meetingLocation: getCalendlyLocationText(event.location),
+    calendlyEventUri: event.uri,
+    calendlyInviteeUri: invitee.uri || null,
+    calendlyEventType: payload.event_type?.name || null,
+    calendlyQuestions: invitee.questions_and_answers || [],
+    calendlyTrackingData: invitee.tracking || {},
+    lastCalendlyUpdate: new Date(),
+    trackingId,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+
+  logger.logLeadProcessing(trackingId, 'lead_created_from_calendly', {
+    leadId: lead.id,
+    email: hashForLogging(invitee.email),
+  });
+
+  return lead;
+}
+
+async function logCalendlyConversation({ lead, payload, messageType, subject, bodyText, trackingId, extraMetadata = {} }) {
+  const conversation = await leadConversationService.ensurePrimaryConversation(lead, 'email');
+  await leadConversationService.logSystemEvent({
+    lead,
+    conversationId: conversation.id,
+    channel: 'calendar',
+    messageType,
+    subject,
+    bodyText,
+    metadata: {
+      trackingId,
+      calendlyEventUri: payload.event?.uri || null,
+      calendlyInviteeUri: payload.invitee?.uri || null,
+      eventType: payload.event_type?.name || null,
+      startTime: payload.event?.start_time || null,
+      endTime: payload.event?.end_time || null,
+      location: getCalendlyLocationText(payload.event?.location),
+      joinUrl: getCalendlyJoinUrl(payload.event?.location),
+      ...extraMetadata,
+    },
+  });
+
+  await leadConversationService.updateConversation(conversation.id, {
+    conversationStatus: messageType === 'calendly_meeting_scheduled' ? 'meeting_scheduled' : conversation.conversationStatus,
+    nextAction: messageType === 'calendly_meeting_scheduled' ? 'monitor_meeting' : conversation.nextAction,
+    nextActionAt: null,
+    lastIntent: messageType,
+    lastIntentAt: new Date(),
+    lastSummary: bodyText,
+  });
+
+  return conversation;
+}
+
+async function sendCalendlyMeetingDetailsSms({ lead, payload, trackingId }) {
+  if (!lead?.phone) {
+    logger.info('Skipping Calendly meeting details SMS because lead has no phone', {
+      trackingId,
+      leadId: lead?.id,
     });
-
-    const leadRecord = {
-      email: invitee.email,
-      firstName: invitee.first_name || '',
-      lastName: invitee.last_name || '',
-      fullName: invitee.name || `${invitee.first_name || ''} ${invitee.last_name || ''}`.trim(),
-      status: 'scheduled',
-      source: 'calendly_direct',
-      calendlyEventUri: event.uri,
-      calendlyInviteeUri: invitee.uri,
-      calendlyStartTime: new Date(event.start_time),
-      calendlyEndTime: new Date(event.end_time),
-      meetingLocation: Array.isArray(event.location) ? event.location.join(', ') : 
-                       (typeof event.location === 'object' ? event.location.location || JSON.stringify(event.location) : event.location) || null,
-      calendlyEventType: payload.event_type?.name,
-      calendlyQuestions: invitee.questions_and_answers || [],
-      calendlyTrackingData: {
-        utm_campaign: invitee.tracking?.utm_campaign,
-        utm_source: invitee.tracking?.utm_source,
-        utm_medium: invitee.tracking?.utm_medium,
-        utm_content: invitee.tracking?.utm_content,
-        utm_term: invitee.tracking?.utm_term
-      },
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-
-    // Remove null/undefined values
-    Object.keys(leadRecord).forEach(key => {
-      if (leadRecord[key] === null || leadRecord[key] === undefined || leadRecord[key] === '') {
-        delete leadRecord[key];
-      }
-    });
-
-    const [lead] = await db
-      .insert(leads)
-      .values(leadRecord)
-      .returning();
-
-    if (!lead) {
-      throw new Error('Failed to create lead from Calendly event');
-    }
-
-    logger.logLeadProcessing(trackingId, 'lead_created_from_calendly', {
-      leadId: lead.id,
-      email: invitee.email ? hashForLogging(invitee.email) : '[MISSING]'
-    });
-
-    return lead;
-
-  } catch (error) {
-    logger.logError(error, {
-      context: 'create_lead_from_calendly',
-      trackingId
-    });
-    throw error;
+    return null;
   }
+
+  const smsResult = await twilioSmsService.sendCalendlyMeetingDetails(
+    lead,
+    {
+      startTime: payload.event?.start_time,
+      meeting_url: getCalendlyJoinUrl(payload.event?.location),
+      location: getCalendlyLocationText(payload.event?.location),
+    },
+    trackingId
+  );
+
+  logger.info('Calendly meeting details SMS processed', {
+    trackingId,
+    leadId: lead.id,
+    success: smsResult.success,
+    status: smsResult.status || null,
+    error: smsResult.success ? null : smsResult.error,
+  });
+
+  return smsResult;
+}
+
+async function scheduleMeetingSmsReminder({ lead, conversationId, payload, trackingId }) {
+  if (!lead?.phone || !payload.event?.start_time) {
+    logger.info('Skipping meeting SMS reminder schedule because lead has no phone or event start time', {
+      trackingId,
+      leadId: lead?.id,
+      hasStartTime: Boolean(payload.event?.start_time),
+    });
+    return null;
+  }
+
+  const scheduledFor = getMeetingReminderScheduledFor(payload.event.start_time);
+  const action = await insforgeDataService.createBobAction({
+    leadId: lead.id,
+    conversationId,
+    actionType: 'send_meeting_sms_reminder',
+    channel: 'sms',
+    status: 'pending',
+    reason: 'Send SMS reminder after Calendly booking is confirmed',
+    payload: {
+      source: 'calendly_webhook',
+      trackingId,
+      calendlyEventUri: payload.event?.uri || null,
+      calendlyInviteeUri: payload.invitee?.uri || null,
+      eventType: payload.event_type?.name || null,
+      startTime: payload.event?.start_time,
+      endTime: payload.event?.end_time || null,
+      location: getCalendlyLocationText(payload.event?.location),
+      meetingUrl: getCalendlyJoinUrl(payload.event?.location),
+    },
+    scheduledFor,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  });
+
+  logger.info('Scheduled post-booking SMS meeting reminder', {
+    trackingId,
+    leadId: lead.id,
+    actionId: action.id,
+    scheduledFor,
+  });
+
+  return action;
+}
+
+async function handleInviteeCreated(payload, trackingId, results) {
+  const invitee = payload.invitee;
+  const event = payload.event;
+  let lead = await findLeadByEmail(invitee.email, trackingId);
+
+  if (!lead) {
+    lead = await createLeadFromCalendlyEvent(payload, trackingId);
+  }
+
+  results.dataConsistencyChecks.leadExists = true;
+  const fullPatch = {
+    status: 'scheduled',
+    leadStage: 'booked',
+    schedulingState: 'scheduled',
+    meetingScheduled: true,
+    scheduledAt: event.start_time,
+    meetingEndTime: event.end_time,
+    meetingLocation: getCalendlyLocationText(event.location),
+    calendlyEventUri: event.uri,
+    calendlyInviteeUri: invitee.uri || null,
+    calendlyEventType: payload.event_type?.name || null,
+    calendlyQuestions: invitee.questions_and_answers || [],
+    calendlyTrackingData: invitee.tracking || {},
+    lastCalendlyUpdate: new Date(),
+    requiresHumanReview: false,
+    updatedAt: new Date(),
+  };
+  const fallbackPatch = {
+    status: 'scheduled',
+    leadStage: 'booked',
+    schedulingState: 'scheduled',
+    meetingScheduled: true,
+    scheduledAt: event.start_time,
+    updatedAt: new Date(),
+  };
+
+  lead = await updateLeadSafely(lead.id, fullPatch, fallbackPatch, trackingId);
+  results.leadUpdated = true;
+
+  const conversation = await logCalendlyConversation({
+    lead,
+    payload,
+    messageType: 'calendly_meeting_scheduled',
+    subject: 'Calendly meeting scheduled',
+    bodyText: `Lead booked ${payload.event_type?.name || 'a consultation'} for ${event.start_time}.`,
+    trackingId,
+  });
+
+  await sendCalendlyMeetingDetailsSms({ lead, payload, trackingId });
+  await scheduleMeetingSmsReminder({ lead, conversationId: conversation.id, payload, trackingId });
+
+  logger.logLeadProcessing(trackingId, 'lead_updated_with_scheduling', {
+    leadId: lead.id,
+    scheduledAt: event.start_time,
+  });
+
+  return true;
+}
+
+async function handleInviteeCanceled(payload, trackingId, results) {
+  const lead = await findLeadByEmail(payload.invitee.email, trackingId);
+  if (!lead) return false;
+
+  await updateLeadSafely(
+    lead.id,
+    {
+      status: 'canceled',
+      schedulingState: 'reschedule_requested',
+      canceledAt: payload.invitee.canceled_at || new Date(),
+      cancellationReason: payload.invitee.cancellation?.reason || null,
+      lastCalendlyUpdate: new Date(),
+      updatedAt: new Date(),
+    },
+    {
+      status: 'canceled',
+      schedulingState: 'reschedule_requested',
+      updatedAt: new Date(),
+    },
+    trackingId
+  );
+  results.leadUpdated = true;
+
+  await logCalendlyConversation({
+    lead,
+    payload,
+    messageType: 'calendly_meeting_canceled',
+    subject: 'Calendly meeting canceled',
+    bodyText: `Lead canceled the Calendly meeting.${payload.invitee.cancellation?.reason ? ` Reason: ${payload.invitee.cancellation.reason}` : ''}`,
+    trackingId,
+  });
+
+  return true;
+}
+
+async function handleInviteeRescheduled(payload, trackingId, results) {
+  const lead = await findLeadByEmail(payload.invitee.email, trackingId);
+  if (!lead) return false;
+
+  await updateLeadSafely(
+    lead.id,
+    {
+      status: 'scheduled',
+      leadStage: 'booked',
+      schedulingState: 'scheduled',
+      scheduledAt: payload.event.start_time,
+      meetingEndTime: payload.event.end_time,
+      meetingLocation: getCalendlyLocationText(payload.event.location),
+      rescheduledAt: payload.invitee.rescheduled_at || new Date(),
+      lastCalendlyUpdate: new Date(),
+      updatedAt: new Date(),
+    },
+    {
+      status: 'scheduled',
+      schedulingState: 'scheduled',
+      scheduledAt: payload.event.start_time,
+      updatedAt: new Date(),
+    },
+    trackingId
+  );
+  results.leadUpdated = true;
+
+  const conversation = await logCalendlyConversation({
+    lead,
+    payload,
+    messageType: 'calendly_meeting_rescheduled',
+    subject: 'Calendly meeting rescheduled',
+    bodyText: `Lead rescheduled the Calendly meeting for ${payload.event.start_time}.`,
+    trackingId,
+  });
+
+  await sendCalendlyMeetingDetailsSms({ lead, payload, trackingId });
+  await scheduleMeetingSmsReminder({ lead, conversationId: conversation.id, payload, trackingId });
+
+  return true;
+}
+
+async function handleInviteeNoShow(payload, trackingId, results) {
+  const lead = await findLeadByEmail(payload.invitee.email, trackingId);
+  if (!lead) return false;
+
+  await updateLeadSafely(
+    lead.id,
+    {
+      status: 'no_show',
+      schedulingState: 'needs_follow_up',
+      noShowAt: new Date(),
+      lastCalendlyUpdate: new Date(),
+      updatedAt: new Date(),
+    },
+    {
+      status: 'no_show',
+      schedulingState: 'needs_follow_up',
+      updatedAt: new Date(),
+    },
+    trackingId
+  );
+  results.leadUpdated = true;
+
+  await logCalendlyConversation({
+    lead,
+    payload,
+    messageType: 'calendly_no_show',
+    subject: 'Calendly no-show recorded',
+    bodyText: 'Calendly marked the invitee as a no-show.',
+    trackingId,
+  });
+
+  return true;
 }

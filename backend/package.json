@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "node --watch index.js",
     "start": "node index.js",
+    "mcp:calendly": "node mcp/calendly-server.js",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",

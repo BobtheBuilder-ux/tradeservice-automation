@@ -37,10 +37,20 @@ test('nextStep handles not interested and stop replies as terminal opt-out outco
   assert.equal(step.outcome, 'opted_out');
 });
 
-test('nextStep completes booking offer and requests SMS booking link', () => {
-  const step = service.nextStep('booking_offer', 'yes send me the link', {});
+test('nextStep moves booking offer into direct day and time capture', () => {
+  const step = service.nextStep('booking_offer', 'yes book it', {});
 
-  assert.equal(step.step, 'booking_link_requested');
+  assert.equal(step.step, 'booking_time');
+  assert.equal(step.done, false);
+  assert.match(step.prompt, /day and time/);
+  assert.deepEqual(step.extracted, { wantsDirectBooking: true });
+});
+
+test('nextStep captures preferred booking time text', () => {
+  const step = service.nextStep('booking_time', 'tomorrow at 3 PM', {});
+
+  assert.equal(step.step, 'direct_booking_requested');
   assert.equal(step.done, true);
-  assert.equal(step.outcome, 'send_booking_link');
+  assert.equal(step.outcome, 'direct_booking_requested');
+  assert.deepEqual(step.extracted, { preferredBookingTimeText: 'tomorrow at 3 PM' });
 });
