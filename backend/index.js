@@ -21,6 +21,7 @@ import adminRoutes from './src/routes/admin.js';
 import feedbackRoutes from './src/routes/feedback.js';
 import integrationsRoutes from './src/routes/integrations.js';
 import testRoutes from './src/routes/test.js';
+import voiceRoutes from './src/routes/voice.js';
 
 import { WorkflowOrchestrator } from './workflow-orchestrator.js';
 import reminderScheduler from './src/services/reminder-scheduler.js';
@@ -31,6 +32,7 @@ import followUpAutomationService from './src/services/follow-up-automation-servi
 import automatedEmailWorkflowService from './src/services/automated-email-workflow-service.js';
 import bobOrchestrator from './src/services/bob-orchestrator.js';
 import bobActionExecutor from './src/services/bob-action-executor.js';
+import voiceCallWorker from './src/services/voice-call-worker.js';
 import { calendlyConfig, db, automatedEmailWorkflowEnabled, hubspotEnabled } from './src/config/index.js';
 import { leadProcessingLogs } from './src/db/schema.js';
 import logger from './utils/logger.js';
@@ -156,6 +158,7 @@ app.use('/api/leads', leadsRoutes);
 app.use('/api/feedback', feedbackRoutes);
 app.use('/api/integrations', integrationsRoutes);
 app.use('/api/test', testRoutes);
+app.use('/api/voice', voiceRoutes);
 if (hubspotEnabled) {
   app.use('/webhook/hubspot', hubspotWebhookRoutes);
 }
@@ -601,6 +604,13 @@ app.listen(PORT, HOST, async () => {
   } catch (error) {
     logWithTimestamp('error', '❌ Failed to start Bob action executor', { error: error.message, stack: error.stack });
   }
+
+  try {
+    voiceCallWorker.start();
+    logWithTimestamp('info', `✅ Voice call worker ${voiceCallWorker.getStatus().enabled ? 'started' : 'left disabled'} successfully`);
+  } catch (error) {
+    logWithTimestamp('error', '❌ Failed to start voice call worker', { error: error.message, stack: error.stack });
+  }
   
   logWithTimestamp('info', '🎉 All systems initialized successfully - Server ready to handle requests');
   console.log('\n' + '='.repeat(80));
@@ -618,6 +628,7 @@ app.listen(PORT, HOST, async () => {
   console.log(`📬 Automated Email Workflow: Active (5-minute intervals)`);
   console.log(`🤖 Bob Orchestrator: Active (5-minute intervals)`);
   console.log(`⚙️  Bob Action Executor: Active (60-second intervals)`);
+  console.log(`☎️  Voice Call Worker: ${voiceCallWorker.getStatus().enabled ? `Active (${voiceCallWorker.getStatus().maxConcurrentCalls} concurrent max)` : 'Disabled'}`);
   console.log('='.repeat(80));
   console.log('='.repeat(80) + '\n');
 });
