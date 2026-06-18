@@ -15,6 +15,33 @@ class TwilioSmsService {
     }
   }
 
+  static getTwilioAuthConfig() {
+    const accountSid = process.env.TWILIO_ACCOUNT_SID;
+    const apiKey = process.env.TWILIO_API_KEY;
+    const apiSecret = process.env.TWILIO_API_SECRET;
+    const authToken = process.env.TWILIO_AUTH_TOKEN;
+
+    if (accountSid && apiKey && apiSecret) {
+      return {
+        username: apiKey,
+        password: apiSecret,
+        options: { accountSid },
+        mode: 'api_key',
+      };
+    }
+
+    if (accountSid && authToken) {
+      return {
+        username: accountSid,
+        password: authToken,
+        options: undefined,
+        mode: 'auth_token',
+      };
+    }
+
+    return null;
+  }
+
   buildLeadBookingReminderMessage(lead = {}, bookingLink) {
     return buildLeadBookingReminderMessage(lead, bookingLink);
   }
@@ -76,16 +103,19 @@ class TwilioSmsService {
    */
   initializeClient() {
     try {
-      if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
+      const authConfig = TwilioSmsService.getTwilioAuthConfig();
+      if (!authConfig) {
         logger.error('Twilio credentials not configured', {
           context: 'twilio_initialization'
         });
         return;
       }
 
-      this.client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+      this.client = authConfig.options
+        ? twilio(authConfig.username, authConfig.password, authConfig.options)
+        : twilio(authConfig.username, authConfig.password);
       this.fromNumber = process.env.TWILIO_PHONE_NUMBER;
-      logger.info('Twilio SMS service initialized successfully');
+      logger.info('Twilio SMS service initialized successfully', { authMode: authConfig.mode });
     } catch (error) {
       logger.error(error.message, { context: 'twilio_initialization', stack: error.stack });
     }
