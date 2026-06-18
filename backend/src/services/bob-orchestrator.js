@@ -47,6 +47,10 @@ class BobOrchestrator {
     return insforgeDataService.getLatestOpenBobAction(leadId);
   }
 
+  shouldPersistDecision(decision) {
+    return !['wait'].includes(decision?.actionType);
+  }
+
   async syncLead(lead) {
     const conversation = await leadConversationService.ensurePrimaryConversation(lead);
     const context = bobDecisionEngine.buildLeadContext(lead, conversation);
@@ -59,6 +63,17 @@ class BobOrchestrator {
       lastSummary: bobDecisionEngine.summarizeDecision(lead, decision),
       updatedAt: new Date(),
     });
+
+    if (!this.shouldPersistDecision(decision)) {
+      return {
+        leadId: lead.id,
+        conversationId: conversation.id,
+        actionId: null,
+        actionType: decision.actionType,
+        skippedInsert: true,
+        skipReason: 'non_executable_decision',
+      };
+    }
 
     const existingOpen = await this.getLatestOpenAction(lead.id);
     if (existingOpen && existingOpen.actionType === decision.actionType) {
