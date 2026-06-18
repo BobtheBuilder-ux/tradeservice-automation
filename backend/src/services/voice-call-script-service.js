@@ -5,6 +5,15 @@ const NO_PATTERNS = [/\bno\b/i, /not now/i, /busy/i, /later/i, /callback/i, /cal
 class VoiceCallScriptService {
   constructor(options = {}) {
     this.bookingLink = options.bookingLink || process.env.CALENDLY_SCHEDULING_URL || process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK || '';
+    this.voiceName = options.voiceName || process.env.TWILIO_VOICE_NAME || 'Polly.Joanna-Neural';
+    this.language = options.language || process.env.TWILIO_VOICE_LANGUAGE || 'en-US';
+  }
+
+  getSayOptions() {
+    return {
+      voice: this.voiceName,
+      language: this.language,
+    };
   }
 
   getFirstName(lead = {}) {

@@ -1,6 +1,7 @@
 import express from 'express';
 import twilio from 'twilio';
 import voiceCallScriptService from '../services/voice-call-script-service.js';
+import { buildCompletedCallActionPatch, shouldSendPostCallBookingSms } from '../services/voice-call-outcome-service.js';
 import voiceCallWorker from '../services/voice-call-worker.js';
 import insforgeDataService from '../services/insforge-data-service.js';
 import leadConversationService from '../services/lead-conversation-service.js';
@@ -44,8 +45,8 @@ function buildGatherResponse({ prompt, actionId, leadId, conversationId, step })
     speechTimeout: 'auto',
     timeout: 6,
   });
-  gather.say({ voice: 'Polly.Joanna' }, prompt);
-  response.say({ voice: 'Polly.Joanna' }, 'I did not hear a response. I will send the booking link by text if available. Thank you.');
+  gather.say(voiceCallScriptService.getSayOptions(), prompt);
+  response.say(voiceCallScriptService.getSayOptions(), 'I did not hear a response. I will send the booking link by text if available. Thank you.');
   response.hangup();
   return response.toString();
 }
@@ -198,7 +199,7 @@ router.post('/gather', requireTwilioSignature, async (req, res) => {
 
     if (next.done) {
       const response = new twilio.twiml.VoiceResponse();
-      response.say({ voice: 'Polly.Joanna' }, next.prompt);
+      response.say(voiceCallScriptService.getSayOptions(), next.prompt);
       response.hangup();
       return sendTwiML(res, response.toString());
     }
@@ -219,17 +220,54 @@ router.post('/status', requireTwilioSignature, async (req, res) => {
     const callStatus = req.body?.CallStatus;
     if (actionId) {
       const existingAction = await insforgeDataService.getBobActionById(actionId);
+      const lead = existingAction?.leadId ? await insforgeDataService.getLeadById(existingAction.leadId) : null;
       const terminalStatus = ['completed', 'busy', 'failed', 'no-answer', 'canceled'].includes(callStatus);
-      await insforgeDataService.updateBobAction(actionId, {
-        status: callStatus === 'completed' ? 'completed' : terminalStatus ? 'deferred' : 'calling',
-        result: {
-          ...(existingAction?.result || {}),
+      let smsResult = null;
+
+      if (lead && shouldSendPostCallBookingSms(existingAction, callStatus)) {
+        const bookingLink = process.env.CALENDLY_SCHEDULING_URL || process.env.CALENDLY_BOOKING_URL || process.env.CALENDLY_LINK;
+        if (bookingLink) {
+          smsResult = await twilioSmsService.sendLeadBookingReminder(lead, bookingLink, `post_call_${req.body?.CallSid || actionId}`);
+          if (existingAction?.conversationId) {
+            await leadConversationService.logSystemEvent({
+              lead,
+              conversationId: existingAction.conversationId,
+              channel: 'sms',
+              messageType: 'post_call_booking_sms',
+              subject: smsResult.success ? 'Bob sent the booking link after the call' : 'Bob could not send the booking link after the call',
+              bodyText: smsResult.success ? smsResult.message : `SMS failed after call: ${smsResult.error}`,
+              metadata: {
+                bobActionId: actionId,
+                callSid: req.body?.CallSid || null,
+                providerMessageId: smsResult.messageSid || null,
+                status: smsResult.status || null,
+                success: smsResult.success,
+              },
+            });
+          }
+        }
+      }
+
+      if (callStatus === 'completed') {
+        await insforgeDataService.updateBobAction(actionId, buildCompletedCallActionPatch({
+          action: existingAction,
           callSid: req.body?.CallSid,
-          providerStatus: callStatus,
+          callStatus,
           callDuration: req.body?.CallDuration || null,
-        },
-        updatedAt: new Date(),
-      });
+          smsResult,
+        }));
+      } else {
+        await insforgeDataService.updateBobAction(actionId, {
+          status: terminalStatus ? 'awaiting_call' : 'calling',
+          result: {
+            ...(existingAction?.result || {}),
+            callSid: req.body?.CallSid,
+            providerStatus: callStatus,
+            callDuration: req.body?.CallDuration || null,
+          },
+          updatedAt: new Date(),
+        });
+      }
     }
     return res.json({ success: true });
   } catch (error) {
