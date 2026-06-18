@@ -402,6 +402,21 @@ class InsForgeDataService {
       .slice(0, limit);
   }
 
+  async getQueuedCallActions(limit = 20, now = new Date()) {
+    const dueTime = now.getTime();
+    const rows = await select(TABLES.bobActions);
+    return rows
+      .filter((row) => row.actionType === 'queue_call_attempt' && row.status === 'awaiting_call')
+      .filter((row) => !row.scheduledFor || new Date(row.scheduledFor).getTime() <= dueTime)
+      .sort(byScheduledThenCreated)
+      .slice(0, limit);
+  }
+
+  async getActiveVoiceCallActions() {
+    const rows = await select(TABLES.bobActions);
+    return rows.filter((row) => row.actionType === 'queue_call_attempt' && row.status === 'calling');
+  }
+
   async createEmailQueue(values) {
     const [queuedEmail] = await insert(TABLES.emailQueue, values);
     return queuedEmail;
