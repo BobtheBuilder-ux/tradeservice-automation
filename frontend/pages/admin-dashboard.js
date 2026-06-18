@@ -86,17 +86,27 @@ export default function AdminDashboard() {
   // Bob Activity State
   const [bobActivity, setBobActivity] = useState({
     actions: [],
+    callActions: [],
+    callOutcomes: [],
     reviewQueue: [],
+    voiceWorker: null,
     stats: {
       totalActions: 0,
       pendingActions: 0,
       failedActions: 0,
       awaitingHuman: 0,
       awaitingCall: 0,
+      activeCalls: 0,
+      completedCalls: 0,
       reviewLeads: 0
     }
   });
   const [bobActivityLoading, setBobActivityLoading] = useState(false);
+  const [bobControlBusy, setBobControlBusy] = useState(false);
+  const [selectedCallTranscript, setSelectedCallTranscript] = useState(null);
+  const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
+  const [callOutcomeAction, setCallOutcomeAction] = useState(null);
+  const [callOutcomeForm, setCallOutcomeForm] = useState({ outcome: 'needs_human_follow_up', notes: '' });
 
   useEffect(() => {
     // Wait for auth to finish loading before making redirect decisions
@@ -239,13 +249,18 @@ export default function AdminDashboard() {
         const data = await response.json();
         setBobActivity({
           actions: data.actions || [],
+          callActions: data.callActions || [],
+          callOutcomes: data.callOutcomes || [],
           reviewQueue: data.reviewQueue || [],
+          voiceWorker: data.voiceWorker || null,
           stats: data.stats || {
             totalActions: 0,
             pendingActions: 0,
             failedActions: 0,
             awaitingHuman: 0,
             awaitingCall: 0,
+            activeCalls: 0,
+            completedCalls: 0,
             reviewLeads: 0
           }
         });
@@ -254,6 +269,102 @@ export default function AdminDashboard() {
       console.error('Error fetching Bob activity:', err);
     } finally {
       setBobActivityLoading(false);
+    }
+  };
+
+  const handleStartQueuedCalls = async () => {
+    try {
+      setBobControlBusy(true);
+      const response = await fetch('/api/admin/bob-activity/calls/start', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(data.error || 'Failed to start queued calls');
+        return;
+      }
+
+      await fetchBobActivity();
+    } catch (err) {
+      console.error('Error starting queued calls:', err);
+      setError('Failed to start queued calls');
+    } finally {
+      setBobControlBusy(false);
+    }
+  };
+
+  const handleViewCallTranscript = async (action) => {
+    try {
+      setCallTranscriptLoading(true);
+      const response = await fetch(`/api/admin/bob-activity/actions/${action.id}/transcript`, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(data.error || 'Failed to load call transcript');
+        return;
+      }
+
+      setSelectedCallTranscript(data);
+    } catch (err) {
+      console.error('Error loading call transcript:', err);
+      setError('Failed to load call transcript');
+    } finally {
+      setCallTranscriptLoading(false);
+    }
+  };
+
+  const openCallOutcomeModal = (action) => {
+    const existingOutcome = action.result?.callOutcome || action.result?.outcome;
+    const allowedOutcomes = bobActivity.callOutcomes.length
+      ? bobActivity.callOutcomes
+      : ['booked', 'no_answer', 'callback_requested', 'wrong_number', 'not_interested', 'needs_human_follow_up'];
+
+    setCallOutcomeAction(action);
+    setCallOutcomeForm({
+      outcome: allowedOutcomes.includes(existingOutcome) ? existingOutcome : 'needs_human_follow_up',
+      notes: action.result?.callOutcomeNotes || ''
+    });
+  };
+
+  const handleRecordCallOutcome = async (e) => {
+    e.preventDefault();
+    if (!callOutcomeAction) return;
+
+    try {
+      setBobControlBusy(true);
+      const response = await fetch(`/api/admin/bob-activity/actions/${callOutcomeAction.id}/call-outcome`, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(callOutcomeForm)
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        setError(data.error || 'Failed to record call outcome');
+        return;
+      }
+
+      setCallOutcomeAction(null);
+      setCallOutcomeForm({ outcome: 'needs_human_follow_up', notes: '' });
+      await Promise.all([fetchBobActivity(), fetchLeads()]);
+    } catch (err) {
+      console.error('Error recording call outcome:', err);
+      setError('Failed to record call outcome');
+    } finally {
+      setBobControlBusy(false);
     }
   };
 
@@ -1167,6 +1278,7 @@ export default function AdminDashboard() {
                   { label: 'Needs Review', value: bobActivity.stats.reviewLeads, icon: AlertCircle, tone: 'text-orange-600' },
                   { label: 'Awaiting Human', value: bobActivity.stats.awaitingHuman, icon: User, tone: 'text-purple-600' },
                   { label: 'Awaiting Call', value: bobActivity.stats.awaitingCall, icon: Phone, tone: 'text-cyan-600' },
+                  { label: 'Active Calls', value: bobActivity.stats.activeCalls, icon: Phone, tone: 'text-indigo-600' },
                   { label: 'Failed', value: bobActivity.stats.failedActions, icon: X, tone: 'text-red-600' }
                 ].map((item) => {
                   const Icon = item.icon;
@@ -1182,6 +1294,104 @@ export default function AdminDashboard() {
                     </div>
                   );
                 })}
+              </div>
+
+              <div className="bg-white rounded-lg shadow overflow-hidden">
+                <div className="px-6 py-4 border-b border-gray-200 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <h3 className="text-lg font-medium text-gray-900">Voice Call Control Center</h3>
+                    <p className="text-sm text-gray-500">Monitor queued, active, and completed Bob calls, review transcripts, and record final outcomes.</p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className={`inline-flex items-center px-3 py-2 rounded-md text-xs font-semibold ${
+                      bobActivity.voiceWorker?.enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-700'
+                    }`}>
+                      Worker {bobActivity.voiceWorker?.enabled ? 'enabled' : 'disabled'}
+                    </span>
+                    <button
+                      onClick={handleStartQueuedCalls}
+                      disabled={bobControlBusy || !bobActivity.voiceWorker?.enabled}
+                      className="inline-flex items-center justify-center px-4 py-2 rounded-md bg-cyan-700 text-sm font-medium text-white hover:bg-cyan-800 disabled:cursor-not-allowed disabled:bg-gray-300"
+                    >
+                      <Phone className="w-4 h-4 mr-2" />
+                      Start queued calls
+                    </button>
+                  </div>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lead</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Call State</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Extracted Info</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Next Step</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Controls</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {bobActivity.callActions.length === 0 ? (
+                        <tr>
+                          <td colSpan="5" className="px-6 py-8 text-center text-sm text-gray-500">No call actions are queued or recently completed.</td>
+                        </tr>
+                      ) : bobActivity.callActions.map((action) => (
+                        <tr key={action.id} className="hover:bg-gray-50">
+                          <td className="px-6 py-4">
+                            <div className="text-sm font-medium text-gray-900">{action.leadFullName || action.leadFirstName || 'No name'}</div>
+                            <div className="text-sm text-gray-500">{action.leadEmail || 'No email'}</div>
+                            {action.leadPhone && <div className="text-xs text-gray-500 mt-1">{action.leadPhone}</div>}
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                              action.status === 'completed' ? 'bg-green-100 text-green-800' :
+                              action.status === 'calling' ? 'bg-indigo-100 text-indigo-800' :
+                              action.status === 'failed' ? 'bg-red-100 text-red-800' :
+                              action.status === 'awaiting_call' ? 'bg-cyan-100 text-cyan-800' :
+                              'bg-blue-100 text-blue-800'
+                            }`}>
+                              {action.status}
+                            </span>
+                            <div className="mt-2 text-xs text-gray-500">
+                              {action.result?.providerStatus || action.result?.outcome || action.result?.callOutcome || 'No provider status'}
+                            </div>
+                            {action.result?.callAttemptCount && (
+                              <div className="mt-1 text-xs text-gray-500">Attempt {action.result.callAttemptCount}</div>
+                            )}
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="max-w-xs space-y-1 text-xs text-gray-600">
+                              <div>Service: {action.result?.extracted?.serviceInterest || action.leadServiceInterest || 'N/A'}</div>
+                              <div>Timeline: {action.result?.extracted?.timeline || 'N/A'}</div>
+                              <div>Location: {action.result?.extracted?.locationSummary || 'N/A'}</div>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="text-sm text-gray-900">{action.result?.currentStep || action.conversationStatus || 'N/A'}</div>
+                            <div className="text-xs text-gray-500 max-w-xs">{action.reason || action.lastIntent || 'No reason recorded'}</div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex flex-wrap gap-2">
+                              <button
+                                onClick={() => handleViewCallTranscript(action)}
+                                className="inline-flex items-center px-3 py-2 rounded-md border border-gray-300 bg-white text-sm text-gray-700 hover:bg-gray-50"
+                              >
+                                <Eye className="w-4 h-4 mr-1" />
+                                Transcript
+                              </button>
+                              <button
+                                onClick={() => openCallOutcomeModal(action)}
+                                className="inline-flex items-center px-3 py-2 rounded-md bg-slate-700 text-sm text-white hover:bg-slate-800"
+                              >
+                                <Check className="w-4 h-4 mr-1" />
+                                Outcome
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
 
               <div className="bg-white rounded-lg shadow overflow-hidden">
@@ -1814,6 +2024,141 @@ export default function AdminDashboard() {
                   Close
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Call Transcript Modal */}
+      {selectedCallTranscript && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-12 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-2/3 shadow-lg rounded-md bg-white">
+            <div className="mt-3">
+              <div className="flex justify-between items-start mb-4">
+                <div>
+                  <h3 className="text-lg font-medium text-gray-900">Call Transcript</h3>
+                  <p className="text-sm text-gray-500">
+                    {selectedCallTranscript.lead?.fullName || selectedCallTranscript.lead?.firstName || 'Lead'} · {selectedCallTranscript.action?.status}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setSelectedCallTranscript(null)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                <div className="bg-gray-50 p-4 rounded-lg">
+                  <h4 className="text-sm font-semibold text-gray-900 mb-3">Call Summary</h4>
+                  <div className="space-y-2 text-sm text-gray-700">
+                    <div>Status: {selectedCallTranscript.action?.status || 'N/A'}</div>
+                    <div>Provider: {selectedCallTranscript.action?.result?.providerStatus || 'N/A'}</div>
+                    <div>Step: {selectedCallTranscript.action?.result?.currentStep || 'N/A'}</div>
+                    <div>Outcome: {selectedCallTranscript.action?.result?.outcome || selectedCallTranscript.action?.result?.callOutcome || 'N/A'}</div>
+                    <div>SMS sent: {selectedCallTranscript.action?.result?.bookingSmsSent ? 'Yes' : 'No'}</div>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-2 bg-gray-50 p-4 rounded-lg">
+                  <h4 className="text-sm font-semibold text-gray-900 mb-3">Messages</h4>
+                  {callTranscriptLoading ? (
+                    <div className="p-6 text-center text-sm text-gray-500">Loading transcript...</div>
+                  ) : selectedCallTranscript.messages?.length ? (
+                    <div className="space-y-3 max-h-96 overflow-y-auto">
+                      {selectedCallTranscript.messages.map((message) => (
+                        <div key={message.id} className="bg-white border border-gray-200 rounded-md p-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-xs font-semibold text-gray-700">{message.channel} · {message.messageType}</span>
+                            <span className="text-xs text-gray-500">
+                              {message.createdAt ? format(new Date(message.createdAt), 'MMM d, yyyy HH:mm') : 'N/A'}
+                            </span>
+                          </div>
+                          {message.subject && <p className="mt-2 text-sm font-medium text-gray-900">{message.subject}</p>}
+                          <p className="mt-1 text-sm text-gray-700 whitespace-pre-wrap">{message.bodyText || 'No text captured'}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="p-6 text-center text-sm text-gray-500">No transcript or SMS messages captured yet.</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-6 flex justify-end">
+                <button
+                  onClick={() => setSelectedCallTranscript(null)}
+                  className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-500"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Call Outcome Modal */}
+      {callOutcomeAction && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-2/3 lg:w-1/2 shadow-lg rounded-md bg-white">
+            <div className="mt-3">
+              <div className="flex justify-between items-start mb-4">
+                <div>
+                  <h3 className="text-lg font-medium text-gray-900">Record Call Outcome</h3>
+                  <p className="text-sm text-gray-500">{callOutcomeAction.leadFullName || callOutcomeAction.leadFirstName || 'No name'}</p>
+                </div>
+                <button
+                  onClick={() => setCallOutcomeAction(null)}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="w-6 h-6" />
+                </button>
+              </div>
+
+              <form onSubmit={handleRecordCallOutcome} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Outcome</label>
+                  <select
+                    value={callOutcomeForm.outcome}
+                    onChange={(e) => setCallOutcomeForm({ ...callOutcomeForm, outcome: e.target.value })}
+                    className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-500"
+                  >
+                    {(bobActivity.callOutcomes.length ? bobActivity.callOutcomes : ['booked', 'no_answer', 'callback_requested', 'wrong_number', 'not_interested', 'needs_human_follow_up']).map((outcome) => (
+                      <option key={outcome} value={outcome}>{outcome.replace(/_/g, ' ')}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Notes</label>
+                  <textarea
+                    value={callOutcomeForm.notes}
+                    onChange={(e) => setCallOutcomeForm({ ...callOutcomeForm, notes: e.target.value })}
+                    rows={4}
+                    className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-500"
+                    placeholder="Add context for the team..."
+                  />
+                </div>
+
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setCallOutcomeAction(null)}
+                    className="px-4 py-2 bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={bobControlBusy}
+                    className="px-4 py-2 bg-slate-700 text-white rounded-md hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-gray-300"
+                  >
+                    Save outcome
+                  </button>
+                </div>
+              </form>
             </div>
           </div>
         </div>

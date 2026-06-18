@@ -4,6 +4,7 @@ import { authenticateToken, requireRole } from '../middleware/auth.js';
 import { buildCallOutcomeLeadPatch, CALL_OUTCOMES, isValidCallOutcome } from '../services/call-outcome-policy.js';
 import insforgeDataService from '../services/insforge-data-service.js';
 import { buildFreshEmailActionPayload } from '../services/fresh-email-draft-service.js';
+import voiceCallWorker from '../services/voice-call-worker.js';
 
 dotenv.config();
 
@@ -261,6 +262,7 @@ router.get('/bob-activity', verifyAdmin, async (req, res) => {
         leadPhone: lead.phone,
         leadStatus: lead.status,
         leadStage: lead.leadStage,
+        leadServiceInterest: lead.serviceInterest,
         qualificationStatus: lead.qualificationStatus,
         qualificationScore: lead.qualificationScore,
         schedulingState: lead.schedulingState,
@@ -289,6 +291,8 @@ router.get('/bob-activity', verifyAdmin, async (req, res) => {
       failedActions: statusCountMap.failed || 0,
       awaitingHuman: statusCountMap.awaiting_human || 0,
       awaitingCall: statusCountMap.awaiting_call || 0,
+      activeCalls: statusCountMap.calling || 0,
+      completedCalls: actions.filter((action) => action.actionType === 'queue_call_attempt' && action.status === 'completed').length,
       reviewLeads: reviewRows.length,
     };
 
@@ -296,11 +300,72 @@ router.get('/bob-activity', verifyAdmin, async (req, res) => {
       success: true,
       stats,
       actions: actionRows,
+      callActions: actionRows.filter((action) => action.actionType === 'queue_call_attempt'),
       reviewQueue: reviewRows,
+      callOutcomes: CALL_OUTCOMES,
+      voiceWorker: voiceCallWorker.getStatus(),
     });
   } catch (error) {
     console.error('Error in get Bob activity route:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Trigger queued outbound calls from the Bob dashboard
+router.post('/bob-activity/calls/start', verifyAdmin, async (req, res) => {
+  try {
+    if (process.env.VOICE_CALLING_ENABLED !== 'true') {
+      return res.status(409).json({
+        success: false,
+        error: 'Voice calling is disabled. Set VOICE_CALLING_ENABLED=true after controlled testing.',
+        worker: voiceCallWorker.getStatus(),
+      });
+    }
+
+    const result = await voiceCallWorker.processQueuedCalls();
+    res.json({ success: true, result, worker: voiceCallWorker.getStatus() });
+  } catch (error) {
+    console.error('Error starting Bob voice calls:', error);
+    res.status(500).json({ success: false, error: 'Failed to start queued voice calls' });
+  }
+});
+
+// Get call transcript and SMS/call follow-up messages for an action
+router.get('/bob-activity/actions/:actionId/transcript', verifyAdmin, async (req, res) => {
+  try {
+    const { actionId } = req.params;
+    const action = await insforgeDataService.getBobActionById(actionId);
+
+    if (!action) {
+      return res.status(404).json({ success: false, error: 'Bob action not found' });
+    }
+
+    if (action.actionType !== 'queue_call_attempt') {
+      return res.status(400).json({ success: false, error: 'Transcripts are only available for call actions' });
+    }
+
+    const [lead, conversation, messages] = await Promise.all([
+      action.leadId ? insforgeDataService.getLeadById(action.leadId) : null,
+      action.conversationId ? insforgeDataService.getConversationById(action.conversationId) : null,
+      action.conversationId ? insforgeDataService.listConversationMessages(action.conversationId, 100) : [],
+    ]);
+
+    const transcriptMessages = messages.filter((message) => (
+      message.channel === 'phone' ||
+      message.channel === 'sms' ||
+      ['call_transcript', 'booking_link_sms', 'callback_confirmation_sms', 'post_call_booking_sms', 'sms_reply', 'sms_delivery_status'].includes(message.messageType)
+    ));
+
+    res.json({
+      success: true,
+      action,
+      lead,
+      conversation,
+      messages: transcriptMessages,
+    });
+  } catch (error) {
+    console.error('Error fetching Bob call transcript:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch call transcript' });
   }
 });
 
@@ -408,8 +473,8 @@ router.patch('/bob-activity/actions/:actionId/call-outcome', verifyAdmin, async 
       return res.status(400).json({ error: 'Call outcome can only be recorded for queued call actions' });
     }
 
-    if (action.status !== 'awaiting_call') {
-      return res.status(400).json({ error: 'Call outcome can only be recorded for actions awaiting a call' });
+    if (!['awaiting_call', 'calling', 'completed'].includes(action.status)) {
+      return res.status(400).json({ error: 'Call outcome can only be recorded for call actions that are awaiting, active, or completed' });
     }
 
     const now = new Date();
@@ -427,6 +492,7 @@ router.patch('/bob-activity/actions/:actionId/call-outcome', verifyAdmin, async 
       result: {
         ...(action.result || {}),
         callOutcome: outcome,
+        outcome,
         callOutcomeNotes: typeof notes === 'string' ? notes.trim() : null,
         callOutcomeRecordedAt: now.toISOString(),
         callOutcomeRecordedBy: req.user.id,

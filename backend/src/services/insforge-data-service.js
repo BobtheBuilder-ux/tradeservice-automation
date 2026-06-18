@@ -350,6 +350,14 @@ class InsForgeDataService {
     return select(TABLES.leadConversations);
   }
 
+  async listConversationMessages(conversationId, limit = 100) {
+    if (!conversationId) return [];
+    const rows = await selectByColumn(TABLES.leadConversationMessages, 'conversation_id', conversationId);
+    return rows
+      .sort((a, b) => new Date(a.createdAt || a.sentAt || 0).getTime() - new Date(b.createdAt || b.sentAt || 0).getTime())
+      .slice(-limit);
+  }
+
   async getConversationById(conversationId) {
     return selectById(TABLES.leadConversations, conversationId);
   }
