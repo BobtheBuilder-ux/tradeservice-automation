@@ -1,0 +1,30 @@
+services:
+  tradeservice-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: tradeservice-backend:latest
+    container_name: tradeservice-backend
+    restart: unless-stopped
+    env_file:
+      - ./.env.backend.production
+    ports:
+      - "3001:3001"
+    volumes:
+      - tradeservice-backend-logs:/app/logs
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tradeservice-backend.rule=Host(`automation.setmymeet.ca`)"
+      - "traefik.http.routers.tradeservice-backend.entrypoints=websecure"
+      - "traefik.http.routers.tradeservice-backend.tls=true"
+      - "traefik.http.routers.tradeservice-backend.tls.certresolver=letsencrypt"
+      - "traefik.http.services.tradeservice-backend.loadbalancer.server.port=3001"
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  tradeservice-backend-logs:
