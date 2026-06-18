@@ -4,6 +4,15 @@ import { VoiceCallScriptService } from '../src/services/voice-call-script-servic
 
 const service = new VoiceCallScriptService({ bookingLink: 'https://calendly.test/book' });
 
+test('getSayOptions uses a configurable neural voice for less robotic calls', () => {
+  const configured = new VoiceCallScriptService({ voiceName: 'Polly.Joanna-Neural', language: 'en-US' });
+
+  assert.deepEqual(configured.getSayOptions(), {
+    voice: 'Polly.Joanna-Neural',
+    language: 'en-US',
+  });
+});
+
 test('initialStep greets lead and asks permission before qualification', () => {
   const step = service.initialStep({ firstName: 'Derek' });
 
