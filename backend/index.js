@@ -66,11 +66,19 @@ const logWithTimestamp = (level, message, data = {}) => {
   console.log(`${emoji} ${logMessage}`, data && Object.keys(data).length > 0 ? data : '');
 };
 
-// Initialize workflow orchestrator and new lead monitor
+// Initialize workflow orchestrator and background workers
 const workflowOrchestrator = new WorkflowOrchestrator();
 const newLeadMonitor = new NewLeadMonitor();
+const newLeadMonitorEnabled = process.env.NEW_LEAD_MONITOR_ENABLED === 'true';
+const followUpAutomationEnabled = process.env.FOLLOW_UP_AUTOMATION_ENABLED === 'true';
+
 logWithTimestamp('info', '🚀 Workflow Orchestrator initialized');
-logWithTimestamp('info', '🚀 New Lead Monitor initialized');
+logWithTimestamp(
+  'info',
+  newLeadMonitorEnabled
+    ? '🚀 New Lead Monitor initialized'
+    : 'ℹ️ New Lead Monitor disabled; Bob/InsForge orchestrator remains active'
+);
 if (hubspotEnabled) {
   logWithTimestamp('info', '🚀 HubSpot Polling Service initialized');
 }
@@ -505,13 +513,18 @@ app.listen(PORT, HOST, async () => {
     logWithTimestamp('error', '❌ Failed to start reminder scheduler', { error: error.message, stack: error.stack });
   }
   
-  // Start the new lead monitor
-  try {
-    newLeadMonitor.intervalMinutes = 2; // Check every 2 minutes
-    newLeadMonitor.start();
-    logWithTimestamp('info', '✅ New lead monitor started successfully with 2-minute intervals');
-  } catch (error) {
-    logWithTimestamp('error', '❌ Failed to start new lead monitor', { error: error.message, stack: error.stack });
+  // Start the new lead monitor only when explicitly enabled.
+  // Bob/InsForge workers own the active automation flow in production.
+  if (newLeadMonitorEnabled) {
+    try {
+      newLeadMonitor.intervalMinutes = 2; // Check every 2 minutes
+      newLeadMonitor.start();
+      logWithTimestamp('info', '✅ New lead monitor started successfully with 2-minute intervals');
+    } catch (error) {
+      logWithTimestamp('error', '❌ Failed to start new lead monitor', { error: error.message, stack: error.stack });
+    }
+  } else {
+    logWithTimestamp('info', 'ℹ️ New lead monitor disabled; skipping legacy Drizzle-backed polling');
   }
 
   if (hubspotEnabled) {
@@ -531,12 +544,17 @@ app.listen(PORT, HOST, async () => {
     logWithTimestamp('error', '❌ Failed to start email queue processor', { error: error.message, stack: error.stack });
   }
 
-  // Start the follow-up automation service
-  try {
-    followUpAutomationService.start();
-    logWithTimestamp('info', '✅ Follow-up automation service started successfully');
-  } catch (error) {
-    logWithTimestamp('error', '❌ Failed to start follow-up automation service', { error: error.message, stack: error.stack });
+  // Start the follow-up automation service only when explicitly enabled.
+  // It still contains legacy direct-Postgres paths; keep it off in InsForge SDK deployments.
+  if (followUpAutomationEnabled) {
+    try {
+      followUpAutomationService.start();
+      logWithTimestamp('info', '✅ Follow-up automation service started successfully');
+    } catch (error) {
+      logWithTimestamp('error', '❌ Failed to start follow-up automation service', { error: error.message, stack: error.stack });
+    }
+  } else {
+    logWithTimestamp('info', 'ℹ️ Follow-up automation service disabled; Bob/InsForge follow-up decisions remain active');
   }
 
   if (automatedEmailWorkflowEnabled) {
@@ -593,10 +611,10 @@ app.listen(PORT, HOST, async () => {
   console.log(`🔧 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`⏰ Workflow Processing: Active (5-minute intervals)`);
   console.log(`📅 Reminder Scheduler: Active`);
-  console.log(`👁️  New Lead Monitor: Active (2-minute intervals)`);
+  console.log(`👁️  New Lead Monitor: ${newLeadMonitorEnabled ? 'Active (2-minute intervals)' : 'Disabled'}`);
   console.log(`🔄 HubSpot Polling: ${hubspotEnabled ? 'Active' : 'Disabled'}`);
   console.log(`📧 Email Queue Processor: Active`);
-  console.log(`🔄 Follow-up Automation: Active (30-minute intervals)`);
+  console.log(`🔄 Follow-up Automation: ${followUpAutomationEnabled ? 'Active (30-minute intervals)' : 'Disabled'}`);
   console.log(`📬 Automated Email Workflow: Active (5-minute intervals)`);
   console.log(`🤖 Bob Orchestrator: Active (5-minute intervals)`);
   console.log(`⚙️  Bob Action Executor: Active (60-second intervals)`);

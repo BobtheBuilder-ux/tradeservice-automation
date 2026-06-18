@@ -1,0 +1,23 @@
+services:
+  tradeservice-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: tradeservice-backend:latest
+    container_name: tradeservice-backend
+    restart: unless-stopped
+    env_file:
+      - ./.env.backend.production
+    ports:
+      - "3001:3001"
+    volumes:
+      - tradeservice-backend-logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  tradeservice-backend-logs:
