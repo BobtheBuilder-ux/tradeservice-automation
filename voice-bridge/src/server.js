@@ -1,10 +1,15 @@
 import http from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
+import {
+  pcm16Base64ToTwilioMuLaw,
+  twilioMuLawToPcm16Base64,
+} from './audio.js';
 
 const PORT = Number(process.env.PORT || 8080);
 const FUNCTION_BASE_URL = (process.env.INSFORGE_FUNCTION_BASE_URL || '').replace(/\/$/, '');
 const BRIDGE_SECRET = process.env.VOICE_BRIDGE_CONTEXT_SECRET || '';
 const SEND_ELEVENLABS_AUDIO_TO_TWILIO = process.env.SEND_ELEVENLABS_AUDIO_TO_TWILIO !== 'false';
+const ELEVENLABS_PCM_SAMPLE_RATE = Number(process.env.ELEVENLABS_PCM_SAMPLE_RATE || 16000);
 
 function json(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -151,7 +156,10 @@ function handleTwilioConnection(twilioWs, req) {
       }
 
       if (data.type === 'audio' && SEND_ELEVENLABS_AUDIO_TO_TWILIO) {
-        const payload = data.audio_event?.audio_base_64;
+        const audioBase64 = data.audio_event?.audio_base_64;
+        const payload = audioBase64
+          ? pcm16Base64ToTwilioMuLaw(audioBase64, ELEVENLABS_PCM_SAMPLE_RATE)
+          : null;
         if (payload && open(twilioWs) && state.streamSid) {
           sendJson(twilioWs, {
             event: 'media',
@@ -210,7 +218,9 @@ function handleTwilioConnection(twilioWs, req) {
     if (message.event === 'media') {
       const payload = message.media?.payload;
       if (payload && open(state.elevenlabsWs)) {
-        sendJson(state.elevenlabsWs, { user_audio_chunk: payload });
+        sendJson(state.elevenlabsWs, {
+          user_audio_chunk: twilioMuLawToPcm16Base64(payload, ELEVENLABS_PCM_SAMPLE_RATE),
+        });
       }
       return;
     }
@@ -243,6 +253,7 @@ const server = http.createServer((req, res) => {
       functionBaseConfigured: Boolean(FUNCTION_BASE_URL),
       bridgeSecretConfigured: Boolean(BRIDGE_SECRET),
       sendElevenLabsAudioToTwilio: SEND_ELEVENLABS_AUDIO_TO_TWILIO,
+      elevenlabsPcmSampleRate: ELEVENLABS_PCM_SAMPLE_RATE,
     });
     return;
   }
