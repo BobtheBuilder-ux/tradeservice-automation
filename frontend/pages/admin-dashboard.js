@@ -53,6 +53,7 @@ import {
   updateLeadReview,
   updateLeadSuppression,
 } from '../lib/insforge-product';
+import { invokeFunction } from '../lib/insforge-functions';
 
 export default function AdminDashboard() {
   const router = useRouter();
@@ -85,6 +86,16 @@ export default function AdminDashboard() {
   const [showDeleteAllLeadsModal, setShowDeleteAllLeadsModal] = useState(false);
   const [deleteAllLeadsConfirmation, setDeleteAllLeadsConfirmation] = useState('');
   const [deleteAllLeadsLoading, setDeleteAllLeadsLoading] = useState(false);
+  const [testCallForm, setTestCallForm] = useState({
+    fullName: '',
+    phone: '',
+    email: '',
+    serviceInterest: '',
+    callConsent: false,
+  });
+  const [testCallLoading, setTestCallLoading] = useState(false);
+  const [testCallResult, setTestCallResult] = useState(null);
+  const [testCallError, setTestCallError] = useState('');
   
   // Campaign Management State
   const [campaigns, setCampaigns] = useState([]);
@@ -216,7 +227,8 @@ export default function AdminDashboard() {
 
   const fetchLeads = async () => {
     try {
-      setLeads(await listLeads(user));
+      const loadedLeads = await listLeads(user);
+      setLeads(loadedLeads);
     } catch (err) {
       console.error('Error fetching leads:', err);
     }
@@ -263,6 +275,58 @@ export default function AdminDashboard() {
 
   const handleStartQueuedCalls = async () => {
     setError('Queued call execution is being moved to an InsForge function. It is not available from the dashboard yet.');
+  };
+
+  const handleTestCall = async (event) => {
+    event.preventDefault();
+    setTestCallError('');
+    setTestCallResult(null);
+
+    if (!testCallForm.fullName.trim() || !testCallForm.phone.trim()) {
+      setTestCallError('Enter the lead name and phone number.');
+      return;
+    }
+    if (!testCallForm.callConsent) {
+      setTestCallError('Confirm that you have permission to place this call.');
+      return;
+    }
+
+    try {
+      setTestCallLoading(true);
+      const leadResponse = await invokeFunction('bob-queue-actions', {
+        action: 'test-lead',
+        body: {
+          tenantId: user?.tenantId,
+          fullName: testCallForm.fullName.trim(),
+          phone: testCallForm.phone.trim(),
+          email: testCallForm.email.trim() || undefined,
+          serviceInterest: testCallForm.serviceInterest.trim() || undefined,
+          callConsent: true,
+        },
+      });
+      const response = await invokeFunction('bob-queue-actions', {
+        action: 'test-call',
+        body: {
+          tenantId: user?.tenantId,
+          leadId: leadResponse.lead?.id,
+          callConsent: true,
+        },
+      });
+      setTestCallResult(response.call);
+      setTestCallForm({
+        fullName: '',
+        phone: '',
+        email: '',
+        serviceInterest: '',
+        callConsent: false,
+      });
+      await Promise.all([fetchBobActivity(), fetchLeads()]);
+    } catch (err) {
+      console.error('Error starting voice test call:', err);
+      setTestCallError(err.message || 'Failed to start the voice test call.');
+    } finally {
+      setTestCallLoading(false);
+    }
   };
 
   const handleViewCallTranscript = async (action) => {
@@ -800,6 +864,109 @@ export default function AdminDashboard() {
                   </button>
                 </div>
               </div>
+
+              <form onSubmit={handleTestCall} className="ops-panel p-4">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <Phone className="h-5 w-5 text-info" />
+                      <h3 className="text-sm font-semibold text-text-primary">Run voice test</h3>
+                      <span className="ops-badge bg-info-soft text-info">Live providers</span>
+                    </div>
+                    <p className="mt-1 text-xs text-text-muted">
+                      Start one tenant-scoped AI call through Twilio and the configured voice bridge.
+                    </p>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Lead name</span>
+                      <input
+                        value={testCallForm.fullName}
+                        onChange={(event) => setTestCallForm((current) => ({ ...current, fullName: event.target.value }))}
+                        className="ops-input w-full"
+                        placeholder="Jane Doe"
+                        required
+                        disabled={testCallLoading}
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Phone number</span>
+                      <input
+                        value={testCallForm.phone}
+                        onChange={(event) => setTestCallForm((current) => ({ ...current, phone: event.target.value }))}
+                        className="ops-input w-full"
+                        placeholder="+15551234567"
+                        inputMode="tel"
+                        required
+                        disabled={testCallLoading}
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Email (optional)</span>
+                      <input
+                        value={testCallForm.email}
+                        onChange={(event) => setTestCallForm((current) => ({ ...current, email: event.target.value }))}
+                        className="ops-input w-full"
+                        placeholder="jane@example.com"
+                        type="email"
+                        disabled={testCallLoading}
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Service interest</span>
+                      <input
+                        value={testCallForm.serviceInterest}
+                        onChange={(event) => setTestCallForm((current) => ({ ...current, serviceInterest: event.target.value }))}
+                        className="ops-input w-full"
+                        placeholder="Boiler repair"
+                        disabled={testCallLoading}
+                      />
+                    </label>
+                    <label className="flex max-w-sm items-start gap-2 rounded-lg border border-border bg-surface-secondary px-3 py-2 text-xs text-text-secondary">
+                      <input
+                        type="checkbox"
+                        checked={testCallForm.callConsent}
+                        onChange={(event) => {
+                          setTestCallForm((current) => ({ ...current, callConsent: event.target.checked }));
+                          setTestCallError('');
+                        }}
+                        className="mt-0.5 rounded border-border text-accent focus:ring-accent"
+                        disabled={testCallLoading}
+                      />
+                      <span>I have consent to place this test call.</span>
+                    </label>
+
+                    <button
+                      type="submit"
+                      className="ops-button-primary inline-flex items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={testCallLoading || !testCallForm.fullName.trim() || !testCallForm.phone.trim() || !testCallForm.callConsent}
+                    >
+                      <Phone className="h-4 w-4" />
+                      {testCallLoading ? 'Starting call…' : 'Run test call'}
+                    </button>
+                  </div>
+                </div>
+
+                {testCallError && (
+                  <div className="mt-3 flex items-start gap-2 rounded-lg border border-error bg-error-soft px-3 py-2 text-sm text-error">
+                    <AlertCircle className="mt-0.5 h-4 w-4 flex-none" />
+                    <span>{testCallError}</span>
+                  </div>
+                )}
+
+                {testCallResult && (
+                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-success bg-success-soft px-3 py-2 text-sm text-success">
+                    <span className="inline-flex items-center gap-2 font-medium">
+                      <Check className="h-4 w-4" />
+                      Call started
+                    </span>
+                    <span>To: {testCallResult.to || 'Unknown'}</span>
+                    <span>Status: {testCallResult.status || 'queued'}</span>
+                    {testCallResult.voiceCallSessionId && <span>Session: {testCallResult.voiceCallSessionId}</span>}
+                  </div>
+                )}
+              </form>
 
               <div className="ops-panel p-4">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">

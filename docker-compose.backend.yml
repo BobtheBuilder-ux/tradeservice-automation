@@ -1,15 +1,28 @@
-# Retired.
-#
-# The local backend container is no longer part of the active runtime. Product
-# work now runs through frontend/, InsForge SDK/RPC, functions/, and migrations/.
-# This compose file intentionally does not build ./backend.
-
 services:
-  backend-retired:
-    image: alpine:3.20
-    profiles:
-      - retired-backend
-    command:
-      - sh
-      - -c
-      - echo "Local backend is retired. Use frontend/, functions/, migrations/, and InsForge."
+  voice-bridge:
+    build:
+      context: ./voice-bridge
+      dockerfile: Dockerfile
+    image: tradeservice-voice-bridge:latest
+    container_name: tradeservice-voice-bridge
+    restart: unless-stopped
+    env_file:
+      - ./.env.voice-bridge.production
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+    ports:
+      - "8080:8080"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tradeservice-voice-bridge.rule=Host(`automation.setmymeet.ca`)"
+      - "traefik.http.routers.tradeservice-voice-bridge.entrypoints=websecure"
+      - "traefik.http.routers.tradeservice-voice-bridge.tls=true"
+      - "traefik.http.routers.tradeservice-voice-bridge.tls.certresolver=letsencrypt"
+      - "traefik.http.services.tradeservice-voice-bridge.loadbalancer.server.port=8080"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
