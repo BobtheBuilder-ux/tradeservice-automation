@@ -13,7 +13,7 @@ export default function Register() {
       <div className="max-w-md bg-white rounded-lg shadow p-6 text-center">
         <h1 className="text-xl font-bold text-gray-900">Google sign-in is now required</h1>
         <p className="mt-3 text-gray-600">
-          Public registration has been disabled. Admins create portal users, and users sign in with their approved Google account.
+          New users sign in with Google and receive admin dashboard access automatically.
         </p>
       </div>
     </div>

@@ -25,8 +25,7 @@ import { format } from 'date-fns';
 import { useAuth, authManager } from '../lib/auth';
 import FeedbackModal from '../components/FeedbackModal';
 import LeadDetailsModal from '../components/LeadDetailsModal';
-
-// Using backend API instead of Supabase direct connection
+import { getIntegrationStatus, listLeads } from '../lib/insforge-product';
 
 export default function AgentDashboard() {
   const router = useRouter();
@@ -71,34 +70,13 @@ export default function AgentDashboard() {
   }, [isAuthenticated, user, router, authLoading]);
 
   const fetchLeads = async () => {
-    // Don't fetch if not authenticated
-    if (!isAuthenticated || !localStorage.getItem('auth_token')) {
-      console.log('Not authenticated, skipping fetch leads');
+    if (!isAuthenticated || !user) {
       setLoading(false);
       return;
     }
 
     try {
-      const response = await fetch('/api/leads', {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      if (!response.ok) {
-        if (response.status === 401) {
-          // Token is invalid, sign out and redirect
-          console.log('Unauthorized, redirecting to login');
-          await authManager.signOut();
-          router.push('/login');
-          return;
-        }
-        throw new Error('Failed to fetch leads');
-      }
-      
-      const data = await response.json();
-      setLeads(data.leads || []);
+      setLeads(await listLeads(user));
     } catch (err) {
       console.error('Error fetching leads:', err);
       setError('Failed to load leads');
@@ -108,22 +86,12 @@ export default function AgentDashboard() {
   };
 
   const fetchIntegrationStatus = async () => {
-    if (!isAuthenticated || !localStorage.getItem('auth_token')) {
+    if (!isAuthenticated || !user) {
       return;
     }
 
     try {
-      const response = await fetch('/api/integrations/status', {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        setIntegrationStatus(data);
-      }
+      setIntegrationStatus(await getIntegrationStatus(user));
     } catch (err) {
       console.error('Error fetching integration status:', err);
     }
@@ -132,21 +100,7 @@ export default function AgentDashboard() {
   const handleIntegrationConnect = async (platform) => {
     setIntegrationLoading(true);
     try {
-      const response = await fetch(`/api/integrations/${platform}/start`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        // Redirect to OAuth URL
-        window.location.href = data.url;
-      } else {
-        throw new Error(`Failed to start ${platform} integration`);
-      }
+      throw new Error(`${platform} OAuth connect is being moved to an InsForge function.`);
     } catch (err) {
       console.error(`Error connecting ${platform}:`, err);
       alert(`Failed to connect ${platform}. Please try again.`);
@@ -529,6 +483,7 @@ export default function AgentDashboard() {
         <LeadDetailsModal
           isOpen={showLeadDetailsModal}
           lead={detailsLead}
+          user={user}
           onClose={() => {
             setShowLeadDetailsModal(false);
             setDetailsLead(null);

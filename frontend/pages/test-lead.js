@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
 import Head from 'next/head';
 import { AlertCircle, CheckCircle2, Database, Play, RefreshCw, ShieldCheck } from 'lucide-react';
-import apiClient from '../lib/api';
+import { useAuth } from '../lib/auth';
+import { invokeFunction } from '../lib/insforge-functions';
+import { listTenantAgents } from '../lib/insforge-product';
 
 const initialForm = {
   email: `test-lead-${Date.now()}@example.com`,
@@ -38,6 +40,7 @@ function buildFreshEmail() {
 }
 
 export default function TestLead() {
+  const { user } = useAuth();
   const [form, setForm] = useState(initialForm);
   const [agents, setAgents] = useState([]);
   const [loadingAgents, setLoadingAgents] = useState(true);
@@ -48,10 +51,14 @@ export default function TestLead() {
   useEffect(() => {
     let active = true;
 
-    apiClient
-      .get('/test/agents', { silent: true })
+    if (!user) {
+      setLoadingAgents(false);
+      return () => { active = false; };
+    }
+
+    listTenantAgents(user)
       .then((data) => {
-        if (active) setAgents(data.agents || []);
+        if (active) setAgents(data || []);
       })
       .catch(() => {
         if (active) setAgents([]);
@@ -63,7 +70,7 @@ export default function TestLead() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [user]);
 
   const updateField = (field, value) => {
     setForm((current) => ({ ...current, [field]: value }));
@@ -90,7 +97,7 @@ export default function TestLead() {
         qualificationScore: form.qualificationScore === '' ? undefined : Number(form.qualificationScore),
       };
 
-      const data = await apiClient.post('/test/lead', payload);
+      const data = await invokeFunction('bob-queue-actions', { action: 'test-lead', body: payload });
       setResult(data);
     } catch (err) {
       setError(err.message || 'Failed to create lead');

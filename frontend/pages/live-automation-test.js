@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Head from 'next/head';
 import { AlertCircle, CheckCircle2, Mail, MessageSquare, Phone, Play, RefreshCw, ShieldCheck, SkipForward } from 'lucide-react';
-import apiClient from '../lib/api';
+import { invokeFunction } from '../lib/insforge-functions';
 
 const CONFIRMATION = 'RUN LIVE TEST';
 
@@ -20,6 +20,8 @@ const initialForm = {
   includeEmail: true,
   includeSms: true,
   includeCall: true,
+  emailConsent: true,
+  callConsent: false,
   smsConsent: false,
   confirmationText: '',
 };
@@ -58,6 +60,8 @@ export default function LiveAutomationTest() {
   const liveTestEndsAt = status?.conversation?.metadata?.liveTestEndsAt;
   const runActive = Boolean(leadId && liveTestEndsAt && currentTime < new Date(liveTestEndsAt).getTime());
   const smsConsentRequired = form.includeSms;
+  const callConsentRequired = form.includeCall;
+  const emailConsentRequired = form.includeEmail;
 
   const channelSummary = useMemo(() => [
     form.includeEmail ? 'email' : null,
@@ -82,7 +86,7 @@ export default function LiveAutomationTest() {
     setError('');
 
     try {
-      const data = await apiClient.post('/test/live-automation-run', form);
+      const data = await invokeFunction('bob-queue-actions', { action: 'live-start', body: form });
       setRun(data);
     } catch (err) {
       setError(err.message || 'Failed to start live automation test');
@@ -97,7 +101,7 @@ export default function LiveAutomationTest() {
     setTicking(true);
 
     try {
-      const data = await apiClient.post(`/test/live-automation-run/${leadId}/tick`, { conversationId }, { silent });
+      const data = await invokeFunction('bob-queue-actions', { action: 'tick', body: { leadId, conversationId, silent } });
       setRun((current) => ({
         ...(current || {}),
         tick: data.tick,
@@ -135,7 +139,7 @@ export default function LiveAutomationTest() {
     setError('');
 
     try {
-      const data = await apiClient.get(`/test/live-automation-run/${leadId}/status?conversationId=${encodeURIComponent(conversationId)}`);
+      const data = await invokeFunction('bob-queue-actions', { action: 'live-status', body: { leadId, conversationId } });
       setRun((current) => ({
         ...(current || {}),
         status: data.status,
@@ -151,7 +155,7 @@ export default function LiveAutomationTest() {
     setSkippingActionId(actionId);
 
     try {
-      const data = await apiClient.post(`/test/live-automation-run/${leadId}/actions/${actionId}/skip`, { conversationId });
+      const data = await invokeFunction('bob-queue-actions', { action: 'skip', body: { leadId, conversationId, actionId } });
       setRun((current) => ({
         ...(current || {}),
         status: data.status,
@@ -257,16 +261,24 @@ export default function LiveAutomationTest() {
                   </div>
                 </div>
 
-                <label className="flex items-start gap-3 rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-800">
-                  <input
-                    checked={form.smsConsent}
-                    className="mt-0.5 h-4 w-4 rounded border-gray-300 text-gray-900 focus:ring-gray-500"
-                    onChange={(event) => updateField('smsConsent', event.target.checked)}
-                    required={smsConsentRequired}
-                    type="checkbox"
-                  />
-                  I have consent to send SMS to this phone number during the live test.
-                </label>
+                <div className="space-y-2 rounded-md border border-border bg-surface-secondary px-3 py-2 text-sm text-text-secondary">
+                  {[
+                    ['emailConsent', 'I have consent to send email during the live test.', emailConsentRequired],
+                    ['smsConsent', 'I have consent to send SMS to this phone number during the live test.', smsConsentRequired],
+                    ['callConsent', 'I have consent to place a voice call during the live test.', callConsentRequired],
+                  ].map(([field, label, required]) => (
+                    <label key={field} className="flex items-start gap-3">
+                      <input
+                        checked={form[field]}
+                        className="mt-0.5 h-4 w-4 rounded border-border text-accent focus:ring-accent"
+                        onChange={(event) => updateField(field, event.target.checked)}
+                        required={required}
+                        type="checkbox"
+                      />
+                      <span>{label}</span>
+                    </label>
+                  ))}
+                </div>
 
                 <label className="block">
                   <span className="mb-1 block text-sm font-medium text-gray-700">Confirmation phrase</span>

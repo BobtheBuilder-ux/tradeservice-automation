@@ -17,13 +17,14 @@ import {
   Calendar,
   Save,
 } from 'lucide-react';
+import { updateLeadQualification } from '../lib/insforge-product';
 
 const qualificationOptions = ['unqualified', 'partially_qualified', 'qualified', 'disqualified'];
 const leadStageOptions = ['new_inquiry', 'awaiting_information', 'ready_to_book', 'nurturing', 'escalated'];
 const schedulingOptions = ['not_started', 'needs_follow_up', 'booking_invited', 'booking_requested', 'booked', 'reschedule_requested'];
 const contactChannelOptions = ['email', 'phone', 'whatsapp', 'sms'];
 
-export default function LeadDetailsModal({ isOpen, onClose, lead, onLeadUpdate }) {
+export default function LeadDetailsModal({ isOpen, onClose, lead, user, onLeadUpdate }) {
   const [formData, setFormData] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState('');
@@ -109,25 +110,10 @@ export default function LeadDetailsModal({ isOpen, onClose, lead, onLeadUpdate }
     setSaveError('');
     setSaveSuccess('');
     try {
-      const response = await fetch(`/api/leads/${lead.id}/qualification`, {
-        method: 'PATCH',
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          ...formData,
-          qualificationScore: Number(formData.qualificationScore || 0),
-        }),
-      });
-
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to save qualification details');
-      }
+      const updatedLead = await updateLeadQualification(user, lead.id, formData);
 
       setSaveSuccess('Qualification details saved.');
-      if (onLeadUpdate) onLeadUpdate(data.lead);
+      if (onLeadUpdate) onLeadUpdate(updatedLead);
     } catch (error) {
       setSaveError(error.message);
     } finally {

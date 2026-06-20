@@ -9,7 +9,7 @@ import { buildLeadBookingReminderMessage } from './sms-message-builder.js';
 class TwilioSmsService {
   constructor(options = {}) {
     this.client = null;
-    this.fromNumber = process.env.TWILIO_PHONE_NUMBER;
+    this.fromNumber = options.fromNumber || process.env.TWILIO_PHONE_NUMBER;
     if (options.initialize !== false) {
       this.initializeClient();
     }
@@ -47,20 +47,25 @@ class TwilioSmsService {
   }
 
   getSmsStatusCallbackUrl() {
-    const baseUrl = process.env.CALL_PUBLIC_BASE_URL || process.env.BACKEND_URL;
+    const baseUrl = process.env.INSFORGE_FUNCTION_BASE_URL || process.env.CALL_PUBLIC_BASE_URL || process.env.BACKEND_URL;
     if (!baseUrl) return null;
+    if (process.env.INSFORGE_FUNCTION_BASE_URL) {
+      return new URL('/twilio-sms-webhook?mode=status', baseUrl).toString();
+    }
     return new URL('/api/sms/status', baseUrl).toString();
   }
 
   buildMessagePayload(payload = {}) {
     const statusCallback = this.getSmsStatusCallbackUrl();
+    const from = payload.from || this.fromNumber;
     return {
       ...payload,
+      ...(from ? { from } : {}),
       ...(statusCallback ? { statusCallback } : {}),
     };
   }
 
-  async sendMessage({ to, body, trackingId, context = 'send_sms_message', metadata = {} }) {
+  async sendMessage({ to, body, from, trackingId, context = 'send_sms_message', metadata = {} }) {
     try {
       if (!this.client) {
         throw new Error('Twilio client not initialized');
@@ -70,15 +75,21 @@ class TwilioSmsService {
         throw new Error('SMS recipient phone number not available');
       }
 
+      const fromNumber = from || this.fromNumber;
+      if (!fromNumber) {
+        throw new Error('SMS sender phone number not available');
+      }
+
       logger.logLeadProcessing(trackingId, 'sending_sms_message', {
         ...metadata,
         phone: hashForLogging(to),
+        fromPhone: hashForLogging(fromNumber),
         context,
       });
 
       const smsResult = await this.client.messages.create(this.buildMessagePayload({
         body,
-        from: this.fromNumber,
+        from: fromNumber,
         to,
       }));
 
@@ -112,7 +123,7 @@ class TwilioSmsService {
     }
   }
 
-  async sendLeadBookingReminder(lead, bookingLink, trackingId) {
+  async sendLeadBookingReminder(lead, bookingLink, trackingId, options = {}) {
     try {
       if (!this.client) {
         throw new Error('Twilio client not initialized');
@@ -131,7 +142,7 @@ class TwilioSmsService {
 
       const smsResult = await this.client.messages.create(this.buildMessagePayload({
         body: message,
-        from: this.fromNumber,
+        from: options.from || this.fromNumber,
         to: lead.phone,
       }));
 
@@ -164,32 +175,34 @@ class TwilioSmsService {
     }
   }
 
-  async sendCallbackConfirmation(lead, bookingLink, trackingId) {
+  async sendCallbackConfirmation(lead, bookingLink, trackingId, options = {}) {
     const firstName = lead?.first_name || lead?.firstName || lead?.full_name || lead?.fullName || 'there';
     const linkText = bookingLink ? ` You can also choose a time here: ${bookingLink}` : '';
     return this.sendMessage({
       to: lead?.phone,
       body: `Hi ${firstName}, this is Bob from 9QC Inc. Thanks for speaking with me. A team member will follow up for a better time.${linkText}`,
+      from: options.from,
       trackingId,
       context: 'send_callback_confirmation_sms',
       metadata: { leadId: lead?.id },
     });
   }
 
-  async sendCalendlyBookingLink(lead, bookingLink, trackingId) {
+  async sendCalendlyBookingLink(lead, bookingLink, trackingId, options = {}) {
     const firstName = lead?.first_name || lead?.firstName || lead?.full_name || lead?.fullName || 'there';
     const serviceText = lead?.serviceInterest ? ` for ${lead.serviceInterest}` : '';
 
     return this.sendMessage({
       to: lead?.phone,
       body: `Hi ${firstName}, this is Bob from 9QC Inc. Please book your Zoom consultation${serviceText} here: ${bookingLink}. Once booked, I’ll text the Zoom meeting details. Reply STOP to opt out.`,
+      from: options.from,
       trackingId,
       context: 'send_calendly_booking_link_sms',
       metadata: { leadId: lead?.id },
     });
   }
 
-  async sendCalendlyMeetingDetails(lead, meeting, trackingId) {
+  async sendCalendlyMeetingDetails(lead, meeting, trackingId, options = {}) {
     const firstName = lead?.first_name || lead?.firstName || lead?.full_name || lead?.fullName || 'there';
     const startTime = meeting?.start_time || meeting?.startTime;
     const meetingDate = startTime ? new Date(startTime) : null;
@@ -212,6 +225,7 @@ class TwilioSmsService {
     return this.sendMessage({
       to: lead?.phone,
       body: `Hi ${firstName}, your consultation is booked for ${formattedTime}.${locationText} - Bob from 9QC Inc.`,
+      from: options.from,
       trackingId,
       context: 'send_calendly_meeting_details_sms',
       metadata: {
@@ -258,7 +272,7 @@ class TwilioSmsService {
    * @param {string} trackingId - Tracking ID for logging
    * @returns {Object} SMS sending result
    */
-  async sendAppointmentReminder(lead, meeting, trackingId) {
+  async sendAppointmentReminder(lead, meeting, trackingId, options = {}) {
     try {
       if (!this.client) {
         throw new Error('Twilio client not initialized');
@@ -293,7 +307,7 @@ class TwilioSmsService {
 
       const smsResult = await this.client.messages.create(this.buildMessagePayload({
         body: message,
-        from: this.fromNumber,
+        from: options.from || this.fromNumber,
         to: lead.phone
       }));
 
@@ -334,7 +348,7 @@ class TwilioSmsService {
    * @param {string} trackingId - Tracking ID for logging
    * @returns {Object} SMS sending result
    */
-  async send24HourReminder(lead, meeting, trackingId) {
+  async send24HourReminder(lead, meeting, trackingId, options = {}) {
     try {
       if (!this.client) {
         throw new Error('Twilio client not initialized');
@@ -366,7 +380,7 @@ class TwilioSmsService {
 
       const smsResult = await this.client.messages.create(this.buildMessagePayload({
         body: message,
-        from: this.fromNumber,
+        from: options.from || this.fromNumber,
         to: lead.phone
       }));
 
@@ -400,7 +414,7 @@ class TwilioSmsService {
    * @param {string} trackingId - Tracking ID for logging
    * @returns {Object} SMS sending result
    */
-  async send1HourReminder(lead, meeting, trackingId) {
+  async send1HourReminder(lead, meeting, trackingId, options = {}) {
     try {
       if (!this.client) {
         throw new Error('Twilio client not initialized');
@@ -427,7 +441,7 @@ class TwilioSmsService {
 
       const smsResult = await this.client.messages.create(this.buildMessagePayload({
         body: message,
-        from: this.fromNumber,
+        from: options.from || this.fromNumber,
         to: lead.phone
       }));
 

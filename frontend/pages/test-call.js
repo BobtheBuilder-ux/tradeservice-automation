@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import Head from 'next/head';
 import { AlertCircle, CheckCircle2, PhoneCall, Send, ShieldCheck } from 'lucide-react';
-import apiClient from '../lib/api';
+import { invokeFunction } from '../lib/insforge-functions';
 
 const initialForm = {
   to: '+14384838093',
   from: '+17372922494',
   url: 'http://demo.twilio.com/docs/voice.xml',
+  callConsent: true,
 };
 
 export default function TestCall() {
@@ -28,7 +29,7 @@ export default function TestCall() {
     setResult(null);
 
     try {
-      const data = await apiClient.post('/test/twilio-call', form);
+      const data = await invokeFunction('bob-queue-actions', { action: 'test-call', body: form });
       setResult(data.call);
     } catch (err) {
       setError(err.message || 'Failed to start test call');
@@ -97,6 +98,16 @@ export default function TestCall() {
                   type="url"
                   required
                 />
+              </label>
+
+              <label className="flex items-start gap-3 rounded-md border border-border bg-surface-secondary px-3 py-2 text-sm text-text-secondary">
+                <input
+                  type="checkbox"
+                  className="mt-1 rounded border-border text-accent focus:ring-accent"
+                  checked={form.callConsent}
+                  onChange={(event) => updateField('callConsent', event.target.checked)}
+                />
+                <span>I have consent to place this test call.</span>
               </label>
 
               {error && (

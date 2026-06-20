@@ -3,8 +3,6 @@ import { useRouter } from 'next/router';
 import Head from 'next/head';
 import { 
   Users, 
-  UserPlus, 
-  UserMinus, 
   Settings, 
   BarChart3, 
   Target, 
@@ -12,7 +10,6 @@ import {
   Search, 
   Filter, 
   Edit3, 
-  Trash2, 
   Plus, 
   X, 
   Check, 
@@ -27,10 +24,35 @@ import {
   CalendarDays,
   MessageSquare,
   Bot,
-  PauseCircle
+  BookOpen,
+  PauseCircle,
+  UploadCloud,
+  FileText,
+  ShieldOff,
+  Trash2
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { useAuth } from '../lib/auth';
+import {
+  assignLeadToTenantAgent,
+  deleteAllLeads,
+  getBobActivity,
+  getCallTranscript,
+  listCampaigns,
+  listFeedback,
+  importLeadsFromCsv,
+  listLeads,
+  previewLeadCsvImport,
+  listMeetings,
+  listTenantAgents,
+  recordCallOutcome,
+  respondToFeedback,
+  setFeedbackStatus,
+  archiveTenantAgent,
+  updateTenantAgentStatus,
+  updateLeadReview,
+  updateLeadSuppression,
+} from '../lib/insforge-product';
 
 export default function AdminDashboard() {
   const router = useRouter();
@@ -39,20 +61,15 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   
-  // Agent Management State
-  const [agents, setAgents] = useState([]);
-  const [showCreateAgentModal, setShowCreateAgentModal] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState(null);
+  // AI agent identity state
+  const [aiAgents, setAiAgents] = useState([]);
+  const [agentActionBusy, setAgentActionBusy] = useState('');
+  const [deleteAgentTarget, setDeleteAgentTarget] = useState(null);
   const [showLeadModal, setShowLeadModal] = useState(false);
   const [selectedLead, setSelectedLead] = useState(null);
   const [meetings, setMeetings] = useState([]);
   const [meetingsLoading, setMeetingsLoading] = useState(false);
   const [meetingsError, setMeetingsError] = useState(null);
-  const [agentFormData, setAgentFormData] = useState({
-    name: '',
-    email: '',
-    role: 'agent'
-  });
   
   // Lead Management State
   const [leads, setLeads] = useState([]);
@@ -60,6 +77,14 @@ export default function AdminDashboard() {
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [leadImportFileName, setLeadImportFileName] = useState('');
+  const [leadImportCsv, setLeadImportCsv] = useState('');
+  const [leadImportPreview, setLeadImportPreview] = useState(null);
+  const [leadImportLoading, setLeadImportLoading] = useState(false);
+  const [leadImportMessage, setLeadImportMessage] = useState('');
+  const [showDeleteAllLeadsModal, setShowDeleteAllLeadsModal] = useState(false);
+  const [deleteAllLeadsConfirmation, setDeleteAllLeadsConfirmation] = useState('');
+  const [deleteAllLeadsLoading, setDeleteAllLeadsLoading] = useState(false);
   
   // Campaign Management State
   const [campaigns, setCampaigns] = useState([]);
@@ -119,7 +144,7 @@ export default function AdminDashboard() {
     
     // Ensure only admins can access this page
     if (user && user.role !== 'admin') {
-      router.push('/agent-dashboard');
+      router.push('/login');
       return;
     }
     
@@ -130,7 +155,7 @@ export default function AdminDashboard() {
     try {
       setLoading(true);
       await Promise.all([
-        fetchAgents(),
+        fetchAiAgents(),
         fetchLeads(),
         fetchCampaigns(),
         fetchFeedback(),
@@ -150,37 +175,48 @@ export default function AdminDashboard() {
     }
   }, [user, activeTab]);
 
-  const fetchAgents = async () => {
+  const fetchAiAgents = async () => {
     try {
-      const response = await fetch('/api/admin/agents', {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        setAgents(data.agents || []);
-      }
+      setAiAgents(await listTenantAgents(user));
     } catch (err) {
-      console.error('Error fetching agents:', err);
+      console.error('Error fetching AI agents:', err);
+    }
+  };
+
+  const handleAgentStatusChange = async (agent, status) => {
+    if (!agent?.id) return;
+    try {
+      setAgentActionBusy(agent.id);
+      setError(null);
+      await updateTenantAgentStatus(user, agent.id, status);
+      await fetchAiAgents();
+    } catch (err) {
+      console.error('Error updating AI agent status:', err);
+      setError(err.message || 'Failed to update AI agent status');
+    } finally {
+      setAgentActionBusy('');
+    }
+  };
+
+  const handleArchiveAgent = async () => {
+    if (!deleteAgentTarget?.id) return;
+    try {
+      setAgentActionBusy(deleteAgentTarget.id);
+      setError(null);
+      await archiveTenantAgent(user, deleteAgentTarget.id);
+      setDeleteAgentTarget(null);
+      await fetchAiAgents();
+    } catch (err) {
+      console.error('Error deleting AI agent:', err);
+      setError(err.message || 'Failed to delete AI agent');
+    } finally {
+      setAgentActionBusy('');
     }
   };
 
   const fetchLeads = async () => {
     try {
-      const response = await fetch('/api/admin/leads', {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        setLeads(data.leads || []);
-      }
+      setLeads(await listLeads(user));
     } catch (err) {
       console.error('Error fetching leads:', err);
     }
@@ -188,18 +224,9 @@ export default function AdminDashboard() {
 
   const fetchCampaigns = async () => {
     try {
-      const response = await fetch('/api/admin/campaigns', {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      if (response.ok) {
-        const data = await response.json();
-        setCampaigns(data.campaigns || []);
-        setCampaignStats(data.stats || campaignStats);
-      }
+      const data = await listCampaigns(user);
+      setCampaigns(data.campaigns || []);
+      setCampaignStats(data.stats || campaignStats);
     } catch (err) {
       console.error('Error fetching campaigns:', err);
     }
@@ -208,26 +235,14 @@ export default function AdminDashboard() {
   const fetchFeedback = async () => {
     try {
       setFeedbackLoading(true);
-      const response = await fetch('/api/feedback/all', {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        }
+      const feedback = await listFeedback(user);
+      setFeedbackList(feedback);
+      setFeedbackStats({
+        total: feedback.length,
+        pending: feedback.filter((item) => item.status === 'pending').length,
+        inReview: feedback.filter((item) => item.status === 'in_review').length,
+        responded: feedback.filter((item) => item.status === 'responded').length,
       });
-      
-      if (response.ok) {
-        const data = await response.json();
-        setFeedbackList(data.feedback || []);
-        
-        // Calculate stats
-        const stats = {
-          total: data.feedback?.length || 0,
-          pending: data.feedback?.filter(f => f.status === 'pending').length || 0,
-          inReview: data.feedback?.filter(f => f.status === 'in_review').length || 0,
-          responded: data.feedback?.filter(f => f.status === 'responded').length || 0
-        };
-        setFeedbackStats(stats);
-      }
     } catch (err) {
       console.error('Error fetching feedback:', err);
     } finally {
@@ -238,33 +253,7 @@ export default function AdminDashboard() {
   const fetchBobActivity = async () => {
     try {
       setBobActivityLoading(true);
-      const response = await fetch('/api/admin/bob-activity', {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        }
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setBobActivity({
-          actions: data.actions || [],
-          callActions: data.callActions || [],
-          callOutcomes: data.callOutcomes || [],
-          reviewQueue: data.reviewQueue || [],
-          voiceWorker: data.voiceWorker || null,
-          stats: data.stats || {
-            totalActions: 0,
-            pendingActions: 0,
-            failedActions: 0,
-            awaitingHuman: 0,
-            awaitingCall: 0,
-            activeCalls: 0,
-            completedCalls: 0,
-            reviewLeads: 0
-          }
-        });
-      }
+      setBobActivity(await getBobActivity(user));
     } catch (err) {
       console.error('Error fetching Bob activity:', err);
     } finally {
@@ -273,48 +262,13 @@ export default function AdminDashboard() {
   };
 
   const handleStartQueuedCalls = async () => {
-    try {
-      setBobControlBusy(true);
-      const response = await fetch('/api/admin/bob-activity/calls/start', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      const data = await response.json();
-
-      if (!response.ok) {
-        setError(data.error || 'Failed to start queued calls');
-        return;
-      }
-
-      await fetchBobActivity();
-    } catch (err) {
-      console.error('Error starting queued calls:', err);
-      setError('Failed to start queued calls');
-    } finally {
-      setBobControlBusy(false);
-    }
+    setError('Queued call execution is being moved to an InsForge function. It is not available from the dashboard yet.');
   };
 
   const handleViewCallTranscript = async (action) => {
     try {
       setCallTranscriptLoading(true);
-      const response = await fetch(`/api/admin/bob-activity/actions/${action.id}/transcript`, {
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      const data = await response.json();
-
-      if (!response.ok) {
-        setError(data.error || 'Failed to load call transcript');
-        return;
-      }
-
-      setSelectedCallTranscript(data);
+      setSelectedCallTranscript(await getCallTranscript(user, action.id));
     } catch (err) {
       console.error('Error loading call transcript:', err);
       setError('Failed to load call transcript');
@@ -342,20 +296,7 @@ export default function AdminDashboard() {
 
     try {
       setBobControlBusy(true);
-      const response = await fetch(`/api/admin/bob-activity/actions/${callOutcomeAction.id}/call-outcome`, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(callOutcomeForm)
-      });
-      const data = await response.json();
-
-      if (!response.ok) {
-        setError(data.error || 'Failed to record call outcome');
-        return;
-      }
+      await recordCallOutcome(user, callOutcomeAction.id, callOutcomeForm);
 
       setCallOutcomeAction(null);
       setCallOutcomeForm({ outcome: 'needs_human_follow_up', notes: '' });
@@ -370,101 +311,110 @@ export default function AdminDashboard() {
 
   const handleUpdateBobReview = async (leadId, updates) => {
     try {
-      const response = await fetch(`/api/admin/bob-activity/leads/${leadId}/review`, {
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(updates)
-      });
-
-      if (response.ok) {
-        await Promise.all([fetchBobActivity(), fetchLeads()]);
-      } else {
-        const errorData = await response.json();
-        setError(errorData.error || 'Failed to update Bob review status');
-      }
+      await updateLeadReview(user, leadId, updates);
+      await Promise.all([fetchBobActivity(), fetchLeads()]);
     } catch (err) {
       console.error('Error updating Bob review status:', err);
       setError('Failed to update Bob review status');
     }
   };
 
-  const handleCreateAgent = async (e) => {
-    e.preventDefault();
-    try {
-      const response = await fetch('/api/admin/agents', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(agentFormData)
-      });
-      
-      if (response.ok) {
-        await fetchAgents();
-        setShowCreateAgentModal(false);
-        setAgentFormData({ name: '', email: '', role: 'agent' });
-      } else {
-        const errorData = await response.json();
-        setError(errorData.error || 'Failed to create agent');
-      }
-    } catch (err) {
-      console.error('Error creating agent:', err);
-      setError('Failed to create agent');
-    }
-  };
-
-  const handleDeleteAgent = async (agentId) => {
-    try {
-      const response = await fetch(`/api/admin/agents/${agentId}`, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      if (response.ok) {
-        await fetchAgents();
-        setShowDeleteConfirm(null);
-      } else {
-        const errorData = await response.json();
-        setError(errorData.error || 'Failed to delete agent');
-      }
-    } catch (err) {
-      console.error('Error deleting agent:', err);
-      setError('Failed to delete agent');
-    }
-  };
-
   const handleAssignLeads = async (agentId) => {
     try {
-      const response = await fetch('/api/admin/assign-leads', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          agentId,
-          leadIds: selectedLeads
-        })
-      });
-      
-      if (response.ok) {
-        await fetchLeads();
-        setSelectedLeads([]);
-        setShowAssignModal(false);
-      } else {
-        const errorData = await response.json();
-        setError(errorData.error || 'Failed to assign leads');
+      for (const leadId of selectedLeads) {
+        await assignLeadToTenantAgent(user, leadId, agentId);
       }
+
+      await fetchLeads();
+      setSelectedLeads([]);
+      setShowAssignModal(false);
     } catch (err) {
       console.error('Error assigning leads:', err);
       setError('Failed to assign leads');
+    }
+  };
+
+  const handleLeadImportFile = async (event) => {
+    const file = event.target.files?.[0];
+    setLeadImportMessage('');
+    setLeadImportPreview(null);
+    setLeadImportCsv('');
+    setLeadImportFileName(file?.name || '');
+
+    if (!file) return;
+
+    try {
+      setLeadImportLoading(true);
+      const text = await file.text();
+      const preview = await previewLeadCsvImport(user, text);
+      setLeadImportCsv(text);
+      setLeadImportPreview(preview);
+      setLeadImportMessage(preview.importableRows.length
+        ? preview.importableRows.length + ' lead(s) ready to import'
+        : 'No valid, non-duplicate leads are ready to import');
+    } catch (err) {
+      console.error('Error previewing lead import:', err);
+      setLeadImportMessage(err.message || 'Failed to preview CSV');
+    } finally {
+      setLeadImportLoading(false);
+      event.target.value = '';
+    }
+  };
+
+  const handleImportPreviewedLeads = async () => {
+    if (!leadImportCsv || !leadImportPreview?.importableRows?.length) return;
+
+    try {
+      setLeadImportLoading(true);
+      const result = await importLeadsFromCsv(user, {
+        csvText: leadImportCsv,
+        fileName: leadImportFileName,
+      });
+      setLeadImportPreview(null);
+      setLeadImportCsv('');
+      setLeadImportFileName('');
+      setLeadImportMessage('Imported ' + result.inserted.length + ' lead(s) from CSV');
+      await fetchLeads();
+    } catch (err) {
+      console.error('Error importing leads:', err);
+      setLeadImportMessage(err.message || 'Failed to import CSV');
+    } finally {
+      setLeadImportLoading(false);
+    }
+  };
+
+  const handleDeleteAllLeads = async () => {
+    if (deleteAllLeadsConfirmation !== 'DELETE LEADS') return;
+
+    try {
+      setDeleteAllLeadsLoading(true);
+      const result = await deleteAllLeads(user);
+      setLeads([]);
+      setSelectedLeads([]);
+      setShowDeleteAllLeadsModal(false);
+      setDeleteAllLeadsConfirmation('');
+      setLeadImportMessage('Deleted ' + result.deletedCount + ' lead(s)');
+      await Promise.all([fetchCampaigns(), fetchBobActivity()]);
+    } catch (err) {
+      console.error('Error deleting all leads:', err);
+      setError(err.message || 'Failed to delete all leads');
+    } finally {
+      setDeleteAllLeadsLoading(false);
+    }
+  };
+
+  const handleToggleDoNotContact = async (lead) => {
+    try {
+      const updatedLead = await updateLeadSuppression(user, lead.id, {
+        doNotContact: !lead.doNotContact,
+        optOutChannel: !lead.doNotContact ? 'all' : null,
+        optOutReason: !lead.doNotContact ? 'Marked from admin dashboard' : null,
+      });
+      setLeads((current) => current.map((item) => item.id === updatedLead.id ? updatedLead : item));
+      setSelectedLead((current) => current?.id === updatedLead.id ? updatedLead : current);
+    } catch (err) {
+      console.error('Error updating lead suppression:', err);
+      setError('Failed to update lead contact status');
     }
   };
 
@@ -491,19 +441,7 @@ export default function AdminDashboard() {
     setMeetingsLoading(true);
     setMeetingsError(null);
     try {
-      const response = await fetch('/api/admin/meetings', {
-        headers: {
-          'Authorization': `Bearer ${user.token}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      if (!response.ok) {
-        throw new Error('Failed to fetch meetings');
-      }
-      
-      const data = await response.json();
-      setMeetings(data.meetings || []);
+      setMeetings(await listMeetings(user));
     } catch (error) {
       console.error('Error fetching meetings:', error);
       setMeetingsError(error.message);
@@ -522,7 +460,7 @@ export default function AdminDashboard() {
     return matchesSearch && matchesStatus;
   });
 
-  const unassignedLeads = filteredLeads.filter(lead => !lead.assignedAgentId);
+  const unassignedLeads = filteredLeads.filter(lead => !lead.assignedTenantAgentId);
 
   if (loading) {
     return (
@@ -552,6 +490,20 @@ export default function AdminDashboard() {
               <div className="flex items-center space-x-4">
                 <span className="text-sm text-purple-100">Welcome, {user?.name || user?.email}</span>
                 <button
+                  onClick={() => router.push('/knowledge-base')}
+                  className="ops-button-secondary"
+                >
+                  <BookOpen className="w-4 h-4" />
+                  <span>Knowledge Base</span>
+                </button>
+                <button
+                  onClick={() => router.push('/settings/company')}
+                  className="ops-button-secondary"
+                >
+                  <Settings className="w-4 h-4" />
+                  <span>Settings</span>
+                </button>
+                <button
                   onClick={handleSignOut}
                   className="flex items-center space-x-2 text-purple-100 hover:text-white hover:bg-white hover:bg-opacity-20 px-3 py-2 rounded-lg transition-all duration-200"
                 >
@@ -569,7 +521,6 @@ export default function AdminDashboard() {
             <nav className="flex space-x-8">
               {[
                 { id: 'overview', label: 'Overview', icon: BarChart3, color: 'from-blue-500 to-cyan-500' },
-                { id: 'agents', label: 'Agent Management', icon: Users, color: 'from-green-500 to-emerald-500' },
                 { id: 'leads', label: 'Appointment Assignment', icon: Target, color: 'from-purple-500 to-pink-500' },
                 { id: 'bob', label: 'Bob Activity', icon: Bot, color: 'from-slate-600 to-cyan-600' },
                 { id: 'feedback', label: 'Agent Feedback', icon: MessageSquare, color: 'from-indigo-500 to-purple-500' },
@@ -628,8 +579,8 @@ export default function AdminDashboard() {
                     </div>
                     <div className="ml-5 w-0 flex-1">
                       <dl>
-                        <dt className="text-sm font-medium text-blue-100 truncate">Total Agents</dt>
-                        <dd className="text-2xl font-bold text-white">{agents.length}</dd>
+                        <dt className="text-sm font-medium text-blue-100 truncate">AI Agents</dt>
+                        <dd className="text-2xl font-bold text-white">{aiAgents.filter((agent) => agent.status !== 'archived').length}</dd>
                       </dl>
                     </div>
                   </div>
@@ -692,15 +643,15 @@ export default function AdminDashboard() {
                 <div className="p-6">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div>
-                      <h4 className="text-sm font-medium text-gray-900 mb-3">Agent Status</h4>
+                      <h4 className="text-sm font-medium text-gray-900 mb-3">AI Agent Status</h4>
                       <div className="space-y-2">
                         <div className="flex justify-between text-sm">
-                          <span className="text-gray-600">Active Agents</span>
-                          <span className="font-medium">{agents.filter(a => a.isActive).length}</span>
+                          <span className="text-gray-600">Live or testing</span>
+                          <span className="font-medium">{aiAgents.filter(a => ['live', 'testing'].includes(a.status)).length}</span>
                         </div>
                         <div className="flex justify-between text-sm">
-                          <span className="text-gray-600">Inactive Agents</span>
-                          <span className="font-medium">{agents.filter(a => !a.isActive).length}</span>
+                          <span className="text-gray-600">Paused</span>
+                          <span className="font-medium">{aiAgents.filter(a => a.status === 'paused').length}</span>
                         </div>
                       </div>
                     </div>
@@ -709,7 +660,7 @@ export default function AdminDashboard() {
                       <div className="space-y-2">
                         <div className="flex justify-between text-sm">
                           <span className="text-gray-600">Assigned Appointment</span>
-                          <span className="font-medium">{leads.filter(l => l.assignedAgentId).length}</span>
+                          <span className="font-medium">{leads.filter(l => l.assignedTenantAgentId).length}</span>
                         </div>
                         <div className="flex justify-between text-sm">
                           <span className="text-gray-600">Unassigned Appointment</span>
@@ -720,162 +671,104 @@ export default function AdminDashboard() {
                   </div>
                 </div>
               </div>
-            </div>
-          )}
 
-          {/* Agent Management Tab */}
-          {activeTab === 'agents' && (
-            <div className="space-y-8">
-              {/* Enhanced Header */}
-              <div className="bg-gradient-to-r from-purple-600 via-blue-600 to-cyan-600 rounded-xl shadow-lg p-6">
-                <div className="flex justify-between items-center">
-                  <div>
-                    <h2 className="text-3xl font-bold text-white mb-2">Agent Management</h2>
-                    <p className="text-purple-100">Manage your team of agents and their status efficiently</p>
+              <div className="ops-panel">
+                <div className="flex items-center justify-between border-b border-border px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <Bot className="h-4 w-4 text-text-muted" />
+                    <h3 className="text-sm font-semibold text-text-primary">AI Agents</h3>
                   </div>
-                  <button
-                    onClick={() => setShowCreateAgentModal(true)}
-                    className="flex items-center space-x-2 bg-white/20 backdrop-blur-sm text-white px-6 py-3 rounded-lg hover:bg-white/30 transition-all duration-300 shadow-lg hover:shadow-xl transform hover:scale-105"
-                  >
-                    <UserPlus className="w-5 h-5" />
-                    <span className="font-semibold">Create Agent</span>
-                  </button>
+                  <span className="ops-badge bg-info-soft text-info">
+                    {aiAgents.filter((agent) => agent.status !== 'archived').length} active
+                  </span>
                 </div>
-              </div>
-
-              <div className="bg-white rounded-xl shadow-xl overflow-hidden border border-gray-100">
-                <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-100">
-                    <thead className="bg-gradient-to-r from-gray-50 to-gray-100">
-                      <tr>
-                        <th className="px-6 py-4 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
-                          👤 Agent Details
-                        </th>
-                        <th className="px-6 py-4 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
-                          🎭 Role
-                        </th>
-                        <th className="px-6 py-4 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
-                          ⚡ Status
-                        </th>
-                        <th className="px-6 py-4 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
-                          🕒 Last Activity
-                        </th>
-                        <th className="px-6 py-4 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
-                          📊 Lead Count
-                        </th>
-                        <th className="px-6 py-4 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">
-                          🔧 Actions
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="bg-white divide-y divide-gray-100">
-                      {agents.map((agent) => {
-                        const agentLeadCount = leads.filter(lead => lead.assigned_agent_id === agent.id).length;
-                        const isActive = agent.is_active;
-                        
-                        return (
-                          <tr key={agent.id} className={`hover:bg-gradient-to-r transition-all duration-300 ${
-                            isActive 
-                              ? 'hover:from-green-50 hover:to-emerald-50 border-l-4 border-l-green-400' 
-                              : 'hover:from-red-50 hover:to-pink-50 border-l-4 border-l-red-400 opacity-75'
-                          }`}>
-                            <td className="px-6 py-5 whitespace-nowrap">
-                              <div className="flex items-center">
-                                <div className="flex-shrink-0 h-12 w-12 relative">
-                                  <div className={`h-12 w-12 rounded-full flex items-center justify-center shadow-lg ${
-                                    isActive 
-                                      ? 'bg-gradient-to-br from-green-400 to-emerald-500' 
-                                      : 'bg-gradient-to-br from-gray-400 to-gray-500'
-                                  }`}>
-                                    <User className="h-6 w-6 text-white" />
-                                  </div>
-                                  <div className={`absolute -top-1 -right-1 h-4 w-4 rounded-full border-2 border-white ${
-                                    isActive ? 'bg-green-400' : 'bg-red-400'
-                                  }`}></div>
-                                </div>
-                                <div className="ml-4">
-                                  <div className={`text-sm font-bold ${
-                                    isActive ? 'text-gray-900' : 'text-gray-600'
-                                  }`}>
-                                    {agent.name || 'No name'}
-                                  </div>
-                                  <div className={`text-sm ${
-                                    isActive ? 'text-teal-600' : 'text-gray-500'
-                                  } flex items-center mt-1`}>
-                                    <Mail className="w-3 h-3 mr-1" />
-                                    {agent.email}
-                                  </div>
-                                </div>
-                              </div>
-                            </td>
-                            <td className="px-6 py-5 whitespace-nowrap">
-                              <span className={`inline-flex px-3 py-2 text-xs font-bold rounded-xl shadow-sm ${
-                                agent.role === 'admin' 
-                                  ? 'bg-gradient-to-r from-purple-100 to-pink-100 text-purple-800 border border-purple-200'
-                                  : 'bg-gradient-to-r from-blue-100 to-cyan-100 text-blue-800 border border-blue-200'
-                              }`}>
-                                {agent.role === 'admin' ? '👑 Admin' : '🎯 Agent'}
-                              </span>
-                            </td>
-                            <td className="px-6 py-5 whitespace-nowrap">
-                              <div className="flex items-center">
-                                <div className={`h-3 w-3 rounded-full mr-2 ${
-                                  isActive ? 'bg-green-400 animate-pulse' : 'bg-red-400'
-                                }`}></div>
-                                <span className={`inline-flex px-3 py-2 text-xs font-bold rounded-xl shadow-sm ${
-                                  isActive 
-                                    ? 'bg-gradient-to-r from-green-100 to-emerald-100 text-green-800 border border-green-200' 
-                                    : 'bg-gradient-to-r from-red-100 to-pink-100 text-red-800 border border-red-200'
-                                }`}>
-                                  {isActive ? '✅ Active' : '❌ Inactive'}
-                                </span>
-                              </div>
-                            </td>
-                            <td className="px-6 py-5 whitespace-nowrap">
-                              <div className="text-sm font-medium text-gray-900">
-                                {agent.lastLogin
-                                  ? format(new Date(agent.lastLogin), 'MMM d, yyyy')
-                                  : 'Never logged in'
-                                }
-                              </div>
-                              <div className="text-xs text-gray-500 mt-1">
-                                {agent.lastLogin
-                                  ? `${Math.floor((new Date() - new Date(agent.lastLogin)) / (1000 * 60 * 60 * 24))} days ago`
-                                  : 'No activity'
-                                }
-                              </div>
-                            </td>
-                            <td className="px-6 py-5 whitespace-nowrap">
-                              <div className="flex items-center space-x-1">
-                                <div className={`px-3 py-2 rounded-lg text-sm font-bold ${
-                                  agentLeadCount === 0 
-                                    ? 'bg-gray-100 text-gray-600'
-                                    : agentLeadCount <= 5 
-                                      ? 'bg-green-100 text-green-700'
-                                      : agentLeadCount <= 10
-                                        ? 'bg-yellow-100 text-yellow-700'
-                                        : 'bg-red-100 text-red-700'
-                                }`}>
-                                  📊 {agentLeadCount} Appointments
-                                </div>
-                              </div>
-                            </td>
-                            <td className="px-6 py-5 whitespace-nowrap text-sm font-medium">
-                              <div className="flex space-x-2">
-                                <button
-                                  onClick={() => setShowDeleteConfirm(agent.id)}
-                                  className="bg-gradient-to-r from-red-500 to-pink-600 text-white hover:from-red-600 hover:to-pink-700 flex items-center px-3 py-2 rounded-lg transition-all duration-200 shadow-md hover:shadow-lg transform hover:scale-105 text-xs font-bold"
-                                >
-                                  <Trash2 className="w-3 h-3 mr-1" />
-                                  Delete
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                <div className="divide-y divide-border">
+                  {aiAgents.filter((agent) => agent.status !== 'archived').map((agent) => {
+                    const busy = agentActionBusy === agent.id;
+                    const isDefault = agent.templateKey === 'bob-default';
+                    const liveOrTesting = ['live', 'testing'].includes(agent.status);
+                    return (
+                      <div key={agent.id} className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="truncate text-sm font-semibold text-text-primary">{agent.displayName || 'AI Agent'}</p>
+                            {isDefault && <span className="ops-badge bg-info-soft text-info">Default</span>}
+                            <span className={`ops-badge ${liveOrTesting ? 'bg-success-soft text-success' : 'bg-warning-soft text-warning'}`}>
+                              {(agent.status || 'testing').replace(/_/g, ' ')}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-xs text-text-muted">{agent.voiceId || 'Voice not assigned'} · {agent.promptVersion || 'v1'}</p>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {isDefault && agent.status !== 'live' && (
+                            <button
+                              type="button"
+                              onClick={() => handleAgentStatusChange(agent, 'live')}
+                              disabled={busy}
+                              className="ops-button-secondary"
+                            >
+                              <Check className="h-4 w-4" />
+                              <span>Live</span>
+                            </button>
+                          )}
+                          {isDefault && agent.status === 'live' && (
+                            <button
+                              type="button"
+                              onClick={() => handleAgentStatusChange(agent, 'testing')}
+                              disabled={busy}
+                              className="ops-button-secondary"
+                            >
+                              <ShieldOff className="h-4 w-4" />
+                              <span>Testing</span>
+                            </button>
+                          )}
+                          {!isDefault && (
+                            agent.status === 'paused' ? (
+                              <button
+                                type="button"
+                                onClick={() => handleAgentStatusChange(agent, 'live')}
+                                disabled={busy}
+                                className="ops-button-secondary"
+                              >
+                                <Check className="h-4 w-4" />
+                                <span>Resume</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleAgentStatusChange(agent, 'paused')}
+                                disabled={busy}
+                                className="ops-button-secondary"
+                              >
+                                <PauseCircle className="h-4 w-4" />
+                                <span>Pause</span>
+                              </button>
+                            )
+                          )}
+                          {!isDefault && agent.status !== 'testing' && (
+                            <button
+                              type="button"
+                              onClick={() => handleAgentStatusChange(agent, 'testing')}
+                              disabled={busy}
+                              className="ops-button-secondary"
+                            >
+                              <ShieldOff className="h-4 w-4" />
+                              <span>Testing</span>
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setDeleteAgentTarget(agent)}
+                            disabled={busy}
+                            className="ops-button-secondary text-error"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                            <span>Delete</span>
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             </div>
@@ -886,14 +779,150 @@ export default function AdminDashboard() {
             <div className="space-y-6">
               <div className="flex justify-between items-center">
                 <h2 className="text-2xl font-bold text-gray-900">Appointment Assignment</h2>
-                {selectedLeads.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2">
+                  {selectedLeads.length > 0 && (
+                    <button
+                      onClick={() => setShowAssignModal(true)}
+                      className="flex items-center space-x-2 bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 transition-colors"
+                    >
+                      <Target className="w-4 h-4" />
+                      <span>Assign Selected ({selectedLeads.length})</span>
+                    </button>
+                  )}
                   <button
-                    onClick={() => setShowAssignModal(true)}
-                    className="flex items-center space-x-2 bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 transition-colors"
+                    type="button"
+                    onClick={() => setShowDeleteAllLeadsModal(true)}
+                    disabled={!leads.length}
+                    className="ops-button-secondary inline-flex items-center gap-2 border-error text-error disabled:cursor-not-allowed disabled:opacity-60"
                   >
-                    <Target className="w-4 h-4" />
-                    <span>Assign Selected ({selectedLeads.length})</span>
+                    <Trash2 className="h-4 w-4" />
+                    Delete all leads
                   </button>
+                </div>
+              </div>
+
+              <div className="ops-panel p-4">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <UploadCloud className="h-5 w-5 text-accent" />
+                      <h3 className="text-sm font-semibold text-text-primary">CSV lead import</h3>
+                    </div>
+                    <p className="mt-1 text-xs text-text-muted">
+                      Upload leads with call, SMS, WhatsApp, and email permission approved by default. Explicit no/false values and duplicates are still respected.
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="ops-button-secondary inline-flex cursor-pointer items-center gap-2">
+                      <FileText className="h-4 w-4" />
+                      <span>{leadImportLoading ? 'Reading...' : 'Choose CSV'}</span>
+                      <input
+                        type="file"
+                        accept=".csv,text/csv"
+                        className="sr-only"
+                        onChange={handleLeadImportFile}
+                        disabled={leadImportLoading}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleImportPreviewedLeads}
+                      disabled={leadImportLoading || !leadImportPreview?.importableRows?.length}
+                      className="ops-button-primary disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Import valid leads
+                    </button>
+                  </div>
+                </div>
+
+                {leadImportMessage && (
+                  <div className="mt-3 rounded-lg border border-border bg-surface-secondary px-3 py-2 text-sm text-text-secondary">
+                    {leadImportMessage}
+                  </div>
+                )}
+
+                {leadImportPreview && (
+                  <div className="mt-4 space-y-3">
+                    <div className="grid gap-3 sm:grid-cols-5">
+                      {[
+                        ['Rows', leadImportPreview.summary.totalRows],
+                        ['Ready', leadImportPreview.summary.validRows],
+                        ['Duplicates', leadImportPreview.summary.duplicateRows],
+                        ['Errors', leadImportPreview.summary.errorRows],
+                        ['Skipped', leadImportPreview.summary.skippedRows],
+                      ].map(([label, value]) => (
+                        <div key={label} className="rounded-lg border border-border bg-surface px-3 py-2">
+                          <div className="text-xs text-text-muted">{label}</div>
+                          <div className="text-lg font-semibold text-text-primary">{value}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="max-h-72 overflow-auto rounded-lg border border-border">
+                      <table className="min-w-full divide-y divide-border text-sm">
+                        <thead className="bg-surface-secondary">
+                          <tr>
+                            <th className="px-3 py-2 text-left text-xs font-medium uppercase text-text-muted">Row</th>
+                            <th className="px-3 py-2 text-left text-xs font-medium uppercase text-text-muted">Lead</th>
+                            <th className="px-3 py-2 text-left text-xs font-medium uppercase text-text-muted">Consent</th>
+                            <th className="px-3 py-2 text-left text-xs font-medium uppercase text-text-muted">State</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border bg-surface">
+                          {leadImportPreview.rows.slice(0, 25).map((row) => (
+                            <tr key={row.rowNumber}>
+                              <td className="whitespace-nowrap px-3 py-2 text-text-muted">{row.rowNumber}</td>
+                              <td className="px-3 py-2">
+                                <div className="font-medium text-text-primary">{row.lead.fullName || row.lead.company || 'Unnamed lead'}</div>
+                                <div className="text-xs text-text-muted">{row.lead.email || row.lead.phone || 'No contact'}</div>
+                                {Object.keys(row.lead.customFields?.importedLeadData || {}).length > 0 && (
+                                  <div className="mt-1 text-xs text-info">
+                                    {Object.keys(row.lead.customFields.importedLeadData).length} extra field(s) saved for AI context
+                                  </div>
+                                )}
+                              </td>
+                              <td className="px-3 py-2">
+                                <div className="flex flex-wrap gap-1">
+                                  {[
+                                    ['Call', row.lead.callConsent],
+                                    ['SMS', row.lead.smsConsent],
+                                    ['WhatsApp', row.lead.whatsappConsent],
+                                    ['Email', row.lead.emailConsent],
+                                  ].map(([label, allowed]) => (
+                                    <span
+                                      key={label}
+                                      className={'ops-badge ' + (allowed ? 'bg-success-soft text-success' : 'bg-surface-secondary text-text-muted')}
+                                    >
+                                      {label}
+                                    </span>
+                                  ))}
+                                </div>
+                              </td>
+                              <td className="px-3 py-2">
+                                <span className={'ops-badge ' + (
+                                  row.status === 'ready'
+                                    ? 'bg-success-soft text-success'
+                                    : row.status === 'duplicate'
+                                      ? 'bg-warning-soft text-warning'
+                                      : 'bg-error-soft text-error'
+                                )}>
+                                  {row.status}
+                                </span>
+                                {[...row.errors, ...row.warnings].length > 0 && (
+                                  <div className="mt-1 text-xs text-text-muted">
+                                    {[...row.errors, ...row.warnings].join(', ')}
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {leadImportPreview.rows.length > 25 && (
+                      <p className="text-xs text-text-muted">Showing first 25 preview rows.</p>
+                    )}
+                  </div>
                 )}
               </div>
 
@@ -952,8 +981,11 @@ export default function AdminDashboard() {
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                           Status
                         </th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-text-muted uppercase tracking-wider">
+                          Consent
+                        </th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                          Assigned Agent
+                          Assigned AI Agent
                         </th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                           Created
@@ -965,11 +997,11 @@ export default function AdminDashboard() {
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
                       {filteredLeads.map((lead) => {
-                        const assignedAgent = agents.find(agent => agent.id === lead.assignedAgentId);
+                        const assignedAgent = aiAgents.find(agent => agent.id === lead.assignedTenantAgentId);
                         return (
                           <tr key={lead.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => handleViewLead(lead)}>
                             <td className="px-6 py-4 whitespace-nowrap">
-                              {!lead.assignedAgentId && (
+                              {!lead.assignedTenantAgentId && (
                                 <input
                                   type="checkbox"
                                   checked={selectedLeads.includes(lead.id)}
@@ -1007,18 +1039,40 @@ export default function AdminDashboard() {
                               <span className="inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">
                                 {lead.status}
                               </span>
+                              {lead.doNotContact && (
+                                <span className="ml-2 inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-error-soft text-error">
+                                  Do not contact
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <div className="flex flex-wrap gap-1">
+                                {[
+                                  ['Call', lead.callConsent],
+                                  ['SMS', lead.smsConsent],
+                                  ['WA', lead.whatsappConsent],
+                                  ['Email', lead.emailConsent],
+                                ].map(([label, allowed]) => (
+                                  <span
+                                    key={label}
+                                    className={'ops-badge ' + (allowed ? 'bg-success-soft text-success' : 'bg-surface-secondary text-text-muted')}
+                                  >
+                                    {label}
+                                  </span>
+                                ))}
+                              </div>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap">
                               {assignedAgent ? (
                                 <div className="flex items-center">
                                   <div className="flex-shrink-0 h-6 w-6">
                                     <div className="h-6 w-6 rounded-full bg-gray-300 flex items-center justify-center">
-                                      <User className="h-3 w-3 text-gray-600" />
+                                      <Bot className="h-3 w-3 text-gray-600" />
                                     </div>
                                   </div>
                                   <div className="ml-2">
                                     <div className="text-sm font-medium text-gray-900">
-                                      {assignedAgent.name}
+                                      {assignedAgent.displayName}
                                     </div>
                                   </div>
                                 </div>
@@ -1030,16 +1084,28 @@ export default function AdminDashboard() {
                               {lead.createdAt ? format(new Date(lead.createdAt), 'MMM d, yyyy') : 'N/A'}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleViewLead(lead);
-                                }}
-                                className="text-blue-600 hover:text-blue-900 flex items-center"
-                              >
-                                <Eye className="w-4 h-4 mr-1" />
-                                View
-                              </button>
+                              <div className="flex items-center gap-3">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleViewLead(lead);
+                                  }}
+                                  className="flex items-center text-accent hover:text-accent-hover"
+                                >
+                                  <Eye className="w-4 h-4 mr-1" />
+                                  View
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleToggleDoNotContact(lead);
+                                  }}
+                                  className="flex items-center text-text-muted hover:text-error"
+                                >
+                                  <ShieldOff className="w-4 h-4 mr-1" />
+                                  {lead.doNotContact ? 'Allow' : 'Do not contact'}
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -1724,105 +1790,65 @@ export default function AdminDashboard() {
         </main>
       </div>
 
-      {/* Create Agent Modal */}
-      {showCreateAgentModal && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
-            <div className="mt-3">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-lg font-medium text-gray-900">Create New Agent</h3>
+      {showDeleteAllLeadsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-text-primary/40 p-4">
+          <div className="w-full max-w-md rounded-lg border border-border bg-surface shadow-lg">
+            <div className="border-b border-border px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <Trash2 className="h-5 w-5 text-error" />
+                  <h3 className="text-sm font-semibold text-text-primary">Delete all leads</h3>
+                </div>
                 <button
-                  onClick={() => setShowCreateAgentModal(false)}
-                  className="text-gray-400 hover:text-gray-600"
+                  type="button"
+                  className="rounded-lg p-1 text-text-muted hover:bg-surface-secondary"
+                  onClick={() => {
+                    setShowDeleteAllLeadsModal(false);
+                    setDeleteAllLeadsConfirmation('');
+                  }}
+                  disabled={deleteAllLeadsLoading}
                 >
-                  <X className="w-5 h-5" />
+                  <X className="h-5 w-5" />
                 </button>
               </div>
-              
-              <form onSubmit={handleCreateAgent} className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Name</label>
-                  <input
-                    type="text"
-                    required
-                    value={agentFormData.name}
-                    onChange={(e) => setAgentFormData({...agentFormData, name: e.target.value})}
-                    className="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Email</label>
-                  <input
-                    type="email"
-                    required
-                    value={agentFormData.email}
-                    onChange={(e) => setAgentFormData({...agentFormData, email: e.target.value})}
-                    className="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
-                </div>
-                
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Role</label>
-                  <select
-                    value={agentFormData.role}
-                    onChange={(e) => setAgentFormData({...agentFormData, role: e.target.value})}
-                    className="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  >
-                    <option value="agent">Agent</option>
-                    <option value="admin">Admin</option>
-                  </select>
-                </div>
-                
-                <div className="flex justify-end space-x-3 pt-4">
-                  <button
-                    type="button"
-                    onClick={() => setShowCreateAgentModal(false)}
-                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 border border-gray-300 rounded-md hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    className="px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                  >
-                    Create Agent
-                  </button>
-                </div>
-              </form>
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* Delete Confirmation Modal */}
-      {showDeleteConfirm && (
-        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
-            <div className="mt-3 text-center">
-              <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100">
-                <AlertCircle className="h-6 w-6 text-red-600" />
+            <div className="space-y-4 px-4 py-4">
+              <div className="rounded-lg border border-error bg-error-soft px-3 py-2 text-sm text-error">
+                This will permanently delete {leads.length} tenant lead(s). Related lead timelines and campaign lead links may be removed through database cascade rules.
               </div>
-              <h3 className="text-lg font-medium text-gray-900 mt-4">Delete Agent</h3>
-              <div className="mt-2 px-7 py-3">
-                <p className="text-sm text-gray-500">
-                  Are you sure you want to delete this agent? This action cannot be undone.
-                </p>
-              </div>
-              <div className="flex justify-center space-x-3 mt-4">
-                <button
-                  onClick={() => setShowDeleteConfirm(null)}
-                  className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 border border-gray-300 rounded-md hover:bg-gray-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => handleDeleteAgent(showDeleteConfirm)}
-                  className="px-4 py-2 text-sm font-medium text-white bg-red-600 border border-transparent rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
-                >
-                  Delete
-                </button>
-              </div>
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium text-text-secondary">
+                  Type DELETE LEADS to confirm
+                </span>
+                <input
+                  className="ops-input"
+                  value={deleteAllLeadsConfirmation}
+                  onChange={(event) => setDeleteAllLeadsConfirmation(event.target.value)}
+                  placeholder="DELETE LEADS"
+                  disabled={deleteAllLeadsLoading}
+                />
+              </label>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+              <button
+                type="button"
+                className="ops-button-secondary"
+                onClick={() => {
+                  setShowDeleteAllLeadsModal(false);
+                  setDeleteAllLeadsConfirmation('');
+                }}
+                disabled={deleteAllLeadsLoading}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="ops-button-primary bg-error text-accent-foreground hover:bg-error disabled:cursor-not-allowed disabled:opacity-60"
+                onClick={handleDeleteAllLeads}
+                disabled={deleteAllLeadsLoading || deleteAllLeadsConfirmation !== 'DELETE LEADS'}
+              >
+                {deleteAllLeadsLoading ? 'Deleting...' : 'Delete all leads'}
+              </button>
             </div>
           </div>
         </div>
@@ -1835,8 +1861,8 @@ export default function AdminDashboard() {
             <div className="">
               <div className="flex items-center justify-between mb-6">
                 <div>
-                  <h3 className="text-2xl font-bold bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent">Assign Leads to Agent</h3>
-                  <p className="text-sm text-gray-600 mt-1">Select an agent to assign {selectedLeads.length} selected lead(s)</p>
+                  <h3 className="text-2xl font-bold bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent">Assign Leads to AI Agent</h3>
+                  <p className="text-sm text-gray-600 mt-1">Select an AI agent to assign {selectedLeads.length} selected lead(s)</p>
                 </div>
                 <button
                   onClick={() => setShowAssignModal(false)}
@@ -1857,8 +1883,8 @@ export default function AdminDashboard() {
                 </div>
                 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-96 overflow-y-auto">
-                  {agents.filter(agent => agent.is_active).map((agent) => {
-                    const agentLeadCount = leads.filter(lead => lead.assignedAgentId === agent.id).length;
+                  {aiAgents.filter(agent => agent.status !== 'archived').map((agent) => {
+                    const agentLeadCount = leads.filter(lead => lead.assignedTenantAgentId === agent.id).length;
                     return (
                       <button
                         key={agent.id}
@@ -1868,22 +1894,22 @@ export default function AdminDashboard() {
                         <div className="flex items-center space-x-3">
                           <div className="flex-shrink-0">
                             <div className="h-12 w-12 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 flex items-center justify-center shadow-lg group-hover:shadow-xl transition-shadow duration-200">
-                              <User className="h-6 w-6 text-white" />
+                              <Bot className="h-6 w-6 text-white" />
                             </div>
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className="text-sm font-semibold text-gray-900 group-hover:text-purple-900">
-                              {agent.name}
+                              {agent.displayName}
                             </div>
                             <div className="text-xs text-gray-500 truncate">
-                              {agent.email}
+                              {agent.voiceId || 'Provider default voice'}
                             </div>
                             <div className="flex items-center mt-1 space-x-2">
                               <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
                                 {agentLeadCount} leads
                               </span>
                               <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
-                                Active
+                                {agent.status}
                               </span>
                             </div>
                           </div>
@@ -1961,7 +1987,7 @@ export default function AdminDashboard() {
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700">Job Title</label>
-                      <p className="mt-1 text-sm text-gray-900">{selectedLead.job_title || 'Not provided'}</p>
+                      <p className="mt-1 text-sm text-gray-900">{selectedLead.jobTitle || selectedLead.job_title || 'Not provided'}</p>
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700">Website</label>
@@ -1969,9 +1995,44 @@ export default function AdminDashboard() {
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700">Lead Source</label>
-                      <p className="mt-1 text-sm text-gray-900">{selectedLead.lead_source || 'Not provided'}</p>
+                      <p className="mt-1 text-sm text-gray-900">{selectedLead.leadSource || selectedLead.lead_source || 'Not provided'}</p>
                     </div>
                   </div>
+                </div>
+
+                {/* Consent and Suppression */}
+                <div className="bg-surface-secondary p-4 rounded-lg border border-border">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <h4 className="text-md font-semibold text-text-primary">Consent and suppression</h4>
+                    <button
+                      type="button"
+                      onClick={() => handleToggleDoNotContact(selectedLead)}
+                      className="ops-button-secondary h-8 px-2"
+                    >
+                      {selectedLead.doNotContact ? 'Allow contact' : 'Mark do not contact'}
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    {[
+                      ['Call consent', selectedLead.callConsent],
+                      ['SMS consent', selectedLead.smsConsent],
+                      ['WhatsApp consent', selectedLead.whatsappConsent],
+                      ['Email consent', selectedLead.emailConsent],
+                    ].map(([label, allowed]) => (
+                      <div key={label} className="flex items-center justify-between rounded-lg border border-border bg-surface px-3 py-2">
+                        <span className="text-sm text-text-secondary">{label}</span>
+                        <span className={'ops-badge ' + (allowed ? 'bg-success-soft text-success' : 'bg-warning-soft text-warning')}>
+                          {allowed ? 'Allowed' : 'Missing'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  {(selectedLead.doNotContact || selectedLead.optedOutAt) && (
+                    <div className="mt-3 rounded-lg border border-error bg-error-soft px-3 py-2 text-sm text-error">
+                      {selectedLead.doNotContact ? 'This lead is marked do not contact.' : 'This lead has an opt-out record.'}
+                      {selectedLead.optOutChannel ? ' Channel: ' + selectedLead.optOutChannel + '.' : ''}
+                    </div>
+                  )}
                 </div>
 
                 {/* Assignment Information */}
@@ -1979,10 +2040,10 @@ export default function AdminDashboard() {
                   <h4 className="text-md font-semibold text-gray-900 mb-3">Assignment</h4>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-sm font-medium text-gray-700">Assigned Agent</label>
+                      <label className="block text-sm font-medium text-gray-700">Assigned AI Agent</label>
                       <p className="mt-1 text-sm text-gray-900">
-                        {selectedLead.assignedAgentId ?
-                      agents.find(agent => agent.id === selectedLead.assignedAgentId)?.name || 'Unknown Agent'
+                        {selectedLead.assignedTenantAgentId ?
+                      aiAgents.find(agent => agent.id === selectedLead.assignedTenantAgentId)?.displayName || 'Unknown AI agent'
                           : 'Unassigned'
                         }
                       </p>
@@ -1997,7 +2058,7 @@ export default function AdminDashboard() {
                 </div>
 
                 {/* Additional Information */}
-                {(selectedLead.notes || selectedLead.tags) && (
+                {(selectedLead.notes || selectedLead.tags || Object.keys(selectedLead.customFields?.importedLeadData || {}).length > 0) && (
                   <div className="bg-gray-50 p-4 rounded-lg">
                     <h4 className="text-md font-semibold text-gray-900 mb-3">Additional Information</h4>
                     {selectedLead.notes && (
@@ -2010,6 +2071,19 @@ export default function AdminDashboard() {
                       <div>
                         <label className="block text-sm font-medium text-gray-700">Tags</label>
                         <p className="mt-1 text-sm text-gray-900">{selectedLead.tags}</p>
+                      </div>
+                    )}
+                    {Object.keys(selectedLead.customFields?.importedLeadData || {}).length > 0 && (
+                      <div className="mt-4">
+                        <label className="block text-sm font-medium text-text-primary">Imported lead context</label>
+                        <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+                          {Object.entries(selectedLead.customFields.importedLeadData).map(([label, value]) => (
+                            <div key={label} className="rounded-lg border border-border bg-surface px-3 py-2">
+                              <div className="text-xs font-medium text-text-muted">{label}</div>
+                              <div className="mt-1 whitespace-pre-wrap text-sm text-text-primary">{String(value)}</div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -2164,6 +2238,40 @@ export default function AdminDashboard() {
         </div>
       )}
 
+      {deleteAgentTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-text-primary/40 p-4">
+          <div className="w-full max-w-md rounded-lg border border-border bg-surface shadow-lg">
+            <div className="border-b border-border px-4 py-3">
+              <h3 className="text-sm font-semibold text-text-primary">Delete AI agent</h3>
+            </div>
+            <div className="space-y-3 p-4">
+              <p className="text-sm text-text-secondary">
+                Delete {deleteAgentTarget.displayName || 'this AI agent'} from active use? Historical lead and action records stay intact.
+              </p>
+              {deleteAgentTarget.templateKey === 'bob-default' && (
+                <div className="rounded-md border border-border bg-info-soft px-3 py-2 text-sm text-info">
+                  Deleting the default agent will allow the platform to create a fresh Bob agent in testing mode.
+                </div>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
+              <button type="button" onClick={() => setDeleteAgentTarget(null)} className="ops-button-secondary">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleArchiveAgent}
+                disabled={agentActionBusy === deleteAgentTarget.id}
+                className="ops-button-secondary text-error"
+              >
+                <Trash2 className="h-4 w-4" />
+                <span>Delete</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Feedback Detail Modal */}
       {showFeedbackModal && selectedFeedback && (
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
@@ -2266,24 +2374,11 @@ export default function AdminDashboard() {
                         <button
                           onClick={async () => {
                             try {
-                              const response = await fetch(`/api/feedback/${selectedFeedback.id}`, {
-                                method: 'PUT',
-                                headers: {
-                                  'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-                                  'Content-Type': 'application/json'
-                                },
-                                body: JSON.stringify({
-                                  adminResponse: feedbackResponse,
-                                  status: 'responded'
-                                })
-                              });
-                              
-                              if (response.ok) {
-                                await fetchFeedback();
-                                setShowFeedbackModal(false);
-                                setSelectedFeedback(null);
-                                setFeedbackResponse('');
-                              }
+                              await respondToFeedback(user, selectedFeedback.id, feedbackResponse);
+                              await fetchFeedback();
+                              setShowFeedbackModal(false);
+                              setSelectedFeedback(null);
+                              setFeedbackResponse('');
                             } catch (err) {
                               console.error('Error responding to feedback:', err);
                             }
@@ -2296,22 +2391,10 @@ export default function AdminDashboard() {
                         <button
                           onClick={async () => {
                             try {
-                              const response = await fetch(`/api/feedback/admin/respond/${selectedFeedback.id}`, {
-                                method: 'POST',
-                                headers: {
-                                  'Authorization': `Bearer ${localStorage.getItem('auth_token')}`,
-                                  'Content-Type': 'application/json'
-                                },
-                                body: JSON.stringify({
-                                  status: 'in_review'
-                                })
-                              });
-                              
-                              if (response.ok) {
-                                await fetchFeedback();
-                                setShowFeedbackModal(false);
-                                setSelectedFeedback(null);
-                              }
+                              await setFeedbackStatus(user, selectedFeedback.id, 'in_review');
+                              await fetchFeedback();
+                              setShowFeedbackModal(false);
+                              setSelectedFeedback(null);
                             } catch (err) {
                               console.error('Error updating feedback status:', err);
                             }

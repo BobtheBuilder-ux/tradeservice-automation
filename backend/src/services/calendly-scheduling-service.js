@@ -2,6 +2,7 @@ import logger from '../utils/logger.js';
 
 const API_BASE_URL = process.env.CALENDLY_API_BASE_URL || 'https://api.calendly.com';
 const DEFAULT_TIME_ZONE = process.env.CALENDLY_TIME_ZONE || process.env.BUSINESS_TIME_ZONE || 'America/Toronto';
+const DEFAULT_TIMEOUT_MS = Number(process.env.CALENDLY_BOOKING_TIMEOUT_MS || 6500);
 
 function getToken() {
   return process.env.CALENDLY_PERSONAL_ACCESS_TOKEN || process.env.CALENDLY_API_TOKEN;
@@ -55,12 +56,18 @@ function parseRequestedDate(reply, now = new Date()) {
 }
 
 function parseRequestedTime(reply) {
-  const text = String(reply || '').toLowerCase();
-  const match = text.match(/\b(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/);
+  const text = String(reply || '')
+    .toLowerCase()
+    .replace(/\b(a|p)\s*\.?\s*m\.?\b/g, '$1m')
+    .replace(/\bo['’]?clock\b/g, '')
+    .replace(/\s+/g, ' ');
+  const match = text.match(/\b(?:at|by|around|about)?\s*(\d{1,4})(?::(\d{2}))?\s*(am|pm)\b/);
   if (!match) return null;
 
-  let hour = Number(match[1]);
-  const minute = match[2] ? Number(match[2]) : 0;
+  const rawHour = match[1];
+  const compactTime = !match[2] && rawHour.length >= 3;
+  let hour = compactTime ? Number(rawHour.slice(0, -2)) : Number(rawHour);
+  const minute = match[2] ? Number(match[2]) : compactTime ? Number(rawHour.slice(-2)) : 0;
   const period = match[3];
 
   if (hour < 1 || hour > 12 || minute > 59) return null;
@@ -134,6 +141,7 @@ class CalendlySchedulingService {
     this.token = options.token || getToken();
     this.eventTypeUri = options.eventTypeUri || getEventTypeUri();
     this.timeZone = options.timeZone || DEFAULT_TIME_ZONE;
+    this.timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
   }
 
   isConfigured() {
@@ -167,16 +175,31 @@ class CalendlySchedulingService {
       if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, value);
     });
 
-    const response = await this.fetch(url, {
-      method,
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        'Content-Type': 'application/json',
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    const text = await response.text();
-    const data = text ? JSON.parse(text) : {};
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeoutMs);
+    let response;
+    let data;
+
+    try {
+      response = await this.fetch(url, {
+        method,
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const text = await response.text();
+      data = text ? JSON.parse(text) : {};
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        throw new Error(`Calendly API request timed out after ${this.timeoutMs}ms`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     if (!response.ok) {
       throw new Error(data?.message || data?.title || `Calendly API request failed with ${response.status}`);

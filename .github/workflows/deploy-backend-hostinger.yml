@@ -1,41 +1,23 @@
-name: Deploy Backend to Hostinger
+name: Retired Backend Deploy
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'backend/**'
-      - 'docker-compose.backend.yml'
-      - '.github/workflows/deploy-backend-hostinger.yml'
   workflow_dispatch:
 
 concurrency:
-  group: hostinger-backend-production
+  group: retired-backend-production
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  deploy:
-    name: Build and deploy backend Docker container
-    runs-on: [self-hosted, Linux, X64, hostinger, tradeservice-backend]
-    timeout-minutes: 30
+  retired:
+    name: Backend deploy is retired
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
-      - name: Verify self-hosted runner
-        shell: bash
+      - name: Explain retired backend runtime
         run: |
-          set -euo pipefail
-          hostname
-          whoami
-          docker --version
-          docker compose version
-          sudo -n /usr/local/bin/deploy-tradeservice-backend --check
-
-      - name: Deploy backend on Hostinger VPS
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo -n /usr/local/bin/deploy-tradeservice-backend
+          echo "The local backend deploy has been retired."
+          echo "Use frontend/, functions/, migrations/, and InsForge instead."

@@ -29,7 +29,7 @@ export default function IntegrationCallback() {
         
         // Redirect back to dashboard after 2 seconds
         setTimeout(() => {
-          router.push('/agent-dashboard');
+          router.push('/admin-dashboard');
         }, 2000);
         return;
       }
@@ -94,7 +94,7 @@ export default function IntegrationCallback() {
             
             {status === 'error' && (
               <button
-                onClick={() => router.push('/agent-dashboard')}
+                onClick={() => router.push('/admin-dashboard')}
                 className="bg-gradient-to-r from-orange-600 to-red-600 text-white px-6 py-2 rounded-lg hover:from-orange-700 hover:to-red-700 transition-all duration-200 font-medium"
               >
                 Return to Dashboard

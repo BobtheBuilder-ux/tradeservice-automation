@@ -5,7 +5,7 @@ import { authManager, useAuth } from '../lib/auth';
 
 export default function Login() {
   const router = useRouter();
-  const { user, isAuthenticated, loading: authLoading } = useAuth();
+  const { user, isAuthenticated, error: authError, loading: authLoading } = useAuth();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -13,9 +13,14 @@ export default function Login() {
     if (authLoading) return;
 
     if (isAuthenticated && user) {
-      router.push(user.redirectTo || (user.role === 'admin' ? '/admin-dashboard' : '/agent-dashboard'));
+      router.push(user.redirectTo || '/admin-dashboard');
     }
   }, [authLoading, isAuthenticated, user, router]);
+
+  useEffect(() => {
+    if (!authError) return;
+    setError(authError);
+  }, [authError]);
 
   const handleGoogleSignIn = async () => {
     setLoading(true);
@@ -40,7 +45,7 @@ export default function Login() {
             <h1 className="text-3xl font-bold text-gray-900 mb-2">9QC Lead Management</h1>
             <h2 className="text-xl text-gray-600">Sign in with Google</h2>
             <p className="mt-3 text-sm text-gray-500">
-              Admins and agents use their approved Google account to access the dashboard.
+              New users sign in with Google and receive admin dashboard access.
             </p>
           </div>
         </div>
@@ -66,8 +71,8 @@ export default function Login() {
               <h4 className="text-sm font-semibold text-blue-900 mb-2">Secure access</h4>
               <ul className="text-sm text-blue-800 space-y-1">
                 <li>• Authentication is handled by InsForge and Google OAuth.</li>
-                <li>• Admin and agent access is assigned by approved account email.</li>
-                <li>• Password login and public registration are disabled.</li>
+                <li>• Signed-in users are routed to the admin dashboard.</li>
+                <li>• Password login is disabled.</li>
               </ul>
             </div>
           </div>

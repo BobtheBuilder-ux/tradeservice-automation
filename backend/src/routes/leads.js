@@ -1,7 +1,4 @@
 import express from 'express';
-import { db } from '../config/index.js';
-import { leads, agents, agentIntegrations } from '../db/schema.js';
-import { eq, isNull, and, count } from 'drizzle-orm';
 import leadAutomationService from '../services/lead-automation-service.js';
 import bobOrchestrator from '../services/bob-orchestrator.js';
 import { authenticateToken } from '../middleware/auth.js';
@@ -26,7 +23,7 @@ router.patch('/:leadId/qualification', verifyToken, async (req, res) => {
   try {
     const { leadId } = req.params;
 
-    const lead = await insforgeDataService.getLeadById(leadId);
+    const lead = await insforgeDataService.getLeadById(leadId, req.user);
 
     if (!lead) {
       return res.status(404).json({ error: 'Lead not found' });
@@ -76,7 +73,7 @@ router.patch('/:leadId/qualification', verifyToken, async (req, res) => {
     patch.lastUpdatedBy = req.user.id;
     patch.updatedAt = new Date();
 
-    const updatedLead = await insforgeDataService.updateLead(leadId, patch);
+    const updatedLead = await insforgeDataService.updateLead(leadId, patch, req.user);
 
     if (updatedLead) {
       await bobOrchestrator.syncLead(updatedLead);
@@ -100,7 +97,7 @@ router.get('/unassigned', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
-    const unassignedLeads = await insforgeDataService.listUnassignedLeads();
+    const unassignedLeads = await insforgeDataService.listUnassignedLeadsForTenant(req.user);
 
     res.json({ leads: unassignedLeads || [] });
   } catch (error) {
@@ -125,6 +122,7 @@ router.post('/', verifyToken, async (req, res) => {
       source = 'manual',
       priority = 'medium',
       assignedAgentId,
+      assignedTenantAgentId,
       qualificationStatus = 'unqualified',
       qualificationScore,
       leadStage = 'new_inquiry',
@@ -145,7 +143,14 @@ router.post('/', verifyToken, async (req, res) => {
 
     // Check if lead with this email already exists
     const normalizedEmail = email.trim().toLowerCase();
-    const existingLead = await insforgeDataService.getLeadByEmail(normalizedEmail);
+    const existingLead = await insforgeDataService.getLeadByEmail(normalizedEmail, req.user);
+
+    if (assignedTenantAgentId) {
+      const tenantAgent = await insforgeDataService.getTenantAgentById(assignedTenantAgentId, req.user);
+      if (!tenantAgent || tenantAgent.status === 'archived') {
+        return res.status(404).json({ error: 'AI agent not found' });
+      }
+    }
 
     if (existingLead) {
       return res.status(409).json({ error: 'Lead with this email already exists' });
@@ -161,6 +166,7 @@ router.post('/', verifyToken, async (req, res) => {
       priority,
       status: 'new',
       assignedAgentId: assignedAgentId || null,
+      assignedTenantAgentId: assignedTenantAgentId || null,
       qualificationStatus,
       qualificationScore: qualificationScore === '' || qualificationScore === undefined ? null : Number(qualificationScore),
       leadStage,
@@ -177,7 +183,7 @@ router.post('/', verifyToken, async (req, res) => {
       updatedAt: new Date().toISOString()
     };
 
-    const newLead = await insforgeDataService.createLead(leadPayload);
+    const newLead = await insforgeDataService.createLead(leadPayload, req.user);
 
     if (!newLead) {
       return res.status(500).json({ error: 'Failed to create lead' });
@@ -213,7 +219,7 @@ router.get('/agents/available', verifyToken, async (req, res) => {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
-    const availableAgents = await insforgeDataService.listAvailableAgents();
+    const availableAgents = await insforgeDataService.listAvailableAgents(req.user);
 
     res.json({ agents: availableAgents || [] });
   } catch (error) {
@@ -237,66 +243,37 @@ router.post('/:leadId/assign', verifyToken, async (req, res) => {
       return res.status(400).json({ error: 'Agent ID is required' });
     }
 
-    // Verify the lead exists
-    const existingLead = await db.select({ id: leads.id })
-      .from(leads)
-      .where(eq(leads.id, leadId))
-      .limit(1);
-
-    if (!existingLead || existingLead.length === 0) {
+    const existingLead = await insforgeDataService.getLeadById(leadId, req.user);
+    if (!existingLead) {
       return res.status(404).json({ error: 'Lead not found' });
     }
 
-    // Verify the agent exists and is active
-    const agent = await db.select({ 
-      id: agents.id, 
-      firstName: agents.firstName, 
-      lastName: agents.lastName,
-      fullName: agents.fullName,
-      isActive: agents.isActive 
-    })
-      .from(agents)
-      .where(eq(agents.id, agentId))
-      .limit(1);
-
-    if (!agent || agent.length === 0) {
+    const agent = await insforgeDataService.getAgentById(agentId);
+    if (!agent || agent.tenantId !== req.user.tenantId) {
       return res.status(404).json({ error: 'Agent not found' });
     }
 
-    if (!agent[0].isActive) {
+    if (!agent.isActive) {
       return res.status(400).json({ error: 'Agent is not active' });
     }
 
-    // Update the lead assignment
-    const updatedLead = await db.update(leads)
-      .set({
-        assignedAgentId: agentId,
-        lastUpdatedBy: req.user.id,
-        status: 'assigned',
-        updatedAt: new Date()
-      })
-      .where(eq(leads.id, leadId))
-      .returning({
-        id: leads.id,
-        email: leads.email,
-        firstName: leads.firstName,
-        lastName: leads.lastName,
-        fullName: leads.fullName,
-        assignedAgentId: leads.assignedAgentId,
-        status: leads.status,
-        updatedAt: leads.updatedAt
-      });
+    const updatedLead = await insforgeDataService.updateLead(leadId, {
+      assignedAgentId: agentId,
+      lastUpdatedBy: req.user.id,
+      status: 'assigned',
+      updatedAt: new Date(),
+    }, req.user);
 
-    if (!updatedLead || updatedLead.length === 0) {
+    if (!updatedLead) {
       return res.status(500).json({ error: 'Failed to assign lead' });
     }
 
     res.json({ 
       message: 'Lead assigned successfully',
-      lead: updatedLead[0],
+      lead: updatedLead,
       assignedAgent: {
-        id: agent[0].id,
-        name: agent[0].fullName || `${agent[0].firstName} ${agent[0].lastName}`.trim()
+        id: agent.id,
+        name: agent.fullName || `${agent.firstName || ''} ${agent.lastName || ''}`.trim()
       }
     });
   } catch (error) {
@@ -319,51 +296,28 @@ router.post('/auto-assign', verifyToken, async (req, res) => {
       return res.status(400).json({ error: 'Lead ID is required' });
     }
 
-    // Verify the lead exists and is not already assigned
-    const existingLead = await db.select({ 
-      id: leads.id, 
-      assignedAgentId: leads.assignedAgentId,
-      email: leads.email,
-      firstName: leads.firstName,
-      lastName: leads.lastName
-    })
-      .from(leads)
-      .where(eq(leads.id, leadId))
-      .limit(1);
-
-    if (!existingLead || existingLead.length === 0) {
+    const existingLead = await insforgeDataService.getLeadById(leadId, req.user);
+    if (!existingLead) {
       return res.status(404).json({ error: 'Lead not found' });
     }
 
-    if (existingLead[0].assignedAgentId) {
+    if (existingLead.assignedAgentId) {
       return res.status(400).json({ 
         error: 'Lead is already assigned',
-        assignedAgentId: existingLead[0].assignedAgentId
+        assignedAgentId: existingLead.assignedAgentId
       });
     }
 
-    // Get all active agents with their current lead counts
-    const agentsWithLeadCounts = await db.select({
-      id: agents.id,
-      agentId: agents.agentId,
-      firstName: agents.firstName,
-      lastName: agents.lastName,
-      fullName: agents.fullName,
-      email: agents.email,
-      leadCount: count(leads.id)
-    })
-    .from(agents)
-    .leftJoin(leads, and(
-      eq(leads.assignedAgentId, agents.id),
-      isNull(leads.canceledAt) // Only count active leads
-    ))
-    .where(and(
-      eq(agents.isActive, true),
-      eq(agents.emailVerified, true),
-      eq(agents.role, 'agent')
-    ))
-    .groupBy(agents.id, agents.agentId, agents.firstName, agents.lastName, agents.fullName, agents.email)
-    .orderBy(count(leads.id), agents.firstName); // Order by lead count (ascending), then by name
+    const [availableAgents, tenantLeads] = await Promise.all([
+      insforgeDataService.listAvailableAgents(req.user),
+      insforgeDataService.listRecentLeads(10000, req.user),
+    ]);
+    const agentsWithLeadCounts = availableAgents
+      .map((agent) => ({
+        ...agent,
+        leadCount: tenantLeads.filter((lead) => lead.assignedAgentId === agent.id && !lead.canceledAt).length,
+      }))
+      .sort((a, b) => a.leadCount - b.leadCount || (a.firstName || '').localeCompare(b.firstName || ''));
 
     if (!agentsWithLeadCounts || agentsWithLeadCounts.length === 0) {
       return res.status(404).json({ error: 'No available agents found' });
@@ -375,26 +329,14 @@ router.post('/auto-assign', verifyToken, async (req, res) => {
     console.log(`🎯 AUTO-ASSIGN: Selecting agent ${selectedAgent.fullName || selectedAgent.firstName} with ${selectedAgent.leadCount} current leads`);
 
     // Update the lead assignment
-    const updatedLead = await db.update(leads)
-      .set({
-        assignedAgentId: selectedAgent.id,
-        lastUpdatedBy: req.user.id,
-        status: 'assigned',
-        updatedAt: new Date()
-      })
-      .where(eq(leads.id, leadId))
-      .returning({
-        id: leads.id,
-        email: leads.email,
-        firstName: leads.firstName,
-        lastName: leads.lastName,
-        fullName: leads.fullName,
-        assignedAgentId: leads.assignedAgentId,
-        status: leads.status,
-        updatedAt: leads.updatedAt
-      });
+    const updatedLead = await insforgeDataService.updateLead(leadId, {
+      assignedAgentId: selectedAgent.id,
+      lastUpdatedBy: req.user.id,
+      status: 'assigned',
+      updatedAt: new Date(),
+    }, req.user);
 
-    if (!updatedLead || updatedLead.length === 0) {
+    if (!updatedLead) {
       return res.status(500).json({ error: 'Failed to assign lead' });
     }
 
@@ -402,7 +344,7 @@ router.post('/auto-assign', verifyToken, async (req, res) => {
 
     res.json({ 
       message: 'Lead automatically assigned successfully',
-      lead: updatedLead[0],
+      lead: updatedLead,
       assignedAgent: {
         id: selectedAgent.id,
         agentId: selectedAgent.agentId,
@@ -423,48 +365,32 @@ router.post('/:leadId/calendly-link', verifyToken, async (req, res) => {
   try {
     const { leadId } = req.params;
 
-    // Get lead with assigned agent
-    const leadData = await db.select({
-      id: leads.id,
-      email: leads.email,
-      firstName: leads.firstName,
-      lastName: leads.lastName,
-      assignedAgentId: leads.assignedAgentId,
-      agentName: agents.fullName,
-      agentFirstName: agents.firstName,
-      agentLastName: agents.lastName
-    })
-      .from(leads)
-      .leftJoin(agents, eq(leads.assignedAgentId, agents.id))
-      .where(eq(leads.id, leadId))
-      .limit(1);
-
-    if (!leadData || leadData.length === 0) {
+    const lead = await insforgeDataService.getLeadById(leadId, req.user);
+    if (!lead) {
       return res.status(404).json({ error: 'Lead not found' });
     }
-
-    const lead = leadData[0];
 
     if (!lead.assignedAgentId) {
       return res.status(400).json({ error: 'Lead is not assigned to an agent' });
     }
 
-    // Get agent's Calendly integration
-    const agentIntegration = await db.select({
-      calendlyAccessToken: agentIntegrations.calendlyAccessToken
-    })
-      .from(agentIntegrations)
-      .where(eq(agentIntegrations.agentId, lead.assignedAgentId))
-      .limit(1);
+    const [agent, agentIntegration] = await Promise.all([
+      insforgeDataService.getAgentById(lead.assignedAgentId),
+      insforgeDataService.getAgentIntegration(lead.assignedAgentId),
+    ]);
 
-    if (!agentIntegration || agentIntegration.length === 0 || !agentIntegration[0].calendlyAccessToken) {
+    if (!agent || agent.tenantId !== req.user.tenantId) {
+      return res.status(404).json({ error: 'Assigned agent not found' });
+    }
+
+    if (!agentIntegration || agentIntegration.tenantId !== req.user.tenantId || !agentIntegration.calendlyAccessToken) {
       return res.status(400).json({ 
         error: 'Agent does not have Calendly integration configured',
         agentId: lead.assignedAgentId
       });
     }
 
-    const accessToken = agentIntegration[0].calendlyAccessToken;
+    const accessToken = agentIntegration.calendlyAccessToken;
 
     // Get agent's user info from Calendly API
     const userResponse = await fetch('https://api.calendly.com/users/me', {
@@ -550,7 +476,7 @@ router.post('/:leadId/calendly-link', verifyToken, async (req, res) => {
       },
       agent: {
         id: lead.assignedAgentId,
-        name: lead.agentName || `${lead.agentFirstName} ${lead.agentLastName}`.trim()
+        name: agent.fullName || `${agent.firstName || ''} ${agent.lastName || ''}`.trim()
       },
       lead: {
         id: lead.id,
@@ -594,7 +520,7 @@ router.post('/:leadId/complete-automation', verifyToken, async (req, res) => {
     }
 
     // Execute complete automation workflow
-    const result = await leadAutomationService.executeCompleteWorkflow(leadId, trackingId);
+    const result = await leadAutomationService.executeCompleteWorkflow(leadId, trackingId, req.user);
 
     if (result.success) {
       console.log(`✅ COMPLETE-AUTOMATION: Workflow completed successfully for lead ${leadId}`);
@@ -646,7 +572,7 @@ router.get('/:leadId/automation-status', verifyToken, async (req, res) => {
     }
 
     // Get automation status
-    const result = await leadAutomationService.getAutomationStatus(leadId);
+    const result = await leadAutomationService.getAutomationStatus(leadId, req.user);
 
     if (result.success) {
       console.log(`✅ AUTOMATION-STATUS: Status retrieved for lead ${leadId}`);

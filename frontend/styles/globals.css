@@ -3,6 +3,31 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --color-background: #f6f7fb;
+    --color-surface: #ffffff;
+    --color-surface-secondary: #f9fafb;
+    --color-surface-tertiary: #eef2f6;
+    --color-border: #e3e8ef;
+    --color-border-strong: #cdd5df;
+    --color-text-primary: #121926;
+    --color-text-secondary: #4b5565;
+    --color-text-muted: #697586;
+    --color-text-faint: #9aa4b2;
+    --color-accent: #2563eb;
+    --color-accent-hover: #1d4ed8;
+    --color-accent-soft: #dbeafe;
+    --color-accent-foreground: #ffffff;
+    --color-success: #059669;
+    --color-success-soft: #d1fae5;
+    --color-warning: #d97706;
+    --color-warning-soft: #fef3c7;
+    --color-error: #dc2626;
+    --color-error-soft: #fee2e2;
+    --color-info: #0284c7;
+    --color-info-soft: #e0f2fe;
+  }
+
   html {
     font-family: 'Inter', system-ui, sans-serif;
   }
@@ -193,6 +218,30 @@
   /* Focus styles */
   .focus-ring {
     @apply focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 focus:outline-none;
+  }
+
+  .ops-panel {
+    @apply bg-surface border border-border rounded-lg shadow-sm;
+  }
+
+  .ops-input {
+    @apply h-9 w-full rounded-lg border border-border bg-surface px-3 text-sm text-text-primary outline-none transition-colors focus:border-accent;
+  }
+
+  .ops-select {
+    @apply h-9 w-full rounded-lg border border-border bg-surface px-3 text-sm text-text-primary outline-none transition-colors focus:border-accent;
+  }
+
+  .ops-button-primary {
+    @apply inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-accent px-3.5 text-sm font-medium text-accent-foreground transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .ops-button-secondary {
+    @apply inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-border bg-surface px-3.5 text-sm font-medium text-text-primary transition-colors hover:bg-surface-secondary disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  .ops-badge {
+    @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium;
   }
   
   /* Responsive utilities */

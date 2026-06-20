@@ -13,6 +13,13 @@ class BobActionExecutor {
     this.batchSize = 20;
   }
 
+  async getTenantSenderPhoneNumber(action = {}, lead = {}) {
+    const tenantId = action.tenantId || action.tenant_id || lead.tenantId || lead.tenant_id;
+    if (!tenantId) return null;
+    const primaryPhoneNumber = await insforgeDataService.getPrimaryTenantPhoneNumber({ tenantId });
+    return primaryPhoneNumber?.phoneNumber || null;
+  }
+
   start() {
     if (this.isRunning) {
       logger.info('Bob action executor already running');
@@ -403,7 +410,10 @@ class BobActionExecutor {
     }
 
     const smsCount = Number(existingMetadata.smsCount || 0) + 1;
-    const smsResult = await twilioSmsService.sendLeadBookingReminder(lead, bookingLink, trackingId);
+    const senderPhoneNumber = await this.getTenantSenderPhoneNumber(action, lead);
+    const smsResult = await twilioSmsService.sendLeadBookingReminder(lead, bookingLink, trackingId, {
+      from: senderPhoneNumber,
+    });
     const bodyText = smsResult.success
       ? smsResult.message
       : 'Bob attempted to send an SMS booking reminder, but the SMS provider is not ready.';
@@ -419,6 +429,7 @@ class BobActionExecutor {
         bobActionId: action.id,
         providerMessageId: smsResult.messageSid || null,
         status: smsResult.status || null,
+        senderPhoneNumber: senderPhoneNumber || null,
         success: smsResult.success,
       },
     });
@@ -483,7 +494,10 @@ class BobActionExecutor {
       return;
     }
 
-    const smsResult = await twilioSmsService.sendAppointmentReminder(lead, meeting, trackingId);
+    const senderPhoneNumber = await this.getTenantSenderPhoneNumber(action, lead);
+    const smsResult = await twilioSmsService.sendAppointmentReminder(lead, meeting, trackingId, {
+      from: senderPhoneNumber,
+    });
 
     await leadConversationService.logSystemEvent({
       lead,
@@ -497,6 +511,7 @@ class BobActionExecutor {
         calendlyEventUri: action.payload?.calendlyEventUri || null,
         providerMessageId: smsResult.messageSid || null,
         status: smsResult.status || null,
+        senderPhoneNumber: senderPhoneNumber || null,
         success: smsResult.success,
       },
     });

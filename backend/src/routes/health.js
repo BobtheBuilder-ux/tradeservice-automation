@@ -1,6 +1,6 @@
 import express from 'express';
 import { hubspotClient, hubspotEnabled } from '../config/index.js';
-import { checkDatabaseConnection } from '../db/connection.js';
+import insforgeDataService from '../services/insforge-data-service.js';
 import logger from '../utils/logger.js';
 
 const router = express.Router();
@@ -25,7 +25,7 @@ router.get('/', async (req, res) => {
   try {
     // Check database connection
     try {
-      await checkDatabaseConnection();
+      await insforgeDataService.getDefaultTenant();
       healthCheck.services.database = 'ok';
     } catch (dbError) {
       healthCheck.services.database = 'error';
@@ -75,8 +75,8 @@ router.get('/detailed', async (req, res) => {
     version: '1.0.0',
     services: {},
     configuration: {
-      supabase: {
-        configured: !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
+      insforge: {
+        configured: insforgeDataService.getStatus().hasApiKey
       },
       hubspot: {
         configured: hubspotEnabled
@@ -88,18 +88,20 @@ router.get('/detailed', async (req, res) => {
   };
 
   try {
-    // Test Supabase connection with more details
-    const supabaseStart = Date.now();
-    const { data: supabaseData, error: supabaseError } = await supabase
-      .from('leads')
-      .select('count', { count: 'exact', head: true })
-      .limit(1);
-    
-    detailedHealth.services.supabase = {
-      status: supabaseError ? 'error' : 'ok',
-      responseTime: Date.now() - supabaseStart,
-      error: supabaseError?.message
-    };
+    const insforgeStart = Date.now();
+    try {
+      await insforgeDataService.getDefaultTenant();
+      detailedHealth.services.insforge = {
+        status: 'ok',
+        responseTime: Date.now() - insforgeStart,
+      };
+    } catch (insforgeError) {
+      detailedHealth.services.insforge = {
+        status: 'error',
+        responseTime: Date.now() - insforgeStart,
+        error: insforgeError.message,
+      };
+    }
 
     const hubspotStart = Date.now();
     if (!hubspotEnabled) {

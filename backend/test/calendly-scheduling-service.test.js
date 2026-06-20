@@ -5,6 +5,9 @@ import { CalendlySchedulingService, parseRequestedTime } from '../src/services/c
 test('parseRequestedTime understands common spoken times', () => {
   assert.deepEqual(parseRequestedTime('tomorrow at 3 PM'), { hour: 15, minute: 0 });
   assert.deepEqual(parseRequestedTime('Friday 10:30 am'), { hour: 10, minute: 30 });
+  assert.deepEqual(parseRequestedTime('Friday at 10 a.m.'), { hour: 10, minute: 0 });
+  assert.deepEqual(parseRequestedTime('tomorrow at 3:00 p.m.'), { hour: 15, minute: 0 });
+  assert.deepEqual(parseRequestedTime('by 1000 a.m.'), { hour: 10, minute: 0 });
   assert.equal(parseRequestedTime('sometime later'), null);
 });
 
@@ -62,4 +65,21 @@ test('bookRequestedSlot returns suggestions when requested slot is unavailable',
   assert.equal(result.success, false);
   assert.equal(result.reason, 'unavailable');
   assert.deepEqual(result.suggestions, ['2026-06-19T14:00:00.000Z', '2026-06-19T15:00:00.000Z']);
+});
+
+test('calendlyRequest times out instead of hanging', async () => {
+  const service = new CalendlySchedulingService({
+    token: 'token',
+    eventTypeUri: 'https://api.calendly.com/event_types/abc',
+    apiBaseUrl: 'https://api.calendly.test',
+    timeoutMs: 5,
+    fetch: async (_url, options = {}) => new Promise((resolve, reject) => {
+      options.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    }),
+  });
+
+  await assert.rejects(
+    () => service.calendlyRequest('/event_type_available_times'),
+    /timed out after 5ms/
+  );
 });

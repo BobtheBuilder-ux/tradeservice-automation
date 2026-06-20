@@ -125,11 +125,11 @@ export async function sendAgentIdEmail(email, name, agentId) {
               <li>Visit the dashboard login page</li>
               <li>Enter your Agent ID: <strong>${agentId}</strong></li>
               <li>Enter the password you created during registration</li>
-              <li>Start managing your leads!</li>
+              <li>Start managing your tenant workspace.</li>
             </ol>
             
             <h4>Your Access Level:</h4>
-            <p>As a registered agent, you have access to view and manage leads assigned to you. If you need additional permissions, please contact your system administrator.</p>
+            <p>Your account has admin access to manage tenant settings, AI agents, leads, and automation workflows.</p>
             
             <p>If you have any questions or need assistance, please don't hesitate to reach out to our support team.</p>
             
@@ -163,10 +163,10 @@ Getting Started:
 1. Visit the dashboard login page
 2. Enter your Agent ID: ${agentId}
 3. Enter the password you created during registration
-4. Start managing your leads!
+4. Start managing your tenant workspace.
 
 Your Access Level:
-As a registered agent, you have access to view and manage leads assigned to you. If you need additional permissions, please contact your system administrator.
+Your account has admin access to manage tenant settings, AI agents, leads, and automation workflows.
 
 If you have any questions or need assistance, please contact our support team.
 

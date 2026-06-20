@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { X, Send, MessageSquare, AlertCircle, CheckCircle, Clock, User, Mail, Calendar, Tag } from 'lucide-react';
+import { createLeadFeedback, listFeedbackForLead } from '../lib/insforge-product';
 
 export default function FeedbackModal({ 
   isOpen, 
@@ -50,23 +51,7 @@ export default function FeedbackModal({
     
     setFeedbackLoading(true);
     try {
-      const token = localStorage.getItem('auth_token');
-      const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/api/feedback/agent/${user.id}?leadId=${lead.id}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-        }
-      );
-
-      if (response.ok) {
-        const data = await response.json();
-        setExistingFeedback(data.feedback || []);
-      } else {
-        console.error('Failed to fetch existing feedback');
-      }
+      setExistingFeedback(await listFeedbackForLead(user, lead.id));
     } catch (error) {
       console.error('Error fetching existing feedback:', error);
     } finally {
@@ -87,56 +72,21 @@ export default function FeedbackModal({
     setSuccess(null);
 
     try {
-      const token = localStorage.getItem('auth_token');
-      const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'}/api/feedback`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            leadId: lead.id,
-            subject: formData.subject.trim(),
-            content: formData.content.trim(),
-            feedbackType: formData.feedbackType,
-            priority: formData.priority,
-            tags: formData.tags.trim() || null,
-          }),
-        }
-      );
-
-      if (response.ok) {
-        const data = await response.json();
-        setSuccess('Feedback submitted successfully!');
-        setFormData({
-          subject: '',
-          content: '',
-          feedbackType: 'general',
-          priority: 'medium',
-          tags: ''
-        });
-        
-        // Refresh existing feedback
-        await fetchExistingFeedback();
-        
-        // Notify parent component
-        if (onFeedbackSubmitted) {
-          onFeedbackSubmitted(data.feedback);
-        }
-        
-        // Switch to history tab to show the new feedback
-        setTimeout(() => {
-          setActiveTab('history');
-        }, 1000);
-      } else {
-        const errorData = await response.json();
-        setError(errorData.error || 'Failed to submit feedback');
-      }
+      const feedback = await createLeadFeedback(user, lead.id, formData);
+      setSuccess('Feedback submitted successfully!');
+      setFormData({
+        subject: '',
+        content: '',
+        feedbackType: 'general',
+        priority: 'medium',
+        tags: ''
+      });
+      await fetchExistingFeedback();
+      if (onFeedbackSubmitted) onFeedbackSubmitted(feedback);
+      setTimeout(() => setActiveTab('history'), 1000);
     } catch (error) {
       console.error('Error submitting feedback:', error);
-      setError('Network error. Please try again.');
+      setError(error.message || 'Failed to submit feedback');
     } finally {
       setLoading(false);
     }

@@ -5,7 +5,7 @@ import { TwilioSmsService } from './twilio-sms-service.js';
 class TwilioVoiceService {
   constructor(options = {}) {
     this.client = options.client || null;
-    this.fromNumber = process.env.TWILIO_PHONE_NUMBER;
+    this.fromNumber = options.fromNumber || process.env.TWILIO_PHONE_NUMBER;
     if (!this.client && options.initialize !== false) {
       this.initializeClient();
     }
@@ -30,7 +30,11 @@ class TwilioVoiceService {
   }
 
   getPublicBaseUrl() {
-    return process.env.CALL_PUBLIC_BASE_URL || process.env.BACKEND_URL || 'http://localhost:3001';
+    return process.env.INSFORGE_FUNCTION_BASE_URL || process.env.CALL_PUBLIC_BASE_URL || process.env.BACKEND_URL || 'http://localhost:3001';
+  }
+
+  buildFunctionCallbackUrl(mode, params = {}) {
+    return this.buildCallbackUrl('/twilio-voice-webhook', { mode, ...params });
   }
 
   buildCallbackUrl(path, params = {}) {
@@ -43,7 +47,16 @@ class TwilioVoiceService {
     return url.toString();
   }
 
-  async startOutboundCall({ action, lead }) {
+  resolveFromNumber({ action, lead, from } = {}) {
+    return from
+      || action?.tenantPhoneNumber
+      || action?.tenant_phone_number
+      || lead?.tenantPhoneNumber
+      || lead?.tenant_phone_number
+      || this.fromNumber;
+  }
+
+  async startOutboundCall({ action, lead, from }) {
     try {
       if (process.env.VOICE_CALLING_ENABLED !== 'true') {
         throw new Error('Voice calling is disabled');
@@ -52,8 +65,9 @@ class TwilioVoiceService {
       if (!this.client) {
         throw new Error('Twilio voice client not initialized');
       }
-      if (!this.fromNumber) {
-        throw new Error('TWILIO_PHONE_NUMBER is not configured');
+      const fromNumber = this.resolveFromNumber({ action, lead, from });
+      if (!fromNumber) {
+        throw new Error('Tenant caller phone number is not configured');
       }
       if (!lead?.phone) {
         throw new Error('Lead phone number not available');
@@ -61,14 +75,22 @@ class TwilioVoiceService {
 
       const call = await this.client.calls.create({
         to: lead.phone,
-        from: this.fromNumber,
-        url: this.buildCallbackUrl('/api/voice/twiml/intro', {
+        from: fromNumber,
+        url: process.env.INSFORGE_FUNCTION_BASE_URL ? this.buildFunctionCallbackUrl('intro', {
+          actionId: action.id,
+          leadId: lead.id,
+          conversationId: action.conversationId,
+        }) : this.buildCallbackUrl('/api/voice/twiml/intro', {
           actionId: action.id,
           leadId: lead.id,
           conversationId: action.conversationId,
         }),
         method: 'POST',
-        statusCallback: this.buildCallbackUrl('/api/voice/status', {
+        statusCallback: process.env.INSFORGE_FUNCTION_BASE_URL ? this.buildFunctionCallbackUrl('status', {
+          actionId: action.id,
+          leadId: lead.id,
+          conversationId: action.conversationId,
+        }) : this.buildCallbackUrl('/api/voice/status', {
           actionId: action.id,
           leadId: lead.id,
           conversationId: action.conversationId,

@@ -1,7 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
 import { useAuth } from '../lib/auth';
-import { apiClient } from '../lib/api';
+import {
+  createCampaign as createInsForgeCampaign,
+  listCampaigns,
+  updateCampaignStatus as updateInsForgeCampaignStatus,
+} from '../lib/insforge-product';
 
 export default function Campaigns() {
   const { user, loading } = useAuth();
@@ -33,16 +37,8 @@ export default function Campaigns() {
   const fetchCampaigns = async () => {
     try {
       setLoadingCampaigns(true);
-      console.log('Fetching campaigns with apiClient');
-      // Facebook Ads integration removed - now using HubSpot CRM
-    const response = await apiClient.get('/api/leads');
-      console.log('Campaigns response:', response);
-      if (response.success) {
-        setCampaigns(response.data);
-        console.log('Campaigns loaded:', response.data);
-      } else {
-        setError('Failed to fetch campaigns');
-      }
+      const data = await listCampaigns(user);
+      setCampaigns(data.campaigns || []);
     } catch (err) {
       console.error('Error fetching campaigns:', err);
       setError('Error fetching campaigns: ' + (err.response?.data?.error || err.message));
@@ -58,18 +54,11 @@ export default function Campaigns() {
     setSuccess('');
 
     try {
-      console.log('Creating campaign:', newCampaign);
-      // Facebook Ads integration removed - now using HubSpot CRM
-    const response = await apiClient.post('/api/leads', newCampaign);
-      console.log('Create campaign response:', response);
-      if (response.success) {
-        setSuccess('Campaign created successfully!');
-        setNewCampaign({ name: '', objective: 'OUTCOME_LEADS', status: 'PAUSED' });
-        setShowCreateForm(false);
-        fetchCampaigns(); // Refresh the list
-      } else {
-        setError('Failed to create campaign');
-      }
+      await createInsForgeCampaign(user, newCampaign);
+      setSuccess('Campaign created successfully!');
+      setNewCampaign({ name: '', objective: 'OUTCOME_LEADS', status: 'PAUSED' });
+      setShowCreateForm(false);
+      fetchCampaigns();
     } catch (err) {
       console.error('Error creating campaign:', err);
       setError('Error creating campaign: ' + (err.response?.data?.error || err.message));
@@ -84,19 +73,13 @@ export default function Campaigns() {
     setSuccess('');
 
     try {
-      console.log('Creating quick campaign');
-      // Facebook Ads integration removed - now using HubSpot CRM
-    const response = await apiClient.post('/api/leads/quick-create', {
+      await createInsForgeCampaign(user, {
         name: `Lead Gen ${new Date().toLocaleDateString()}`,
-        budget: 50
+        objective: 'OUTCOME_LEADS',
+        status: 'PAUSED',
       });
-      console.log('Quick create campaign response:', response);
-      if (response.success) {
-        setSuccess('Lead generation campaign created successfully!');
-        fetchCampaigns(); // Refresh the list
-      } else {
-        setError('Failed to create quick campaign');
-      }
+      setSuccess('Lead generation campaign created successfully!');
+      fetchCampaigns();
     } catch (err) {
       console.error('Error creating quick campaign:', err);
       setError('Error creating quick campaign: ' + (err.response?.data?.error || err.message));
@@ -107,18 +90,9 @@ export default function Campaigns() {
 
   const updateCampaignStatus = async (campaignId, newStatus) => {
     try {
-      console.log('Updating campaign status:', campaignId, newStatus);
-      // Facebook Ads integration removed - now using HubSpot CRM
-    const response = await apiClient.put(`/api/leads/${campaignId}/status`, {
-        status: newStatus
-      });
-      console.log('Update campaign status response:', response);
-      if (response.success) {
-        setSuccess(`Campaign status updated to ${newStatus}`);
-        fetchCampaigns(); // Refresh the list
-      } else {
-        setError('Failed to update campaign status');
-      }
+      await updateInsForgeCampaignStatus(user, campaignId, newStatus);
+      setSuccess(`Campaign status updated to ${newStatus}`);
+      fetchCampaigns();
     } catch (err) {
       console.error('Error updating campaign:', err);
       setError('Error updating campaign: ' + (err.response?.data?.error || err.message));
@@ -147,8 +121,8 @@ export default function Campaigns() {
         <div className="px-4 py-6 sm:px-0">
           <div className="flex justify-between items-center">
             <div>
-              <h1 className="text-3xl font-bold text-gray-900">HubSpot CRM Integration</h1>
-        <p className="mt-2 text-gray-600">Manage your HubSpot leads and contacts</p>
+              <h1 className="text-3xl font-bold text-gray-900">Campaigns</h1>
+              <p className="mt-2 text-gray-600">Manage tenant outreach campaigns</p>
             </div>
             <div className="flex space-x-3">
               <button

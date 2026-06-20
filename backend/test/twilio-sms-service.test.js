@@ -65,6 +65,30 @@ test('sendCallbackConfirmation texts callback note and booking link', async () =
   assert.match(createdMessages[0].body, /https:\/\/calendly\.test\/book/);
 });
 
+test('sendMessage can use a tenant sender phone number override', async () => {
+  const createdMessages = [];
+  const service = new TwilioSmsService({ initialize: false, fromNumber: '+15550001111' });
+  service.client = {
+    messages: {
+      create: async (payload) => {
+        createdMessages.push(payload);
+        return { sid: 'SMTENANT', status: 'queued' };
+      },
+    },
+  };
+
+  const result = await service.sendMessage({
+    to: '+15550002222',
+    from: '+15550003333',
+    body: 'Tenant sender test',
+    trackingId: 'track-tenant',
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(createdMessages[0].from, '+15550003333');
+  assert.equal(createdMessages[0].to, '+15550002222');
+});
+
 test('sendCalendlyBookingLink texts Calendly booking URL', async () => {
   const createdMessages = [];
   const service = new TwilioSmsService({ initialize: false });
@@ -151,6 +175,7 @@ test('sendAppointmentReminder uses Bob and 9QC branding', async () => {
 test('buildMessagePayload omits status callback when public backend URL is not configured', () => {
   delete process.env.CALL_PUBLIC_BASE_URL;
   delete process.env.BACKEND_URL;
+  delete process.env.TWILIO_PHONE_NUMBER;
   const service = new TwilioSmsService({ initialize: false });
 
   assert.deepEqual(service.buildMessagePayload({ body: 'hello' }), { body: 'hello' });

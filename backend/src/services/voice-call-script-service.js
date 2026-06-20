@@ -65,7 +65,7 @@ class VoiceCallScriptService {
             step: 'callback_requested',
             done: true,
             outcome: 'callback_requested',
-          prompt: 'No problem. I’ll make a note that a callback is better and text the Calendly link if available. Thank you.',
+            prompt: 'No problem. I’ll make a note that a callback is better and text the Calendly link if available. Thank you.',
             extracted: { callbackRequested: true },
           };
         }

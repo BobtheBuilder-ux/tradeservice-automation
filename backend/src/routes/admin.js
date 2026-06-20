@@ -35,7 +35,7 @@ function serializeAgent(agent) {
 // Get all agents
 router.get('/agents', verifyAdmin, async (req, res) => {
   try {
-    const agentsResult = await insforgeDataService.listAdminAgents();
+    const agentsResult = await insforgeDataService.listAdminAgents(req.user);
     res.json({ success: true, agents: agentsResult.map(serializeAgent) });
   } catch (error) {
     console.error('Error fetching agents:', error);
@@ -63,7 +63,7 @@ router.post('/agents', verifyAdmin, async (req, res) => {
 
     const normalizedEmail = email.trim().toLowerCase();
 
-    const existingUser = await insforgeDataService.getAgentByEmail(normalizedEmail);
+    const existingUser = await insforgeDataService.getAgentByEmail(normalizedEmail, req.user);
     if (existingUser) {
       return res.status(400).json({
         error: 'User with this email already exists'
@@ -84,7 +84,7 @@ router.post('/agents', verifyAdmin, async (req, res) => {
       isActive: true,
       createdAt: new Date(),
       updatedAt: new Date(),
-    });
+    }, req.user);
 
     if (!newAgent) {
       console.error('Error creating agent');
@@ -123,13 +123,13 @@ router.delete('/agents/:agentId', verifyAdmin, async (req, res) => {
     }
 
     const agent = await insforgeDataService.getAgentById(agentId);
-    if (!agent) {
+    if (!agent || agent.tenantId !== req.user.tenantId) {
       return res.status(404).json({
         error: 'Agent not found'
       });
     }
 
-    const assignedLeads = (await insforgeDataService.listRecentLeads(10000))
+    const assignedLeads = (await insforgeDataService.listRecentLeads(10000, req.user))
       .filter((lead) => lead.assignedAgentId === agentId);
     await insforgeDataService.updateLeads(assignedLeads.map((lead) => lead.id), {
       assignedAgentId: null,
@@ -150,7 +150,7 @@ router.delete('/agents/:agentId', verifyAdmin, async (req, res) => {
 // Get all leads with assignment info
 router.get('/leads', verifyAdmin, async (req, res) => {
   try {
-    const leadsResult = await insforgeDataService.listRecentLeads(10000);
+    const leadsResult = await insforgeDataService.listRecentLeads(10000, req.user);
     leadsResult.reverse();
 
     res.json({ leads: leadsResult || [] });
@@ -172,7 +172,7 @@ router.post('/assign-leads', verifyAdmin, async (req, res) => {
     }
 
     const agent = await insforgeDataService.getAgentById(agentId);
-    if (!agent || !['agent', 'admin'].includes(agent.role)) {
+    if (!agent || agent.tenantId !== req.user.tenantId || !['agent', 'admin'].includes(agent.role)) {
       return res.status(404).json({
         error: 'Agent not found'
       });
@@ -181,7 +181,7 @@ router.post('/assign-leads', verifyAdmin, async (req, res) => {
     const updatedLeads = await insforgeDataService.updateLeads(leadIds, {
       assignedAgentId: agentId,
       updatedAt: new Date(),
-    });
+    }, req.user);
 
     if (!updatedLeads || updatedLeads.length === 0) {
       console.error('Error assigning leads');
@@ -214,7 +214,7 @@ router.post('/unassign-leads', verifyAdmin, async (req, res) => {
     const updatedLeads = await insforgeDataService.updateLeads(leadIds, {
       assignedAgentId: null,
       updatedAt: new Date(),
-    });
+    }, req.user);
 
     if (!updatedLeads || updatedLeads.length === 0) {
       console.error('Error unassigning leads');

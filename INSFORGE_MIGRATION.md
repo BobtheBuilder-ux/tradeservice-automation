@@ -1,46 +1,35 @@
-# InsForge Migration Notes
+# InsForge-First Runtime Notes
 
 ## Current status
 
-The repo is now linked to the InsForge project `tradeservice` and the database schema has been applied to the linked backend.
+The local backend has been scraped from the active product architecture. The app now builds against the frontend, InsForge database/RPC, InsForge Functions, and SQL migrations.
 
-## Option B direction
+Active project:
 
-This project is being migrated toward **InsForge-native backend usage**:
+- InsForge project: `sellmymeet`
+- API base: `https://xxx3s5ke.us-east.insforge.app`
+- Function base: `https://xxx3s5ke.function2.insforge.app`
 
-- Use the InsForge app URL for SDK/platform features
-- Keep direct Postgres only where legacy Drizzle services still require it
-- Gradually replace custom backend plumbing with InsForge services
+## Active build surfaces
 
-## Step completed in this pass
+- `frontend/`: user-facing app, dashboards, settings, campaign pages, live/test pages.
+- `functions/`: provider callbacks, OAuth/token exchange, queue actions, live/test execution, privileged provider actions.
+- `migrations/`: InsForge schema/RPC changes.
+- `context/`: product architecture and phase guidance.
 
-1. Added `@insforge/sdk` to both frontend and backend packages.
-2. Added frontend client scaffold:
-   - `frontend/lib/insforge.js`
-3. Added backend client scaffold:
-   - `backend/src/services/insforge-client.js`
-4. Updated config/env examples so the app can use:
-   - `NEXT_PUBLIC_INSFORGE_URL`
-   - `NEXT_PUBLIC_INSFORGE_ANON_KEY`
-   - `INSFORGE_URL`
-   - `INSFORGE_ANON_KEY`
-   - `INSFORGE_API_KEY`
-5. Updated the frontend API base fallback to support an InsForge URL-based path.
+Do not build new product features in `backend/`.
 
-## Remaining migration path
+## Completed direction
 
-### Near-term
-- Move auth from custom JWT endpoints toward InsForge auth.
-- Move outbound email into InsForge-native email sending where appropriate.
-- Decide whether Bob actions execute through:
-  - backend worker + InsForge database
-  - InsForge functions/schedules
+- Frontend auth/profile hydration uses InsForge directly.
+- Product data reads/writes are moving through `frontend/lib/insforge-product.js`.
+- Live/test automation calls InsForge Functions through `frontend/lib/insforge-functions.js`.
+- Twilio SMS/voice, Calendly, meeting, Bob queue, and email runtime actions are represented as InsForge Functions.
+- Runtime secrets should live in InsForge secrets, not in a production local backend env.
 
-### Mid-term
-- Replace direct lead CRUD API usage with InsForge SDK where safe.
-- Move scheduling/call orchestration state into InsForge-first tables and RPC/functions.
-- Add RLS and admin/user separation.
+## Remaining work
 
-### Long-term
-- Remove legacy direct backend layers that only duplicate InsForge features.
-- Keep only business-specific orchestration logic in app code.
+- Finish any remaining frontend pages that still expect retired local API behavior.
+- Add missing provider functions, such as Calendly OAuth, HubSpot sync, and automation compatibility only if still needed.
+- Keep callback URLs pointed at InsForge Functions.
+- Remove obsolete backend deployment habits from future build plans.

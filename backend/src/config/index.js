@@ -1,7 +1,7 @@
 import { Client as HubSpotClient } from '@hubspot/api-client';
 import dotenv from 'dotenv';
 import logger from '../utils/logger.js';
-import { db, checkDatabaseConnection } from '../db/connection.js';
+import { insforgeClientConfig } from '../services/insforge-client.js';
 import { getRuntimeConfig } from '../utils/runtime-config.js';
 
 dotenv.config();
@@ -13,8 +13,8 @@ export const automatedEmailWorkflowEnabled =
 
 // Validate required environment variables (warn in development, error in production)
 const missingVars = [];
-if (!runtimeConfig.databaseUrl && !process.env.INSFORGE_API_KEY) {
-  missingVars.push('DATABASE_URL or INSFORGE_API_KEY');
+if (!insforgeClientConfig.hasApiKey) {
+  missingVars.push('INSFORGE_API_KEY');
 }
 if (process.env.HUBSPOT_ENABLED === 'true' && !process.env.HUBSPOT_ACCESS_TOKEN) {
   missingVars.push('HUBSPOT_ACCESS_TOKEN');
@@ -26,10 +26,6 @@ if (missingVars.length > 0) {
     logger.warn(`Missing environment variables (development mode): ${missingVars.join(', ')}`);
   }
 }
-
-// Database connection (Drizzle)
-export { db };
-export { checkDatabaseConnection };
 
 // HubSpot client configuration
 export const hubspotClient = hubspotEnabled
@@ -65,7 +61,6 @@ export const appConfig = {
 };
 
 export default {
-  db,
   hubspotClient,
   calendlyConfig,
   appConfig

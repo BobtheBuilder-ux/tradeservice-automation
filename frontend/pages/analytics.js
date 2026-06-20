@@ -32,16 +32,15 @@ import {
   Clock,
   Filter
 } from 'lucide-react';
-import { validatePermissions } from '../lib/auth';
+import { useAuth, validatePermissions } from '../lib/auth';
+import { getAnalytics } from '../lib/insforge-product';
 import { format } from 'date-fns';
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL;
 
 const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#06B6D4'];
 
 export default function Analytics() {
   const router = useRouter();
-  const [user, setUser] = useState(null);
+  const { user, loading: authLoading, isAuthenticated } = useAuth();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [period, setPeriod] = useState('30d');
@@ -66,102 +65,27 @@ export default function Analytics() {
   });
 
   useEffect(() => {
-    checkAuthentication();
-  }, []);
-
-  useEffect(() => {
-    if (user) {
-      fetchAnalyticsData();
-    }
-  }, [user, period]);
-
-  const checkAuthentication = async () => {
-    try {
-      const token = localStorage.getItem('auth_token');
-      if (!token) {
-        router.push('/login');
-        return;
-      }
-
-      const response = await fetch(`${API_BASE_URL}/api/auth/verify`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-
-      if (!response.ok) {
-        localStorage.removeItem('auth_token');
-        router.push('/login');
-        return;
-      }
-
-      const userData = await response.json();
-      setUser(userData.user);
-      
-      // Check permissions
-      const userPermissions = await validatePermissions(userData.user);
-      if (!userPermissions.canViewAnalytics) {
-        setError('You do not have permission to view analytics');
-        return;
-      }
-
-    } catch (error) {
-      console.error('Authentication error:', error);
+    if (authLoading) return;
+    if (!isAuthenticated) {
       router.push('/login');
+      return;
     }
-  };
+    if (!validatePermissions(user).canViewAnalytics) {
+      setError('You do not have permission to view analytics');
+      return;
+    }
+    fetchAnalyticsData();
+  }, [authLoading, isAuthenticated, user, period, router]);
 
   const fetchAnalyticsData = async () => {
     try {
       setLoading(true);
-      const token = localStorage.getItem('auth_token');
-      
-      // Fetch dashboard summary
-      const summaryResponse = await fetch(
-        `${API_BASE_URL}/api/analytics/dashboard-summary?period=${period}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        }
-      );
-      
-      if (summaryResponse.ok) {
-        const summaryData = await summaryResponse.json();
-        setDashboardData(summaryData.data);
-      }
-
-      // Fetch email performance
-      const emailResponse = await fetch(
-        `${API_BASE_URL}/api/analytics/email-performance?period=${period}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        }
-      );
-      
-      if (emailResponse.ok) {
-        const emailAnalytics = await emailResponse.json();
-        setEmailData(emailAnalytics.data);
-        setEmailMetrics(emailAnalytics.summary);
-      }
-
-      // Fetch SMS performance
-      const smsResponse = await fetch(
-        `${API_BASE_URL}/api/analytics/sms-performance?period=${period}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
-        }
-      );
-      
-      if (smsResponse.ok) {
-        const smsAnalytics = await smsResponse.json();
-        setSmsData(smsAnalytics.data);
-        setSmsMetrics(smsAnalytics.summary);
-      }
+      const data = await getAnalytics(user, period);
+      setDashboardData(data.dashboardData);
+      setEmailData(data.emailData);
+      setSmsData(data.smsData);
+      setEmailMetrics(data.emailMetrics);
+      setSmsMetrics(data.smsMetrics);
 
     } catch (error) {
       console.error('Error fetching analytics:', error);

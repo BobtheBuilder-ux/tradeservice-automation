@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
-import { apiClient } from './api';
 import { insforge } from './insforge';
+import { ensureDefaultTenantAgent } from './insforge-product';
+import { provisionElevenLabsAgent } from './insforge-functions';
 
 const AUTH_TOKEN_STORAGE_KEY = 'auth_token';
+const AUTH_PENDING_STORAGE_KEY = 'insforge_google_auth_pending';
 
 export function getInsForgeAccessToken() {
   if (typeof window === 'undefined') return null;
@@ -14,10 +16,77 @@ export function getInsForgeAccessToken() {
   return authorization.slice(7);
 }
 
-export function syncApiClientWithInsForge() {
+export function syncLegacyAuthTokenWithInsForge() {
   const token = getInsForgeAccessToken();
-  apiClient.setAuthToken(token);
+  if (typeof window !== 'undefined') {
+    if (token) {
+      localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+    } else {
+      localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    }
+  }
   return token;
+}
+
+function getProfileName(insforgeUser) {
+  const profile = insforgeUser?.profile || {};
+  const metadata = insforgeUser?.metadata || insforgeUser?.user_metadata || {};
+  return (
+    profile.name ||
+    profile.full_name ||
+    metadata.name ||
+    metadata.full_name ||
+    insforgeUser?.email ||
+    'Admin'
+  );
+}
+
+function buildFallbackPortalUser(insforgeUser) {
+  return {
+    id: insforgeUser.id,
+    authUserId: insforgeUser.id,
+    tenantId: null,
+    tenant: null,
+    tenantRole: 'admin',
+    tenantUserId: null,
+    email: insforgeUser.email,
+    name: getProfileName(insforgeUser),
+    role: 'admin',
+    emailVerified: Boolean(insforgeUser.emailVerified ?? insforgeUser.email_verified ?? true),
+    redirectTo: '/admin-dashboard',
+  };
+}
+
+function normalizePortalUser(portalUser, insforgeUser) {
+  return {
+    ...buildFallbackPortalUser(insforgeUser),
+    ...(portalUser || {}),
+    role: 'admin',
+    tenantRole: portalUser?.tenantRole || portalUser?.tenant_role || 'admin',
+    authUserId: portalUser?.authUserId || portalUser?.auth_user_id || insforgeUser.id,
+    tenantId: portalUser?.tenantId || portalUser?.tenant_id || null,
+    tenantUserId: portalUser?.tenantUserId || portalUser?.tenant_user_id || null,
+    redirectTo: '/admin-dashboard',
+  };
+}
+
+async function resolvePortalUserWithInsForge(insforgeUser) {
+  const { data, error } = await insforge.database.rpc('resolve_current_portal_user');
+  if (error) {
+    throw error;
+  }
+  return normalizePortalUser(data, insforgeUser);
+}
+
+async function syncDefaultTenantAgentWithElevenLabs(portalUser) {
+  if (!portalUser?.tenantId) return null;
+
+  const defaultAgent = await ensureDefaultTenantAgent(portalUser);
+  if (!defaultAgent?.id || defaultAgent.elevenlabsAgentId || defaultAgent.status === 'archived') {
+    return defaultAgent || null;
+  }
+
+  return provisionElevenLabsAgent(portalUser, defaultAgent.id, { syncKnowledge: true });
 }
 
 class AuthManager {
@@ -26,6 +95,7 @@ class AuthManager {
     this.isAuthenticated = false;
     this.listeners = [];
     this.initialized = false;
+    this.lastError = null;
   }
 
   onAuthStateChange(callback) {
@@ -47,29 +117,43 @@ class AuthManager {
     try {
       const { data, error } = await insforge.auth.getCurrentUser();
       if (error || !data?.user) {
+        if (this.hasPendingGoogleAuth()) {
+          this.lastError = error?.message ||
+            'Google sign-in did not complete. Please try again with the same browser window.';
+        }
         this.clearLocalState();
         return;
       }
 
-      const token = syncApiClientWithInsForge();
+      const token = syncLegacyAuthTokenWithInsForge();
       if (!token) {
         this.clearLocalState();
         return;
       }
 
-      let response;
+      let portalUser;
       try {
-        response = await apiClient.request('/api/auth/me', { silent: true });
-      } catch {
+        portalUser = await resolvePortalUserWithInsForge(data.user);
+      } catch (profileError) {
+        console.error('InsForge portal profile resolution failed:', profileError);
+        this.lastError =
+          profileError?.message ||
+          'Your account was created, but the workspace could not be prepared. Please try again.';
         this.clearLocalState();
         this.notifyListeners();
         return;
       }
 
-      this.user = response.user;
+      this.user = portalUser;
       this.isAuthenticated = true;
       this.initialized = true;
+      this.lastError = null;
+      this.clearPendingGoogleAuth();
       this.notifyListeners();
+
+      syncDefaultTenantAgentWithElevenLabs(portalUser).catch((syncError) => {
+        console.warn('Default ElevenLabs agent auto-sync failed:', syncError);
+      });
     } catch {
       this.clearLocalState();
       this.notifyListeners();
@@ -81,12 +165,18 @@ class AuthManager {
       ? `${window.location.origin}/login`
       : '/login';
 
+    this.lastError = null;
+    this.clearLocalState();
+    this.markPendingGoogleAuth();
+
     const { error } = await insforge.auth.signInWithOAuth('google', {
       redirectTo,
       additionalParams: { prompt: 'select_account' },
     });
 
     if (error) {
+      this.lastError = error.message || 'Google sign-in failed';
+      this.clearPendingGoogleAuth();
       return { data: null, error: { message: error.message || 'Google sign-in failed' } };
     }
 
@@ -114,13 +204,33 @@ class AuthManager {
   }
 
   clearLocalState() {
-    apiClient.setAuthToken(null);
     if (typeof window !== 'undefined') {
       localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
     }
     this.user = null;
     this.isAuthenticated = false;
     this.initialized = true;
+  }
+
+  markPendingGoogleAuth() {
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem(AUTH_PENDING_STORAGE_KEY, '1');
+    }
+  }
+
+  hasPendingGoogleAuth() {
+    if (typeof window === 'undefined') return false;
+    return sessionStorage.getItem(AUTH_PENDING_STORAGE_KEY) === '1';
+  }
+
+  clearPendingGoogleAuth() {
+    if (typeof window !== 'undefined') {
+      sessionStorage.removeItem(AUTH_PENDING_STORAGE_KEY);
+    }
+  }
+
+  getLastError() {
+    return this.lastError;
   }
 
   async resetPassword() {
@@ -171,7 +281,7 @@ export const validatePermissions = (user) => {
     };
   }
 
-  const role = user.role || 'agent';
+  const role = user.role || 'admin';
   
   return {
     canViewLeads: ['admin', 'agent'].includes(role),
@@ -185,12 +295,14 @@ export const validatePermissions = (user) => {
 
 export const useAuth = () => {
   const [user, setUser] = useState(authManager.getUser());
+  const [error, setError] = useState(authManager.getLastError());
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const initAuth = async () => {
       await authManager.initialize();
       setUser(authManager.getUser());
+      setError(authManager.getLastError());
       setLoading(false);
     };
 
@@ -198,13 +310,14 @@ export const useAuth = () => {
 
     const unsubscribe = authManager.onAuthStateChange((nextUser) => {
       setUser(nextUser);
+      setError(authManager.getLastError());
       setLoading(false);
     });
 
     return unsubscribe;
   }, []);
 
-  return { user, loading, isAuthenticated: !!user };
+  return { user, error, loading, isAuthenticated: !!user };
 };
 
 export const signUp = () => authManager.signUp();

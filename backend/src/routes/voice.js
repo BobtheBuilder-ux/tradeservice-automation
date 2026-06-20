@@ -88,9 +88,13 @@ async function sendCallFollowUpSms({ lead, action, conversationId, outcome, call
   if (!bookingLink) return null;
 
   const trackingId = `call_${callSid || action?.id || lead.id}`;
+  const primaryPhoneNumber = await insforgeDataService.getPrimaryTenantPhoneNumber({
+    tenantId: action?.tenantId || action?.tenant_id || lead.tenantId || lead.tenant_id,
+  });
+  const smsOptions = { from: primaryPhoneNumber?.phoneNumber || null };
   const smsResult = outcome === 'callback_requested'
-    ? await twilioSmsService.sendCallbackConfirmation(lead, bookingLink, trackingId)
-    : await twilioSmsService.sendCalendlyBookingLink(lead, bookingLink, trackingId);
+    ? await twilioSmsService.sendCallbackConfirmation(lead, bookingLink, trackingId, smsOptions)
+    : await twilioSmsService.sendCalendlyBookingLink(lead, bookingLink, trackingId, smsOptions);
 
   if (conversationId) {
     await leadConversationService.logSystemEvent({
@@ -106,6 +110,7 @@ async function sendCallFollowUpSms({ lead, action, conversationId, outcome, call
         outcome,
         providerMessageId: smsResult.messageSid || null,
         status: smsResult.status || null,
+        senderPhoneNumber: primaryPhoneNumber?.phoneNumber || null,
         success: smsResult.success,
       },
     });
@@ -300,7 +305,7 @@ router.post('/gather', requireTwilioSignature, async (req, res) => {
 
     await logCallReply({ action, lead, conversationId, step: currentStep, reply, callSid });
     let next = voiceCallScriptService.nextStep(currentStep, reply, { lead });
-    const mergedExtracted = {
+    let mergedExtracted = {
       ...(action?.result?.extracted || {}),
       ...(next.extracted || {}),
     };
@@ -336,7 +341,14 @@ router.post('/gather', requireTwilioSignature, async (req, res) => {
       next = {
         ...next,
         ...bookingNext,
-        extracted: mergedExtracted,
+        extracted: {
+          ...(next.extracted || {}),
+          ...mergedExtracted,
+        },
+      };
+      mergedExtracted = {
+        ...(action?.result?.extracted || {}),
+        ...(next.extracted || {}),
       };
     }
 

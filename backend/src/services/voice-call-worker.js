@@ -90,7 +90,17 @@ class VoiceCallWorker {
           },
         });
 
-        const callResult = await this.voiceService.startOutboundCall({ action, lead, conversation });
+        const primaryPhoneNumber = typeof this.dataService.getPrimaryTenantPhoneNumber === 'function'
+          ? await this.dataService.getPrimaryTenantPhoneNumber({
+            tenantId: action.tenantId || action.tenant_id || lead.tenantId || lead.tenant_id,
+          })
+          : null;
+        const callResult = await this.voiceService.startOutboundCall({
+          action,
+          lead,
+          conversation,
+          from: primaryPhoneNumber?.phoneNumber || null,
+        });
         if (!callResult.success) {
           failed += 1;
           await this.dataService.updateBobAction(action.id, {
@@ -110,6 +120,7 @@ class VoiceCallWorker {
             callSid: callResult.callSid,
             providerStatus: callResult.status,
             callStartedAt: new Date().toISOString(),
+            senderPhoneNumber: primaryPhoneNumber?.phoneNumber || null,
           },
           updatedAt: new Date(),
         });

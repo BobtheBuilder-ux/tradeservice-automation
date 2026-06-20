@@ -268,6 +268,9 @@ async function sendCalendlyMeetingDetailsSms({ lead, payload, trackingId }) {
     return null;
   }
 
+  const primaryPhoneNumber = await insforgeDataService.getPrimaryTenantPhoneNumber({
+    tenantId: lead.tenantId || lead.tenant_id,
+  });
   const smsResult = await twilioSmsService.sendCalendlyMeetingDetails(
     lead,
     {
@@ -275,7 +278,8 @@ async function sendCalendlyMeetingDetailsSms({ lead, payload, trackingId }) {
       meeting_url: getCalendlyJoinUrl(payload.event?.location),
       location: getCalendlyLocationText(payload.event?.location),
     },
-    trackingId
+    trackingId,
+    { from: primaryPhoneNumber?.phoneNumber || null }
   );
 
   logger.info('Calendly meeting details SMS processed', {
@@ -283,6 +287,7 @@ async function sendCalendlyMeetingDetailsSms({ lead, payload, trackingId }) {
     leadId: lead.id,
     success: smsResult.success,
     status: smsResult.status || null,
+    senderPhoneNumber: primaryPhoneNumber?.phoneNumber || null,
     error: smsResult.success ? null : smsResult.error,
   });
 

@@ -1,11 +1,13 @@
 import { createClient } from '@insforge/sdk';
 import { insforgeClientConfig } from './insforge-client.js';
 import insforgeDataService from './insforge-data-service.js';
+import tenantIdentityService from './tenant-identity-service.js';
 
-const PORTAL_ROLES = new Set(['admin', 'agent']);
+const PORTAL_ROLES = new Set(['admin']);
+const TENANT_ADMIN_ROLES = new Set(['owner', 'admin']);
 
 export function normalizePortalRole(role) {
-  return PORTAL_ROLES.has(role) ? role : 'agent';
+  return PORTAL_ROLES.has(role) ? role : 'admin';
 }
 
 export function parseAdminEmails(value = process.env.ADMIN_EMAILS || '') {
@@ -23,21 +25,68 @@ export function getBearerToken(req) {
   return authHeader.slice(7).trim() || null;
 }
 
+export function mapTenantRoleToPortalRole(tenantRole, fallbackRole = 'agent') {
+  return 'admin';
+}
+
 export function buildPortalUser(insforgeUser, agentRecord = null, options = {}) {
   const email = insforgeUser?.email?.toLowerCase();
   const adminEmails = options.adminEmails || parseAdminEmails();
-  const role = adminEmails.has(email) ? 'admin' : normalizePortalRole(agentRecord?.role);
+  const tenantUser = options.tenantUser || null;
+  const tenant = options.tenant || null;
+  const role = adminEmails.has(email)
+    ? 'admin'
+    : mapTenantRoleToPortalRole(tenantUser?.role, agentRecord?.role);
   const profileName = insforgeUser?.profile?.name || insforgeUser?.metadata?.name;
 
   return {
     id: agentRecord?.id || insforgeUser.id,
     authUserId: insforgeUser.id,
+    tenantId: tenantUser?.tenantId || tenant?.id || agentRecord?.tenantId || null,
+    tenant,
+    tenantRole: tenantUser?.role || null,
+    tenantUserId: tenantUser?.id || null,
     email: insforgeUser.email,
     name: agentRecord?.fullName || agentRecord?.name || profileName || insforgeUser.email,
     role,
     emailVerified: Boolean(insforgeUser.emailVerified ?? true),
-    redirectTo: role === 'admin' ? '/admin-dashboard' : '/agent-dashboard',
+    redirectTo: '/admin-dashboard',
   };
+}
+
+export async function resolveTenantForUser(insforgeUser, agentRecord = null) {
+  const existingMembership = await insforgeDataService.getPrimaryTenantUserForUser(insforgeUser.id);
+  if (existingMembership) {
+    const tenantContext = {
+      tenantUser: existingMembership,
+      tenant: await insforgeDataService.getTenantById(existingMembership.tenantId),
+    };
+    await tenantIdentityService.ensureDefaultTenantAgent({
+      tenantId: tenantContext.tenantUser.tenantId,
+      authUserId: insforgeUser.id,
+    });
+    return tenantContext;
+  }
+
+  const defaultTenant = await insforgeDataService.getDefaultTenant();
+  const tenantUser = await insforgeDataService.createTenantUser({
+    tenantId: defaultTenant.id,
+    userId: insforgeUser.id,
+    legacyAgentId: agentRecord?.id || null,
+    role: 'admin',
+    status: 'active',
+  });
+
+  const tenantContext = {
+    tenantUser,
+    tenant: defaultTenant,
+  };
+  await tenantIdentityService.ensureDefaultTenantAgent({
+    tenantId: tenantUser.tenantId,
+    authUserId: insforgeUser.id,
+  });
+
+  return tenantContext;
 }
 
 export function assertPortalAccess(user, requiredRole) {
@@ -92,7 +141,8 @@ export async function authenticateInsForgeRequest(req) {
 
   const insforgeUser = await getInsForgeUserFromToken(accessToken);
   const agentRecord = await insforgeDataService.getAgentByEmail(insforgeUser.email);
-  const portalUser = buildPortalUser(insforgeUser, agentRecord);
+  const tenantContext = await resolveTenantForUser(insforgeUser, agentRecord);
+  const portalUser = buildPortalUser(insforgeUser, agentRecord, tenantContext);
 
   if (agentRecord?.id) {
     await insforgeDataService.updateAgent(agentRecord.id, {

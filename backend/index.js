@@ -23,6 +23,7 @@ import integrationsRoutes from './src/routes/integrations.js';
 import testRoutes from './src/routes/test.js';
 import voiceRoutes from './src/routes/voice.js';
 import smsRoutes from './src/routes/sms.js';
+import tenantSettingsRoutes from './src/routes/tenant-settings.js';
 
 import { WorkflowOrchestrator } from './workflow-orchestrator.js';
 import reminderScheduler from './src/services/reminder-scheduler.js';
@@ -34,8 +35,8 @@ import automatedEmailWorkflowService from './src/services/automated-email-workfl
 import bobOrchestrator from './src/services/bob-orchestrator.js';
 import bobActionExecutor from './src/services/bob-action-executor.js';
 import voiceCallWorker from './src/services/voice-call-worker.js';
-import { calendlyConfig, db, automatedEmailWorkflowEnabled, hubspotEnabled } from './src/config/index.js';
-import { leadProcessingLogs } from './src/db/schema.js';
+import insforgeDataService from './src/services/insforge-data-service.js';
+import { calendlyConfig, automatedEmailWorkflowEnabled, hubspotEnabled } from './src/config/index.js';
 import logger from './utils/logger.js';
 
 // Load environment variables
@@ -165,6 +166,7 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/leads', leadsRoutes);
 app.use('/api/feedback', feedbackRoutes);
 app.use('/api/integrations', integrationsRoutes);
+app.use('/api/tenant-settings', tenantSettingsRoutes);
 app.use('/api/test', testRoutes);
 app.use('/api/voice', voiceRoutes);
 app.use('/api/sms', smsRoutes);
@@ -190,7 +192,7 @@ app.get('/book-now', async (req, res) => {
   // Log click event to database if trackingId is provided
   if (trackingId) {
     try {
-      await db.insert(leadProcessingLogs).values({
+      await insforgeDataService.createLeadProcessingLog({
         trackingId,
         eventType: 'calendly_link_clicked',
         eventData: {
@@ -536,7 +538,7 @@ app.listen(PORT, HOST, async () => {
       logWithTimestamp('error', '❌ Failed to start new lead monitor', { error: error.message, stack: error.stack });
     }
   } else {
-    logWithTimestamp('info', 'ℹ️ New lead monitor disabled; skipping legacy Drizzle-backed polling');
+    logWithTimestamp('info', 'ℹ️ New lead monitor disabled; skipping legacy polling');
   }
 
   if (hubspotEnabled) {
