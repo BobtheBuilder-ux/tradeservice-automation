@@ -339,6 +339,88 @@ async function logTimelineMessage(db: any, session: JsonRecord, input: JsonRecor
   return rows?.[0] || null;
 }
 
+async function finalizeCallState(db: any, session: JsonRecord, input: JsonRecord) {
+  const completedAt = firstValue(input.timestamp, nowIso());
+  const outcome = String(input.outcome || 'completed');
+  const callSucceeded = outcome !== 'failed';
+  const summary = input.summary || session.summary || `Voice call ended with outcome: ${outcome}`;
+  const transcript = input.transcript || session.transcript || null;
+
+  if (session.lead_id) {
+    const leadRows = await unwrap(
+      await db.database.from('leads').select('status').eq('tenant_id', session.tenant_id).eq('id', session.lead_id).limit(1),
+      'Failed to load lead for call finalization'
+    );
+    const lead = leadRows?.[0] || null;
+    const leadPatch: JsonRecord = {
+      last_contacted_at: completedAt,
+      updated_at: completedAt,
+    };
+    if (callSucceeded && lead?.status === 'new') leadPatch.status = 'contacted';
+    await db.database.from('leads').update(leadPatch).eq('tenant_id', session.tenant_id).eq('id', session.lead_id);
+  }
+
+  if (session.conversation_id) {
+    await db.database.from('lead_conversations').update({
+      conversation_status: callSucceeded ? 'completed' : 'failed',
+      last_summary: summary,
+      last_intent: outcome,
+      last_intent_at: completedAt,
+      updated_at: completedAt,
+      metadata: {
+        ...(session.metadata || {}),
+        voiceCallSessionId: session.id,
+        elevenlabsConversationId: input.elevenlabsConversationId || session.elevenlabs_conversation_id || null,
+        transcript,
+      },
+    }).eq('id', session.conversation_id).eq('tenant_id', session.tenant_id);
+  }
+
+  if (session.bob_action_id) {
+    const actionRows = await unwrap(
+      await db.database.from('bob_actions').select('result').eq('tenant_id', session.tenant_id).eq('id', session.bob_action_id).limit(1),
+      'Failed to load action for call finalization'
+    );
+    await db.database.from('bob_actions').update({
+      status: callSucceeded ? 'completed' : 'failed',
+      executed_at: completedAt,
+      updated_at: completedAt,
+      result: {
+        ...(actionRows?.[0]?.result || {}),
+        voiceCallSessionId: session.id,
+        callOutcome: outcome,
+        callSummary: summary,
+        elevenlabsConversationId: input.elevenlabsConversationId || session.elevenlabs_conversation_id || null,
+      },
+    }).eq('id', session.bob_action_id).eq('tenant_id', session.tenant_id);
+  }
+
+  if (session.lead_id) {
+    const campaignRows = await unwrap(
+      await db.database
+        .from('campaign_leads')
+        .select('id,metadata')
+        .eq('tenant_id', session.tenant_id)
+        .eq('lead_id', session.lead_id)
+        .in('status', ['queued', 'running']),
+      'Failed to load campaign lead state'
+    );
+    for (const campaignLead of campaignRows || []) {
+      await db.database.from('campaign_leads').update({
+        status: callSucceeded ? 'running' : 'failed',
+        current_step: callSucceeded ? 'voice_call_completed' : 'voice_call_failed',
+        updated_at: completedAt,
+        metadata: {
+          ...(campaignLead.metadata || {}),
+          lastVoiceCallSessionId: session.id,
+          lastVoiceCallOutcome: outcome,
+          lastVoiceCallAt: completedAt,
+        },
+      }).eq('id', campaignLead.id).eq('tenant_id', session.tenant_id);
+    }
+  }
+}
+
 async function handleBridgeEvent(db: any, req: Request, body: JsonRecord) {
   requireBridgeSecret(req);
   const sessionId = body.voiceCallSessionId || body.sessionId || '';
@@ -384,6 +466,13 @@ async function handleBridgeEvent(db: any, req: Request, body: JsonRecord) {
       metadata: { source: 'elevenlabs', eventType },
     });
   } else if (eventType === 'call_ended') {
+    await finalizeCallState(db, session, {
+      timestamp: firstValue(body.timestamp, nowIso()),
+      outcome: body.outcome || 'completed',
+      summary: body.summary || null,
+      transcript: body.transcript || null,
+      elevenlabsConversationId: body.elevenlabsConversationId || session.elevenlabs_conversation_id || null,
+    });
     await logTimelineMessage(db, session, {
       direction: 'system',
       messageType: 'call_outcome',

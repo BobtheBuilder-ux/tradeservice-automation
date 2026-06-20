@@ -81,6 +81,7 @@ function handleTwilioConnection(twilioWs, req) {
     session: null,
     token: '',
     elevenlabsWs: null,
+    elevenlabsConversationId: '',
     userTranscript: [],
     agentResponses: [],
     closed: false,
@@ -101,6 +102,7 @@ function handleTwilioConnection(twilioWs, req) {
           ...state.userTranscript.map((text) => 'Lead: ' + text),
           ...state.agentResponses.map((text) => 'Agent: ' + text),
         ].join('\n'),
+        elevenlabsConversationId: state.elevenlabsConversationId || undefined,
         timestamp: new Date().toISOString(),
       });
     }
@@ -129,6 +131,21 @@ function handleTwilioConnection(twilioWs, req) {
           event_id: data.ping_event?.event_id,
         });
         return;
+      }
+
+      if (data.type === 'conversation_initiation_metadata') {
+        const conversationId = data.conversation_initiation_metadata_event?.conversation_id
+          || data.conversation_id
+          || data.conversationId
+          || '';
+        if (conversationId) {
+          state.elevenlabsConversationId = conversationId;
+          postBridgeEvent(state.session, state.token, {
+            type: 'conversation_metadata',
+            elevenlabsConversationId: conversationId,
+            twilioStreamSid: state.streamSid,
+          });
+        }
       }
 
       if (data.type === 'user_transcript') {
