@@ -66,15 +66,6 @@ export default function Login() {
             >
               {loading || authLoading ? 'Redirecting to Google...' : 'Continue with Google'}
             </button>
-
-            <div className="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
-              <h4 className="text-sm font-semibold text-blue-900 mb-2">Secure access</h4>
-              <ul className="text-sm text-blue-800 space-y-1">
-                <li>• Authentication is handled by InsForge and Google OAuth.</li>
-                <li>• Signed-in users are routed to the admin dashboard.</li>
-                <li>• Password login is disabled.</li>
-              </ul>
-            </div>
           </div>
         </div>
       </div>

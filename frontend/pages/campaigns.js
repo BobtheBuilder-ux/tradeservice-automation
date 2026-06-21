@@ -237,7 +237,7 @@ export default function Campaigns() {
                       <div className="flex-1">
                         <h3 className="text-lg font-medium text-gray-900">{campaign.name}</h3>
                         <div className="mt-1 flex items-center space-x-4 text-sm text-gray-500">
-                          <span>ID: {campaign.id}</span>
+                          <span>Campaign #{campaign.campaignNumber}</span>
                           <span>Objective: {campaign.objective}</span>
                           <span className={`px-2 py-1 rounded-full text-xs font-medium ${
                             campaign.status === 'ACTIVE' ? 'bg-green-100 text-green-800' :

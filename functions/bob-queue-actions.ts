@@ -348,7 +348,7 @@ async function launchVoiceCall(db: any, input: JsonRecord) {
   return publicCall(call, session);
 }
 
-const bobQueueActions = ['status', 'tick', 'start-calls', 'skip', 'test-lead', 'test-call', 'live-start', 'live-status'];
+const bobQueueActions = ['status', 'tick', 'start-calls', 'skip', 'test-lead', 'test-call', 'test-sms', 'live-start', 'live-status'];
 
 async function getBobRunStatus(db: any, leadId: string, conversationId?: string) {
   const { data: leads } = await db.database.from('leads').select('*').eq('id', leadId).limit(1);
@@ -551,6 +551,25 @@ export default async function(req: Request): Promise<Response> {
 
     if (action === 'test-call') {
       return jsonResponse({ success: true, call: await launchVoiceCall(db, { ...body, source: 'direct_test_call' }) });
+    }
+
+    if (action === 'test-sms') {
+      const secret = Deno.env.get('MESSAGE_ACTIONS_SECRET') || Deno.env.get('ELEVENLABS_TOOL_SECRET');
+      if (!secret) throw new Error('Message delivery authorization is not configured');
+      const response = await fetch(`${functionBaseUrl()}/twilio-sms-webhook?action=send`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-message-actions-secret': secret },
+        body: JSON.stringify({
+          tenantId: body.tenantId,
+          leadId: body.leadId,
+          channel: 'sms',
+          message: body.message || 'This is a tenant SMS test message.',
+          source: 'admin_dashboard_test_sms',
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result?.success) throw new Error(result?.error || 'Failed to send SMS test');
+      return jsonResponse({ success: true, message: result });
     }
 
     return jsonResponse({

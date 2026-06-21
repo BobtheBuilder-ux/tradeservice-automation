@@ -149,16 +149,6 @@ function normalizePhone(phone: string) {
   return digits ? `+${digits}` : raw;
 }
 
-function twilioBasicAuth() {
-  const accountSid = Deno.env.get('TWILIO_ACCOUNT_SID');
-  const authToken = Deno.env.get('TWILIO_AUTH_TOKEN');
-  if (!accountSid || !authToken) throw new Error('Twilio SMS is not configured');
-  return {
-    accountSid,
-    authorization: btoa(`${accountSid}:${authToken}`),
-  };
-}
-
 async function unwrap(result: any, message: string) {
   if (result?.error) throw new Error(result.error.message || message);
   return result?.data;
@@ -512,60 +502,37 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
 
 async function sendSms(db: any, context: JsonRecord, input: JsonRecord) {
   assertLeadAllowsChannel(context.lead, 'sms');
-  const readiness = await loadTenantReadiness(db, context.tenantId, context.agentId);
-  const from = String(firstValue(input.from, input.fromPhone, input.from_phone, readiness.phoneNumber?.phone_number, Deno.env.get('TWILIO_PHONE_NUMBER')) || '');
-  const to = normalizePhone(firstValue(input.to, input.toPhone, input.to_phone, context.lead.phone) || '');
   const body = String(firstValue(input.message, input.body, input.text, '') || '').trim();
-  if (!from) throw new Error('Tenant SMS sender is not configured');
-  if (!to) throw new Error('Lead phone number is required');
   if (!body) throw new Error('SMS message body is required');
-
-  const twilio = twilioBasicAuth();
-  const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${twilio.accountSid}/Messages.json`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${twilio.authorization}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: new URLSearchParams({ From: from, To: to, Body: body }),
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result?.message || `Twilio SMS failed with ${response.status}`);
-
-  await logTimelineMessage(db, {
-    tenantId: context.tenantId,
-    leadId: context.leadId,
-    channel: 'sms',
-    direction: 'outbound',
-    messageType: 'sms',
-    bodyText: body,
-    providerMessageId: result.sid || null,
-    status: 'sent',
-    sentAt: nowIso(),
-    metadata: { source: 'elevenlabs_tool', twilioStatus: result.status || null },
-  });
-
-  return { success: true, providerMessageId: result.sid || null, status: result.status || 'sent' };
+  return sendTenantTextMessage(context, 'sms', body);
 }
 
 async function sendWhatsapp(db: any, context: JsonRecord, input: JsonRecord) {
   assertLeadAllowsChannel(context.lead, 'whatsapp');
-  const readiness = await loadTenantReadiness(db, context.tenantId, context.agentId);
-  if (readiness.phoneNumber?.whatsapp_status !== 'active') {
-    throw new Error('Tenant WhatsApp account is not active');
-  }
-  await logTimelineMessage(db, {
-    tenantId: context.tenantId,
-    leadId: context.leadId,
-    channel: 'whatsapp',
-    direction: 'outbound',
-    messageType: 'whatsapp',
-    bodyText: firstValue(input.message, input.body, input.text, ''),
-    status: 'failed',
-    errorMessage: 'WhatsApp provider send is not configured yet',
-    metadata: { source: 'elevenlabs_tool' },
+  const body = String(firstValue(input.message, input.body, input.text, '') || '').trim();
+  if (!body) throw new Error('WhatsApp message body is required');
+  return sendTenantTextMessage(context, 'whatsapp', body);
+}
+
+async function sendTenantTextMessage(context: JsonRecord, channel: 'sms' | 'whatsapp', body: string) {
+  const functionBaseUrl = Deno.env.get('INSFORGE_FUNCTION_BASE_URL');
+  const secret = Deno.env.get('MESSAGE_ACTIONS_SECRET') || Deno.env.get('ELEVENLABS_TOOL_SECRET');
+  if (!functionBaseUrl) throw new Error('Tenant message delivery function is not configured');
+  if (!secret) throw new Error('Tenant message delivery authorization is not configured');
+  const response = await fetch(`${functionBaseUrl.replace(/\/$/, '')}/twilio-sms-webhook?action=send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-message-actions-secret': secret },
+    body: JSON.stringify({
+      tenantId: context.tenantId,
+      leadId: context.leadId,
+      channel,
+      message: body,
+      source: 'elevenlabs_tool',
+    }),
   });
-  throw new Error('WhatsApp provider send is not configured yet');
+  const delivery = await response.json().catch(() => ({}));
+  if (!response.ok || !delivery?.success) throw new Error(delivery?.error || `Failed to send tenant ${channel}`);
+  return { success: true, providerMessageId: delivery.providerMessageId || null, status: delivery.status || 'queued' };
 }
 
 async function sendEmail(db: any, context: JsonRecord, input: JsonRecord) {

@@ -129,6 +129,13 @@ const CAMEL_TO_SNAKE = {
   mimeType: 'mime_type',
   fileSize: 'file_size',
   elevenlabsDocumentId: 'elevenlabs_document_id',
+  campaignNumber: 'campaign_number',
+  currentStep: 'current_step',
+  attemptCount: 'attempt_count',
+  nextActionAt: 'next_action_at',
+  stopReason: 'stop_reason',
+  followUpAt: 'follow_up_at',
+  followUpStatus: 'follow_up_status',
 };
 
 const SNAKE_TO_CAMEL = Object.fromEntries(
@@ -626,10 +633,50 @@ export async function importLeadsFromCsv(user, { csvText, fileName } = {}) {
       },
     });
 
+    const defaultAgent = (await listTenantAgents(user)).find((agent) => agent.status === 'live' || agent.status === 'testing');
+    const campaign = await insertTenantRow('campaigns', user, {
+      name: `Import: ${fileName?.trim() || 'Lead import'} · ${new Date().toLocaleDateString()}`,
+      objective: 'OUTCOME_LEADS',
+      status: 'ACTIVE',
+      agentId: defaultAgent?.id || null,
+      startedAt: new Date().toISOString(),
+      channelSequence: ['call', 'sms', 'email'],
+      retryPolicy: { maxAttempts: 2, retryDelayMinutes: 60 },
+      stopConditions: { booked: true, optedOut: true, doNotContact: true, notInterested: true, humanReview: true },
+      metadata: { source: 'lead_import', importBatchId: batch.id },
+    });
+    const eligible = inserted.filter((lead) => !lead.doNotContact && !lead.automationPaused);
+    if (eligible.length) {
+      const campaignLeads = await insertTenantRows('campaign_leads', user, eligible.map((lead) => ({
+        campaignId: campaign.id,
+        leadId: lead.id,
+        agentId: lead.assignedTenantAgentId || defaultAgent?.id || null,
+        status: 'queued',
+        currentStep: 'call',
+        nextActionAt: new Date().toISOString(),
+      })));
+      await insertTenantRows('bob_actions', user, campaignLeads.map((campaignLead) => {
+        const lead = eligible.find((row) => row.id === campaignLead.leadId);
+        const canCall = Boolean(lead?.callConsent && lead?.phone);
+        return {
+          campaignId: campaign.id,
+          campaignLeadId: campaignLead.id,
+          leadId: campaignLead.leadId,
+          actionType: canCall ? 'queue_call_attempt' : 'send_sms',
+          channel: canCall ? 'phone' : 'sms',
+          status: canCall ? 'awaiting_call' : 'awaiting_human',
+          reason: canCall ? 'Campaign first step: call' : 'Campaign requires a consented callable number',
+          scheduledFor: new Date().toISOString(),
+          payload: { source: 'campaign_import', campaignNumber: campaign.campaignNumber, campaignLeadId: campaignLead.id },
+        };
+      }));
+    }
+
     return {
       batch: completedBatch,
       inserted,
       preview,
+      campaign,
     };
   } catch (error) {
     await updateTenantRow('lead_import_batches', user, batch.id, {
@@ -733,7 +780,10 @@ export async function createCampaign(user, input = {}) {
   return insertTenantRow('campaigns', user, {
     name,
     objective: input.objective || 'OUTCOME_LEADS',
-    status: input.status || 'PAUSED',
+    status: input.status || 'ACTIVE',
+    channelSequence: input.channelSequence || ['call', 'sms', 'email'],
+    retryPolicy: input.retryPolicy || { maxAttempts: 2, retryDelayMinutes: 60 },
+    stopConditions: input.stopConditions || { booked: true, optedOut: true, doNotContact: true, notInterested: true, humanReview: true },
     metadata: { source: 'frontend_insforge_product' },
   });
 }
@@ -962,11 +1012,13 @@ export async function respondToFeedback(user, feedbackId, response) {
 }
 
 export async function getBobActivity(user) {
-  const [actions, leads, conversations] = await Promise.all([
+  const [actions, leads, conversations, campaigns] = await Promise.all([
     selectTenantRows('bob_actions', user, { order: { column: 'created_at', ascending: false }, limit: 200 }),
     listLeads(user, 10000),
     selectTenantRows('lead_conversations', user, { order: { column: 'updated_at', ascending: false }, limit: 10000 }),
+    selectTenantRows('campaigns', user, { order: { column: 'created_at', ascending: false }, limit: 1000 }),
   ]);
+  const campaignById = new Map(campaigns.map((campaign) => [campaign.id, campaign]));
 
   const leadById = new Map(leads.map((lead) => [lead.id, lead]));
   const conversationById = new Map(conversations.map((conversation) => [conversation.id, conversation]));
@@ -975,6 +1027,8 @@ export async function getBobActivity(user) {
     const conversation = conversationById.get(action.conversationId) || {};
     return {
       ...action,
+      campaign: action.campaignId ? campaignById.get(action.campaignId) || null : null,
+      campaignNumber: action.campaignId ? campaignById.get(action.campaignId)?.campaignNumber || null : null,
       leadName: lead.fullName || [lead.firstName, lead.lastName].filter(Boolean).join(' ') || lead.email || 'Lead',
       leadFullName: lead.fullName,
       leadFirstName: lead.firstName,

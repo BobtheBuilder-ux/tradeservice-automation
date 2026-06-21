@@ -138,6 +138,7 @@ export default function AdminDashboard() {
     }
   });
   const [bobActivityLoading, setBobActivityLoading] = useState(false);
+  const [bobCampaignFilter, setBobCampaignFilter] = useState('');
   const [bobControlBusy, setBobControlBusy] = useState(false);
   const [selectedCallTranscript, setSelectedCallTranscript] = useState(null);
   const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
@@ -277,7 +278,7 @@ export default function AdminDashboard() {
     setError('Queued call execution is being moved to an InsForge function. It is not available from the dashboard yet.');
   };
 
-  const handleTestCall = async (event) => {
+  const handleTestSms = async (event) => {
     event.preventDefault();
     setTestCallError('');
     setTestCallResult(null);
@@ -287,7 +288,7 @@ export default function AdminDashboard() {
       return;
     }
     if (!testCallForm.callConsent) {
-      setTestCallError('Confirm that you have permission to place this call.');
+      setTestCallError('Confirm that you have permission to send this SMS.');
       return;
     }
 
@@ -301,18 +302,18 @@ export default function AdminDashboard() {
           phone: testCallForm.phone.trim(),
           email: testCallForm.email.trim() || undefined,
           serviceInterest: testCallForm.serviceInterest.trim() || undefined,
-          callConsent: true,
+          smsConsent: true,
         },
       });
       const response = await invokeFunction('bob-queue-actions', {
-        action: 'test-call',
+        action: 'test-sms',
         body: {
           tenantId: user?.tenantId,
           leadId: leadResponse.lead?.id,
-          callConsent: true,
+          message: `SMS test from your tenant. Reply STOP to opt out.`,
         },
       });
-      setTestCallResult(response.call);
+      setTestCallResult(response.message);
       setTestCallForm({
         fullName: '',
         phone: '',
@@ -322,8 +323,8 @@ export default function AdminDashboard() {
       });
       await Promise.all([fetchBobActivity(), fetchLeads()]);
     } catch (err) {
-      console.error('Error starting voice test call:', err);
-      setTestCallError(err.message || 'Failed to start the voice test call.');
+      console.error('Error sending SMS test:', err);
+      setTestCallError(err.message || 'Failed to send the SMS test.');
     } finally {
       setTestCallLoading(false);
     }
@@ -437,7 +438,7 @@ export default function AdminDashboard() {
       setLeadImportPreview(null);
       setLeadImportCsv('');
       setLeadImportFileName('');
-      setLeadImportMessage('Imported ' + result.inserted.length + ' lead(s) from CSV');
+      setLeadImportMessage('Imported ' + result.inserted.length + ' lead(s) and started Campaign #' + result.campaign.campaignNumber);
       await fetchLeads();
     } catch (err) {
       console.error('Error importing leads:', err);
@@ -865,16 +866,16 @@ export default function AdminDashboard() {
                 </div>
               </div>
 
-              <form onSubmit={handleTestCall} className="ops-panel p-4">
+              <form onSubmit={handleTestSms} className="ops-panel p-4">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <Phone className="h-5 w-5 text-info" />
-                      <h3 className="text-sm font-semibold text-text-primary">Run voice test</h3>
+                      <MessageSquare className="h-5 w-5 text-info" />
+                      <h3 className="text-sm font-semibold text-text-primary">Run SMS test</h3>
                       <span className="ops-badge bg-info-soft text-info">Live providers</span>
                     </div>
                     <p className="mt-1 text-xs text-text-muted">
-                      Start one tenant-scoped AI call through Twilio and the configured voice bridge.
+                      Send one tenant-scoped SMS through Twilio using the tenant's assigned number.
                     </p>
                   </div>
 
@@ -934,7 +935,7 @@ export default function AdminDashboard() {
                         className="mt-0.5 rounded border-border text-accent focus:ring-accent"
                         disabled={testCallLoading}
                       />
-                      <span>I have consent to place this test call.</span>
+                      <span>I have consent to send this test SMS.</span>
                     </label>
 
                     <button
@@ -942,8 +943,8 @@ export default function AdminDashboard() {
                       className="ops-button-primary inline-flex items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-60"
                       disabled={testCallLoading || !testCallForm.fullName.trim() || !testCallForm.phone.trim() || !testCallForm.callConsent}
                     >
-                      <Phone className="h-4 w-4" />
-                      {testCallLoading ? 'Starting call…' : 'Run test call'}
+                      <MessageSquare className="h-4 w-4" />
+                      {testCallLoading ? 'Sending SMS…' : 'Run test SMS'}
                     </button>
                   </div>
                 </div>
@@ -959,11 +960,10 @@ export default function AdminDashboard() {
                   <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-success bg-success-soft px-3 py-2 text-sm text-success">
                     <span className="inline-flex items-center gap-2 font-medium">
                       <Check className="h-4 w-4" />
-                      Call started
+                      SMS queued
                     </span>
                     <span>To: {testCallResult.to || 'Unknown'}</span>
                     <span>Status: {testCallResult.status || 'queued'}</span>
-                    {testCallResult.voiceCallSessionId && <span>Session: {testCallResult.voiceCallSessionId}</span>}
                   </div>
                 )}
               </form>
@@ -1535,6 +1535,10 @@ export default function AdminDashboard() {
                     <h3 className="text-lg font-medium text-gray-900">Voice Call Control Center</h3>
                     <p className="text-sm text-gray-500">Monitor queued, active, and completed Bob calls, review transcripts, and record final outcomes.</p>
                   </div>
+                  <select value={bobCampaignFilter} onChange={(event) => setBobCampaignFilter(event.target.value)} className="ops-select h-9 text-sm">
+                    <option value="">All campaigns</option>
+                    {campaigns.map((campaign) => <option key={campaign.id} value={campaign.id}>Campaign #{campaign.campaignNumber}</option>)}
+                  </select>
                   <div className="flex flex-wrap items-center gap-2">
                     <span className={`inline-flex items-center px-3 py-2 rounded-md text-xs font-semibold ${
                       bobActivity.voiceWorker?.enabled ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-700'
@@ -1556,6 +1560,7 @@ export default function AdminDashboard() {
                     <thead className="bg-gray-50">
                       <tr>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Lead</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Campaign</th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Call State</th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Extracted Info</th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Next Step</th>
@@ -1574,6 +1579,7 @@ export default function AdminDashboard() {
                             <div className="text-sm text-gray-500">{action.leadEmail || 'No email'}</div>
                             {action.leadPhone && <div className="text-xs text-gray-500 mt-1">{action.leadPhone}</div>}
                           </td>
+                          <td className="px-6 py-4 text-sm text-gray-500">{action.campaignNumber ? `#${action.campaignNumber}` : 'Manual'}</td>
                           <td className="px-6 py-4">
                             <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
                               action.status === 'completed' ? 'bg-green-100 text-green-800' :
@@ -1740,11 +1746,11 @@ export default function AdminDashboard() {
                       </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
-                      {bobActivity.actions.length === 0 ? (
+                      {bobActivity.actions.filter((action) => !bobCampaignFilter || action.campaignId === bobCampaignFilter).length === 0 ? (
                         <tr>
                           <td colSpan="5" className="px-6 py-8 text-center text-sm text-gray-500">No Bob actions recorded yet.</td>
                         </tr>
-                      ) : bobActivity.actions.map((action) => (
+                      ) : bobActivity.actions.filter((action) => !bobCampaignFilter || action.campaignId === bobCampaignFilter).map((action) => (
                         <tr key={action.id} className="hover:bg-gray-50">
                           <td className="px-6 py-4 whitespace-nowrap">
                             <div className="text-sm font-medium text-gray-900">{action.actionType}</div>
