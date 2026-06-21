@@ -89,6 +89,15 @@ async function getTenantPrimaryPhoneNumber(db: any, tenantId: string) {
   return Array.isArray(data) ? data[0] || null : data || null;
 }
 
+async function loadTenant(db: any, tenantId: string) {
+  if (!tenantId) return null;
+  const rows = await unwrap(
+    await db.database.from('tenants').select('*').eq('id', tenantId).limit(1),
+    'Failed to load tenant'
+  );
+  return rows?.[0] || null;
+}
+
 async function loadLead(db: any, tenantId: string, leadId: string) {
   if (!leadId) return null;
   const rows = await unwrap(
@@ -120,6 +129,15 @@ async function ensureLeadConversation(db: any, tenantId: string, lead: any, chan
     'Failed to create lead conversation'
   );
   return created?.[0] || null;
+}
+
+async function loadTenantAgent(db: any, tenantId: string, agentId?: string | null) {
+  if (!tenantId || !agentId) return null;
+  const rows = await unwrap(
+    await db.database.from('tenant_agents').select('*').eq('tenant_id', tenantId).eq('id', agentId).limit(1),
+    'Failed to load tenant agent'
+  );
+  return rows?.[0] || null;
 }
 
 async function resolveTenantAgent(db: any, tenantId: string, lead: any, requestedAgentId?: string | null) {
@@ -212,6 +230,112 @@ async function startOutboundCall(input: { to: string; from: string; twimlUrl: st
     statusCallbackMethod: 'POST',
     statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
   });
+}
+
+async function sendDashboardTestSms(db: any, body: JsonRecord) {
+  const tenantId = body.tenantId || body.tenant_id || DEFAULT_TENANT_ID;
+  const lead = await loadLead(db, tenantId, body.leadId || body.lead_id);
+  if (!lead) throw new Error('Tenant lead was not found');
+  const policy = leadAllowsChannel(lead, 'sms');
+  if (!policy.allowed) throw new Error(policy.reason);
+
+  const primaryPhone = await getTenantPrimaryPhoneNumber(db, tenantId);
+  const fallbackFrom = normalizePhone(Deno.env.get('TWILIO_PHONE_NUMBER') || '');
+  const tenantFrom = primaryPhone?.status === 'active' && primaryPhone?.sms_enabled ? normalizePhone(primaryPhone.phone_number) : '';
+  const from = tenantFrom || fallbackFrom;
+  const to = normalizePhone(lead.phone || '');
+  const message = String(body.message || 'This is a tenant SMS test message. Reply STOP to opt out.').trim();
+  if (!from) throw new Error('No tenant or fallback SMS sender is configured');
+  if (!to) throw new Error('Lead phone number is required');
+  if (!message) throw new Error('SMS message body is required');
+
+  const callback = new URL('/twilio-sms-webhook', functionBaseUrl());
+  callback.searchParams.set('mode', 'status');
+  const sms = await getTwilioClient().messages.create({
+    from,
+    to,
+    body: message,
+    statusCallback: callback.toString(),
+  });
+  const conversation = await ensureLeadConversation(db, tenantId, lead, 'sms');
+  const rows = await unwrap(
+    await db.database.from('lead_conversation_messages').insert([{
+      tenant_id: tenantId,
+      conversation_id: conversation?.id || null,
+      lead_id: lead.id,
+      direction: 'outbound',
+      channel: 'sms',
+      message_type: 'sms',
+      body_text: message,
+      provider_message_id: sms.sid || null,
+      provider_status: sms.status || 'queued',
+      status: sms.status || 'queued',
+      sent_at: nowIso(),
+      metadata: { source: 'admin_dashboard_test_sms', senderResolution: tenantFrom ? 'tenant_primary' : 'fallback_secret' },
+    }]).select(),
+    'Failed to record SMS test message'
+  );
+  return { providerMessageId: sms.sid || null, status: sms.status || 'queued', message: rows?.[0] || null };
+}
+
+function leadName(lead: any) {
+  return lead?.full_name || [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || 'there';
+}
+
+function defaultCampaignSmsBody(input: { tenant?: any; agent?: any; lead: any }) {
+  const tenantName = input.tenant?.name || 'our team';
+  const agentName = input.agent?.display_name || 'Bob';
+  const service = input.lead?.service_interest ? ` about ${input.lead.service_interest}` : '';
+  return `Hi ${leadName(input.lead)}, this is ${agentName} from ${tenantName}. We’re following up${service}. Reply here and we can help book the best time. Reply STOP to opt out.`;
+}
+
+async function sendTenantSms(db: any, input: { tenantId: string; lead: any; message: string; source: string; conversationId?: string | null; metadata?: JsonRecord }) {
+  const policy = leadAllowsChannel(input.lead, 'sms');
+  if (!policy.allowed) throw new Error(policy.reason);
+
+  const primaryPhone = await getTenantPrimaryPhoneNumber(db, input.tenantId);
+  const fallbackFrom = normalizePhone(Deno.env.get('TWILIO_PHONE_NUMBER') || '');
+  const tenantFrom = primaryPhone?.status === 'active' && primaryPhone?.sms_enabled ? normalizePhone(primaryPhone.phone_number) : '';
+  const from = tenantFrom || fallbackFrom;
+  const to = normalizePhone(input.lead.phone || '');
+  const message = String(input.message || '').trim();
+  if (!from) throw new Error('No tenant or fallback SMS sender is configured');
+  if (!to) throw new Error('Lead phone number is required');
+  if (!message) throw new Error('SMS message body is required');
+
+  const callback = new URL('/twilio-sms-webhook', functionBaseUrl());
+  callback.searchParams.set('mode', 'status');
+  const sms = await getTwilioClient().messages.create({
+    from,
+    to,
+    body: message,
+    statusCallback: callback.toString(),
+  });
+  const conversation = input.conversationId
+    ? { id: input.conversationId }
+    : await ensureLeadConversation(db, input.tenantId, input.lead, 'sms');
+  const rows = await unwrap(
+    await db.database.from('lead_conversation_messages').insert([{
+      tenant_id: input.tenantId,
+      conversation_id: conversation?.id || null,
+      lead_id: input.lead.id,
+      direction: 'outbound',
+      channel: 'sms',
+      message_type: 'sms',
+      body_text: message,
+      provider_message_id: sms.sid || null,
+      provider_status: sms.status || 'queued',
+      status: sms.status || 'queued',
+      sent_at: nowIso(),
+      metadata: {
+        source: input.source,
+        senderResolution: tenantFrom ? 'tenant_primary' : 'fallback_secret',
+        ...(input.metadata || {}),
+      },
+    }]).select(),
+    'Failed to record SMS message'
+  );
+  return { providerMessageId: sms.sid || null, status: sms.status || 'queued', message: rows?.[0] || null };
 }
 
 async function createVoiceCallSession(db: any, input: JsonRecord) {
@@ -348,7 +472,7 @@ async function launchVoiceCall(db: any, input: JsonRecord) {
   return publicCall(call, session);
 }
 
-const bobQueueActions = ['status', 'tick', 'start-calls', 'skip', 'test-lead', 'test-call', 'test-sms', 'live-start', 'live-status'];
+const bobQueueActions = ['status', 'tick', 'start-calls', 'skip', 'campaign-pause', 'campaign-resume', 'campaign-stop', 'test-lead', 'test-call', 'test-sms', 'live-start', 'live-status'];
 
 async function getBobRunStatus(db: any, leadId: string, conversationId?: string) {
   const { data: leads } = await db.database.from('leads').select('*').eq('id', leadId).limit(1);
@@ -436,6 +560,28 @@ async function skipBobAction(db: any, actionId: string) {
   return data?.[0] || null;
 }
 
+async function updateCampaignExecution(db: any, body: JsonRecord, status: string) {
+  const tenantId = body.tenantId || body.tenant_id || DEFAULT_TENANT_ID;
+  const campaignId = body.campaignId || body.campaign_id;
+  if (!campaignId) throw new Error('campaignId is required');
+  const now = nowIso();
+  const campaignPatch: JsonRecord = { status, updated_at: now };
+  if (status === 'ACTIVE') campaignPatch.started_at = body.startedAt || body.started_at || now;
+  if (status === 'ARCHIVED') campaignPatch.stopped_at = now;
+  const campaigns = await unwrap(
+    await db.database.from('campaigns').update(campaignPatch).eq('tenant_id', tenantId).eq('id', campaignId).select(),
+    'Failed to update campaign'
+  );
+  if (!campaigns?.[0]) throw new Error('Campaign was not found');
+  const leadStatus = status === 'ACTIVE' ? 'queued' : status === 'PAUSED' ? 'paused' : 'stopped';
+  await db.database.from('campaign_leads').update({ status: leadStatus, updated_at: now }).eq('tenant_id', tenantId).eq('campaign_id', campaignId).in('status', ['queued', 'running', 'paused']);
+  const actionPatch = status === 'ACTIVE'
+    ? { status: 'awaiting_call', updated_at: now }
+    : { status: status === 'PAUSED' ? 'paused' : 'skipped', updated_at: now, result: { campaignControl: status.toLowerCase(), updatedAt: now } };
+  await db.database.from('bob_actions').update(actionPatch).eq('tenant_id', tenantId).eq('campaign_id', campaignId).in('status', ['pending', 'awaiting_call', 'paused']);
+  return campaigns[0];
+}
+
 async function inspectQueuedBobActions(db: any) {
   const { data } = await db.database
     .from('bob_actions')
@@ -446,16 +592,148 @@ async function inspectQueuedBobActions(db: any) {
   return data || [];
 }
 
+async function ensureCampaignCallActions(db: any, body: JsonRecord) {
+  const tenantId = body.tenantId || body.tenant_id || null;
+  let query = db.database
+    .from('campaign_leads')
+    .select('*')
+    .eq('status', 'queued')
+    .lte('next_action_at', nowIso())
+    .limit(Number(body.limit || 3));
+  if (tenantId) query = query.eq('tenant_id', tenantId);
+  if (body.campaignId || body.campaign_id) query = query.eq('campaign_id', body.campaignId || body.campaign_id);
+  const campaignLeads = await unwrap(await query, 'Failed to load due campaign leads') || [];
+  if (!campaignLeads.length) return [];
+  const ids = campaignLeads.map((row: any) => row.id);
+  let existingQuery = db.database.from('bob_actions').select('campaign_lead_id').in('campaign_lead_id', ids).in('status', ['pending', 'awaiting_call', 'calling']);
+  if (tenantId) existingQuery = existingQuery.eq('tenant_id', tenantId);
+  const existing = await unwrap(await existingQuery, 'Failed to inspect existing campaign actions') || [];
+  const existingIds = new Set(existing.map((row: any) => row.campaign_lead_id));
+  const rows = [];
+  for (const campaignLead of campaignLeads) {
+    if (existingIds.has(campaignLead.id)) continue;
+    const rowTenantId = campaignLead.tenant_id;
+    const lead = await loadLead(db, rowTenantId, campaignLead.lead_id);
+    if (!lead) continue;
+    const policy = leadAllowsChannel(lead, 'call');
+    if (!lead.assigned_tenant_agent_id && campaignLead.agent_id) {
+      await db.database.from('leads').update({ assigned_tenant_agent_id: campaignLead.agent_id, updated_at: nowIso() }).eq('tenant_id', rowTenantId).eq('id', lead.id);
+    }
+    const smsPolicy = leadAllowsChannel(lead, 'sms');
+    const useCall = policy.allowed;
+    const useSms = !useCall && smsPolicy.allowed;
+    rows.push({
+      tenant_id: rowTenantId,
+      campaign_id: campaignLead.campaign_id,
+      campaign_lead_id: campaignLead.id,
+      lead_id: lead.id,
+      action_type: useCall ? 'queue_call_attempt' : 'send_sms',
+      channel: useCall ? 'phone' : 'sms',
+      status: useCall ? 'awaiting_call' : (useSms ? 'pending' : 'awaiting_human'),
+      reason: useCall ? 'Campaign first step: call' : (useSms ? 'Campaign fallback: SMS' : policy.reason),
+      scheduled_for: nowIso(),
+      payload: {
+        source: 'campaign_tick',
+        campaignLeadId: campaignLead.id,
+        tenantAgentId: campaignLead.agent_id || lead.assigned_tenant_agent_id || null,
+        contactPolicy: useCall ? policy : smsPolicy,
+      },
+    });
+  }
+  if (!rows.length) return [];
+  return await unwrap(await db.database.from('bob_actions').insert(rows).select(), 'Failed to create campaign Bob actions') || [];
+}
+
+async function sendQueuedSmsActions(db: any, body: JsonRecord) {
+  let query = db.database
+    .from('bob_actions')
+    .select('*')
+    .eq('action_type', 'send_sms')
+    .eq('status', 'pending')
+    .lte('scheduled_for', nowIso())
+    .order('scheduled_for', { ascending: true })
+    .limit(Number(body.smsLimit || body.limit || 3));
+  if (body.tenantId || body.tenant_id) query = query.eq('tenant_id', body.tenantId || body.tenant_id);
+  if (body.leadId || body.lead_id) query = query.eq('lead_id', body.leadId || body.lead_id);
+  if (body.conversationId || body.conversation_id) query = query.eq('conversation_id', body.conversationId || body.conversation_id);
+  if (body.campaignId || body.campaign_id) query = query.eq('campaign_id', body.campaignId || body.campaign_id);
+
+  const actions = await unwrap(await query, 'Failed to load queued SMS actions');
+  const results = [];
+  for (const action of actions || []) {
+    try {
+      const tenantId = action.tenant_id;
+      const lead = await loadLead(db, tenantId, action.lead_id);
+      if (!lead) throw new Error('Lead not found for queued SMS');
+      const tenant = await loadTenant(db, tenantId);
+      const agent = await loadTenantAgent(db, tenantId, action.payload?.tenantAgentId || action.payload?.tenant_agent_id || lead.assigned_tenant_agent_id);
+      const message = String(action.payload?.message || action.payload?.body || '').trim() || defaultCampaignSmsBody({ tenant, agent, lead });
+      const sms = await sendTenantSms(db, {
+        tenantId,
+        lead,
+        conversationId: action.conversation_id || null,
+        message,
+        source: action.payload?.source || 'queued_bob_action',
+        metadata: {
+          bobActionId: action.id,
+          campaignId: action.campaign_id || null,
+          campaignLeadId: action.campaign_lead_id || null,
+        },
+      });
+
+      await db.database.from('bob_actions').update({
+        status: 'completed',
+        executed_at: nowIso(),
+        updated_at: nowIso(),
+        result: {
+          providerMessageId: sms.providerMessageId,
+          providerStatus: sms.status,
+          messageId: sms.message?.id || null,
+        },
+      }).eq('id', action.id).eq('tenant_id', tenantId);
+      if (action.campaign_lead_id) {
+        await db.database.from('campaign_leads').update({
+          status: 'running',
+          current_step: 'sms_sent',
+          updated_at: nowIso(),
+        }).eq('tenant_id', tenantId).eq('id', action.campaign_lead_id);
+      }
+      results.push({ actionId: action.id, success: true, sms });
+    } catch (error) {
+      await db.database.from('bob_actions').update({
+        status: 'failed',
+        executed_at: nowIso(),
+        updated_at: nowIso(),
+        result: { error: String(error?.message || 'Queued SMS failed') },
+      }).eq('id', action.id).eq('tenant_id', action.tenant_id);
+      if (action.campaign_lead_id) {
+        await db.database.from('campaign_leads').update({
+          status: 'failed',
+          current_step: 'sms_failed',
+          stop_reason: String(error?.message || 'Queued SMS failed'),
+          updated_at: nowIso(),
+        }).eq('tenant_id', action.tenant_id).eq('id', action.campaign_lead_id);
+      }
+      results.push({ actionId: action.id, success: false, error: String(error?.message || 'Queued SMS failed') });
+    }
+  }
+  return results;
+}
+
 async function startQueuedCalls(db: any, body: JsonRecord) {
+  await ensureCampaignCallActions(db, body);
+  const smsResults = await sendQueuedSmsActions(db, body);
   let query = db.database
     .from('bob_actions')
     .select('*')
     .eq('action_type', 'queue_call_attempt')
     .eq('status', 'awaiting_call')
+    .lte('scheduled_for', nowIso())
     .order('scheduled_for', { ascending: true })
     .limit(Number(body.limit || 3));
   if (body.leadId || body.lead_id) query = query.eq('lead_id', body.leadId || body.lead_id);
   if (body.conversationId || body.conversation_id) query = query.eq('conversation_id', body.conversationId || body.conversation_id);
+  if (body.campaignId || body.campaign_id) query = query.eq('campaign_id', body.campaignId || body.campaign_id);
 
   const actions = await unwrap(await query, 'Failed to load queued call actions');
   const results = [];
@@ -469,6 +747,9 @@ async function startQueuedCalls(db: any, body: JsonRecord) {
         tenantAgentId: action.payload?.tenantAgentId || action.payload?.tenant_agent_id || null,
         source: 'queued_call_action',
       });
+      if (action.campaign_lead_id) {
+        await db.database.from('campaign_leads').update({ status: 'running', current_step: 'call_started', attempt_count: Number(action.result?.attemptCount || 0) + 1, updated_at: nowIso() }).eq('tenant_id', action.tenant_id).eq('id', action.campaign_lead_id);
+      }
       results.push({ actionId: action.id, success: true, call });
     } catch (error) {
       await db.database.from('bob_actions').update({
@@ -477,10 +758,13 @@ async function startQueuedCalls(db: any, body: JsonRecord) {
         updated_at: nowIso(),
         result: { error: String(error?.message || 'Queued call failed') },
       }).eq('id', action.id).eq('tenant_id', action.tenant_id);
+      if (action.campaign_lead_id) {
+        await db.database.from('campaign_leads').update({ status: 'failed', current_step: 'call_failed', stop_reason: String(error?.message || 'Queued call failed'), updated_at: nowIso() }).eq('tenant_id', action.tenant_id).eq('id', action.campaign_lead_id);
+      }
       results.push({ actionId: action.id, success: false, error: String(error?.message || 'Queued call failed') });
     }
   }
-  return results;
+  return { voiceResults: results, smsResults };
 }
 
 async function createFunctionTestLead(db: any, body: any) {
@@ -519,6 +803,10 @@ export default async function(req: Request): Promise<Response> {
       return jsonResponse({ success: true, action: await skipBobAction(db, id) });
     }
 
+    if (action === 'campaign-pause') return jsonResponse({ success: true, campaign: await updateCampaignExecution(db, body, 'PAUSED') });
+    if (action === 'campaign-resume') return jsonResponse({ success: true, campaign: await updateCampaignExecution(db, body, 'ACTIVE') });
+    if (action === 'campaign-stop') return jsonResponse({ success: true, campaign: await updateCampaignExecution(db, body, 'ARCHIVED') });
+
     if (action === 'live-start') {
       return jsonResponse({ success: true, ...(await createLiveLeadRun(db, body)) });
     }
@@ -533,16 +821,21 @@ export default async function(req: Request): Promise<Response> {
     }
 
     if (action === 'tick' || action === 'start-calls') {
-      const startedCalls = await startQueuedCalls(db, body);
+      const { voiceResults, smsResults } = await startQueuedCalls(db, body);
       if (body.leadId || body.lead_id) {
         const leadId = body.leadId || body.lead_id;
         return jsonResponse({
           success: true,
-          tick: { processedAt: nowIso(), mode: 'function_tick', voice: { started: startedCalls.filter((row) => row.success).length, results: startedCalls } },
+          tick: {
+            processedAt: nowIso(),
+            mode: 'function_tick',
+            voice: { started: voiceResults.filter((row) => row.success).length, results: voiceResults },
+            sms: { sent: smsResults.filter((row) => row.success).length, results: smsResults },
+          },
           status: await getBobRunStatus(db, leadId, body.conversationId || body.conversation_id),
         });
       }
-      return jsonResponse({ success: true, queued: await inspectQueuedBobActions(db), voice: { results: startedCalls }, mode: 'function_tick' });
+      return jsonResponse({ success: true, queued: await inspectQueuedBobActions(db), voice: { results: voiceResults }, sms: { results: smsResults }, mode: 'function_tick' });
     }
 
     if (action === 'test-lead') {
@@ -554,22 +847,7 @@ export default async function(req: Request): Promise<Response> {
     }
 
     if (action === 'test-sms') {
-      const secret = Deno.env.get('MESSAGE_ACTIONS_SECRET') || Deno.env.get('ELEVENLABS_TOOL_SECRET');
-      if (!secret) throw new Error('Message delivery authorization is not configured');
-      const response = await fetch(`${functionBaseUrl()}/twilio-sms-webhook?action=send`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-message-actions-secret': secret },
-        body: JSON.stringify({
-          tenantId: body.tenantId,
-          leadId: body.leadId,
-          channel: 'sms',
-          message: body.message || 'This is a tenant SMS test message.',
-          source: 'admin_dashboard_test_sms',
-        }),
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok || !result?.success) throw new Error(result?.error || 'Failed to send SMS test');
-      return jsonResponse({ success: true, message: result });
+      return jsonResponse({ success: true, message: await sendDashboardTestSms(db, body) });
     }
 
     return jsonResponse({

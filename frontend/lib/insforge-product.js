@@ -618,10 +618,11 @@ export async function importLeadsFromCsv(user, { csvText, fileName } = {}) {
   });
 
   try {
+    const defaultAgent = (await listTenantAgents(user)).find((agent) => agent.status === 'live' || agent.status === 'testing');
     const inserted = await insertTenantRows(
       'leads',
       user,
-      preview.importableRows.map((row) => importedLeadPayload(row, batch.id))
+      preview.importableRows.map((row) => ({ ...importedLeadPayload(row, batch.id), assignedTenantAgentId: defaultAgent?.id || null }))
     );
 
     const completedBatch = await updateTenantRow('lead_import_batches', user, batch.id, {
@@ -633,7 +634,6 @@ export async function importLeadsFromCsv(user, { csvText, fileName } = {}) {
       },
     });
 
-    const defaultAgent = (await listTenantAgents(user)).find((agent) => agent.status === 'live' || agent.status === 'testing');
     const campaign = await insertTenantRow('campaigns', user, {
       name: `Import: ${fileName?.trim() || 'Lead import'} · ${new Date().toLocaleDateString()}`,
       objective: 'OUTCOME_LEADS',
@@ -658,16 +658,17 @@ export async function importLeadsFromCsv(user, { csvText, fileName } = {}) {
       await insertTenantRows('bob_actions', user, campaignLeads.map((campaignLead) => {
         const lead = eligible.find((row) => row.id === campaignLead.leadId);
         const canCall = Boolean(lead?.callConsent && lead?.phone);
+        const canSms = Boolean(lead?.smsConsent && lead?.phone);
         return {
           campaignId: campaign.id,
           campaignLeadId: campaignLead.id,
           leadId: campaignLead.leadId,
           actionType: canCall ? 'queue_call_attempt' : 'send_sms',
           channel: canCall ? 'phone' : 'sms',
-          status: canCall ? 'awaiting_call' : 'awaiting_human',
-          reason: canCall ? 'Campaign first step: call' : 'Campaign requires a consented callable number',
+          status: canCall ? 'awaiting_call' : (canSms ? 'pending' : 'awaiting_human'),
+          reason: canCall ? 'Campaign first step: call' : (canSms ? 'Campaign fallback: SMS' : 'Campaign requires call or SMS consent with a phone number'),
           scheduledFor: new Date().toISOString(),
-          payload: { source: 'campaign_import', campaignNumber: campaign.campaignNumber, campaignLeadId: campaignLead.id },
+          payload: { source: 'campaign_import', campaignNumber: campaign.campaignNumber, campaignLeadId: campaignLead.id, tenantAgentId: campaignLead.agentId || lead?.assignedTenantAgentId || defaultAgent?.id || null },
         };
       }));
     }

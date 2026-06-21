@@ -110,7 +110,7 @@ async function verifySessionToken(session: JsonRecord, token: string) {
 }
 
 async function loadContextRows(db: any, session: JsonRecord) {
-  const [tenants, leads, agents] = await Promise.all([
+  const [tenants, leads, agents, bookingRows, knowledgeRows] = await Promise.all([
     unwrap(await db.database.from('tenants').select('*').eq('id', session.tenant_id).limit(1), 'Failed to load tenant'),
     session.lead_id
       ? unwrap(await db.database.from('leads').select('*').eq('tenant_id', session.tenant_id).eq('id', session.lead_id).limit(1), 'Failed to load lead')
@@ -118,11 +118,94 @@ async function loadContextRows(db: any, session: JsonRecord) {
     session.tenant_agent_id
       ? unwrap(await db.database.from('tenant_agents').select('*').eq('tenant_id', session.tenant_id).eq('id', session.tenant_agent_id).limit(1), 'Failed to load tenant agent')
       : Promise.resolve([]),
+    unwrap(
+      await db.database
+        .from('tenant_booking_integrations')
+        .select('*')
+        .eq('tenant_id', session.tenant_id)
+        .eq('status', 'connected')
+        .order('created_at', { ascending: false })
+        .limit(1),
+      'Failed to load tenant booking integration'
+    ),
+    unwrap(
+      await db.database
+        .from('tenant_knowledge_documents')
+        .select('*')
+        .eq('tenant_id', session.tenant_id)
+        .eq('status', 'ready')
+        .order('created_at', { ascending: true })
+        .limit(50),
+      'Failed to load tenant knowledge documents'
+    ),
   ]);
   return {
     tenant: tenants?.[0] || null,
     lead: leads?.[0] || null,
     agent: agents?.[0] || null,
+    bookingIntegration: bookingRows?.[0] || null,
+    knowledgeDocuments: knowledgeRows || [],
+  };
+}
+
+function leadDisplayName(lead: JsonRecord) {
+  return lead?.full_name || [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || 'there';
+}
+
+function serviceInterest(lead: JsonRecord) {
+  return lead?.service_interest || lead?.service || lead?.interest || '';
+}
+
+function buildCallFirstMessage(rows: JsonRecord) {
+  const agentName = rows.agent?.display_name || 'Bob';
+  const tenantName = rows.tenant?.name || 'the company';
+  const service = serviceInterest(rows.lead);
+  const reason = service ? `your recent request about ${service}` : 'your recent request';
+  return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}, and I can help with the next step.`;
+}
+
+function buildCallPrompt(rows: JsonRecord) {
+  const agentName = rows.agent?.display_name || 'Bob';
+  const tenantName = rows.tenant?.name || 'the company';
+  const service = serviceInterest(rows.lead) || 'the service they asked about';
+  const booking = rows.bookingIntegration || {};
+  const bookingProvider = booking.provider || 'manual';
+  const bookingPath = booking.booking_url || booking.event_type_id || 'not configured';
+
+  return [
+    `You are ${agentName}, an AI outreach and booking assistant for ${tenantName}.`,
+    `This is an outbound campaign call to ${leadDisplayName(rows.lead)} about ${service}.`,
+    'Open with your identity, company, and reason for calling. Never begin with "is now a good time" or a similar permission-only line.',
+    'After the lead responds, keep the conversation warm, concise, and useful. If they are busy, offer to send an SMS follow-up or schedule a better time.',
+    'Use the tenant knowledge base for company-specific services, process, pricing guidance, objections, and policies. If knowledge is missing, do not invent details; offer to have the team follow up.',
+    'Use get_lead_context before answering detailed lead/setup questions, booking, or sending follow-up messages.',
+    `Booking provider: ${bookingProvider}. Booking path: ${bookingPath}.`,
+    'When the lead is interested, ask for a preferred time, use check_availability where available, and call create_booking after a time is agreed. If direct booking is not available, share the manual booking link honestly.',
+    'If a booking is created, the tool handles SMS confirmation and reminders when SMS consent exists.',
+    'Use send_sms for requested texts, recaps, booking links, or follow-ups only when SMS consent exists. Respect opt-outs immediately.',
+    'Record outcomes with record_call_outcome before ending when practical.',
+  ].join('\n\n');
+}
+
+function knowledgeRefs(documents: JsonRecord[]) {
+  return (documents || [])
+    .filter((document) => document.elevenlabs_document_id)
+    .map((document) => ({
+      id: document.elevenlabs_document_id,
+      name: document.title,
+      type: document.source_type,
+    }));
+}
+
+function buildConversationConfigOverride(rows: JsonRecord) {
+  return {
+    agent: {
+      first_message: buildCallFirstMessage(rows),
+      prompt: {
+        prompt: buildCallPrompt(rows),
+        knowledge_base: knowledgeRefs(rows.knowledgeDocuments),
+      },
+    },
   };
 }
 
@@ -305,15 +388,21 @@ async function handleBridgeContext(db: any, req: Request, body: JsonRecord) {
     elevenlabs: {
       signedUrl,
     },
+    conversationConfigOverride: buildConversationConfigOverride(rows),
     dynamicVariables: {
       tenant_id: session.tenant_id,
+      tenant_name: rows.tenant?.name || null,
       lead_id: session.lead_id,
       tenant_agent_id: session.tenant_agent_id,
       agent_name: rows.agent?.display_name || 'Bob',
       company_name: rows.tenant?.name || null,
-      lead_name: rows.lead?.full_name || [rows.lead?.first_name, rows.lead?.last_name].filter(Boolean).join(' ') || null,
-      service_interest: rows.lead?.service_interest || null,
+      lead_name: leadDisplayName(rows.lead),
+      service_interest: serviceInterest(rows.lead) || null,
       booking_context: rows.lead?.preferred_meeting_window || null,
+      booking_provider: rows.bookingIntegration?.provider || null,
+      booking_url: rows.bookingIntegration?.booking_url || null,
+      call_reason: serviceInterest(rows.lead) ? `Follow up about ${serviceInterest(rows.lead)}` : 'Follow up on recent request',
+      ready_knowledge_documents: rows.knowledgeDocuments?.length || 0,
     },
   });
 }

@@ -56,10 +56,14 @@ function customParameters(start) {
 }
 
 function buildInitiation(context) {
-  return {
+  const payload = {
     type: 'conversation_initiation_client_data',
     dynamic_variables: context.dynamicVariables || {},
   };
+  if (context.conversationConfigOverride) {
+    payload.conversation_config_override = context.conversationConfigOverride;
+  }
+  return payload;
 }
 
 async function postBridgeEvent(session, token, event) {

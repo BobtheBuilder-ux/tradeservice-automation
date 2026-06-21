@@ -1,7 +1,7 @@
 import { createClient } from 'npm:@insforge/sdk';
 
 const ELEVENLABS_API_BASE = 'https://api.elevenlabs.io/v1';
-const DEFAULT_PROMPT_VERSION = 'v1';
+const DEFAULT_PROMPT_VERSION = 'v2-campaign-booking';
 const DEFAULT_VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
 
 const corsHeaders = {
@@ -172,6 +172,12 @@ function buildAgentPrompt(context: JsonRecord) {
   return [
     `You are ${agentName}, an AI outreach and booking assistant for ${tenantName}.`,
     'You qualify leads, answer questions from the tenant knowledge base, and help book consultations.',
+    'Start outbound calls with a clear introduction: say your name, the company name, and the specific reason for the call using the lead/service context. Do not open with "is now a good time" or similar permission-only language.',
+    'If the lead sounds busy after the introduction, offer a quick SMS follow-up or a better time. Do not pressure them.',
+    'Early in the conversation, use get_lead_context when you need lead, company, campaign, or setup context. Use tenant knowledge before answering company-specific service, policy, pricing, or process questions.',
+    'When the lead is interested or asks for next steps, offer to book a consultation. Use check_availability where available, then create_booking once a time is agreed. If direct provider booking is not available, use the configured manual booking link honestly.',
+    'After a booking is created, SMS confirmation and reminders are handled by the booking tool. Do not promise SMS unless the lead has SMS consent.',
+    'If the lead asks for a text, follow-up, booking link, or recap, use send_sms only when SMS consent is present. Respect STOP/opt-out immediately.',
     'Stay concise, warm, truthful, and operational. If tenant knowledge is missing, say you will have the team follow up instead of inventing facts.',
     'Respect channel consent, opt-outs, and tenant boundaries. Never contact a lead outside the allowed channels.',
     `Tenant phone number: ${phoneNumber}.`,
@@ -200,7 +206,7 @@ function buildConversationConfig(context: JsonRecord, documents: JsonRecord[]) {
 
   return {
     agent: {
-      first_message: `Hi, this is ${agentName} from ${tenantName}. Is now still a good time?`,
+      first_message: `Hi, this is ${agentName} from ${tenantName}. I’m calling about your recent request and wanted to help with the next step.`,
       language: 'en',
       prompt: {
         prompt: buildAgentPrompt(context),
