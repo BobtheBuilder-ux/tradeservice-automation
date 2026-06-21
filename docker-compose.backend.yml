@@ -26,3 +26,39 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://setmymeet.ca}
+        NEXT_PUBLIC_INSFORGE_URL: ${NEXT_PUBLIC_INSFORGE_URL:-}
+        NEXT_PUBLIC_INSFORGE_API_BASE_URL: ${NEXT_PUBLIC_INSFORGE_API_BASE_URL:-}
+        NEXT_PUBLIC_INSFORGE_ANON_KEY: ${NEXT_PUBLIC_INSFORGE_ANON_KEY:-}
+        NEXT_PUBLIC_INSFORGE_PUBLIC_KEY: ${NEXT_PUBLIC_INSFORGE_PUBLIC_KEY:-}
+        NEXT_PUBLIC_INSFORGE_FUNCTION_BASE_URL: ${NEXT_PUBLIC_INSFORGE_FUNCTION_BASE_URL:-}
+    image: tradeservice-frontend:latest
+    container_name: tradeservice-frontend
+    restart: unless-stopped
+    env_file:
+      - ./.env.frontend.production
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+    ports:
+      - "3000:3000"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tradeservice-frontend.rule=Host(`setmymeet.ca`) || Host(`www.setmymeet.ca`)"
+      - "traefik.http.routers.tradeservice-frontend.entrypoints=websecure"
+      - "traefik.http.routers.tradeservice-frontend.tls=true"
+      - "traefik.http.routers.tradeservice-frontend.tls.certresolver=letsencrypt"
+      - "traefik.http.services.tradeservice-frontend.loadbalancer.server.port=3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
