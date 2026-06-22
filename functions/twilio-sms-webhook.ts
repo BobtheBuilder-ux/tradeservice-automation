@@ -145,17 +145,18 @@ async function draftTextReply(db: any, tenantId: string, lead: any, channel: 'sm
   if (!apiKey) throw new Error('OPENAI_API_KEY is not configured');
   const { tenant, agent } = await loadTenantContext(db, tenantId, lead);
   const model = Deno.env.get('OPENAI_TEXT_MODEL') || Deno.env.get('OPENAI_EMAIL_MODEL') || 'gpt-5.5';
+  const preferredLanguage = lead?.preferred_language || null;
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model,
-      instructions: 'Write one concise, helpful business text reply. Return only valid JSON. Never invent prices, availability, booking links, policies, or commitments. If human help is needed, say so briefly and set needs_human_review true. Do not mention internal systems or AI unless the tenant explicitly asked you to.',
+      instructions: `Write one concise, helpful business text reply. Return only valid JSON. Never invent prices, availability, booking links, policies, or commitments. If human help is needed, say so briefly and set needs_human_review true. Do not mention internal systems or AI unless the tenant explicitly asked you to.${preferredLanguage ? ` Write the reply in ${preferredLanguage}.` : ''}`,
       input: JSON.stringify({
         channel,
         tenant: { name: tenant?.name || null, industry: tenant?.industry || null },
         agent: { name: agent?.display_name || 'Bob' },
-        lead: { name: lead?.full_name || [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || null, serviceInterest: lead?.service_interest || null },
+        lead: { name: lead?.full_name || [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || null, serviceInterest: lead?.service_interest || null, preferredLanguage },
         inboundMessage: inboundText,
       }),
       text: { format: { type: 'json_schema', name: 'automated_text_reply', strict: true, schema: {

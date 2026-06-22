@@ -72,6 +72,7 @@ const CAMEL_TO_SNAKE = {
   leadStage: 'lead_stage',
   schedulingState: 'scheduling_state',
   preferredContactChannel: 'preferred_contact_channel',
+  preferredLanguage: 'preferred_language',
   callConsent: 'call_consent',
   smsConsent: 'sms_consent',
   whatsappConsent: 'whatsapp_consent',
@@ -550,6 +551,7 @@ export async function upsertTenantEmailIdentity(user, input = {}) {
 export async function upsertTenantBookingIntegration(user, input = {}) {
   const provider = input.provider || 'manual';
   const bookingUrl = input.bookingUrl?.trim() || null;
+  const meetingLink = input.meetingLink?.trim() || null;
   const eventTypeId = input.eventTypeId?.trim() || null;
   if (provider === 'manual' && !bookingUrl) {
     throw new Error('Manual booking requires a booking URL');
@@ -557,7 +559,11 @@ export async function upsertTenantBookingIntegration(user, input = {}) {
   if (provider === 'calendly' && !bookingUrl && !eventTypeId) {
     throw new Error('Calendly setup requires a booking URL or event type ID');
   }
+  if (meetingLink && !/^https?:\/\/\S+$/i.test(meetingLink)) {
+    throw new Error('Meeting link must start with http:// or https://');
+  }
 
+  const existing = primaryActive(await selectTenantRows('tenant_booking_integrations', user));
   const values = {
     provider,
     status: bookingUrl || eventTypeId ? 'connected' : 'disconnected',
@@ -565,9 +571,12 @@ export async function upsertTenantBookingIntegration(user, input = {}) {
     eventTypeId,
     externalAccountId: input.externalAccountId?.trim() || null,
     defaultMeetingType: input.defaultMeetingType || 'phone',
-    metadata: input.metadata || {},
+    metadata: {
+      ...(existing?.metadata || {}),
+      ...(input.metadata || {}),
+      meetingLink,
+    },
   };
-  const existing = primaryActive(await selectTenantRows('tenant_booking_integrations', user));
   return existing
     ? updateTenantRow('tenant_booking_integrations', user, existing.id, values)
     : insertTenantRow('tenant_booking_integrations', user, values);
@@ -751,6 +760,9 @@ export async function updateLeadReview(user, leadId, updates = {}) {
   if (typeof updates.leadStage === 'string' && updates.leadStage.trim()) patch.leadStage = updates.leadStage.trim();
   if (typeof updates.schedulingState === 'string' && updates.schedulingState.trim()) {
     patch.schedulingState = updates.schedulingState.trim();
+  }
+  if (typeof updates.preferredLanguage === 'string') {
+    patch.preferredLanguage = updates.preferredLanguage.trim() || null;
   }
   patch.lastUpdatedBy = user?.authUserId || user?.id || null;
   return updateTenantRow('leads', user, leadId, patch);

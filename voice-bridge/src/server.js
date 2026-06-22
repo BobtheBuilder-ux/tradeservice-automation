@@ -89,6 +89,10 @@ function handleTwilioConnection(twilioWs, req) {
     userTranscript: [],
     agentResponses: [],
     closed: false,
+    twilioStopped: false,
+    twilioStoppedAt: 0,
+    elevenlabsReconnectAttempts: 0,
+    elevenlabsReconnectTimer: null,
   };
 
   async function closeBoth(code = 1000, reason = 'bridge closing') {
@@ -112,11 +116,62 @@ function handleTwilioConnection(twilioWs, req) {
     }
   }
 
+  function scheduleFinalCloseAfterTwilioStop(reason = 'twilio stopped') {
+    if (state.closed) return;
+    state.twilioStopped = true;
+    state.twilioStoppedAt = state.twilioStoppedAt || Date.now();
+    setTimeout(() => {
+      const stoppedForMs = Date.now() - state.twilioStoppedAt;
+      if (state.twilioStopped && stoppedForMs >= 10_000 && !state.closed) {
+        closeBoth(1000, reason).catch((error) => console.error('[voice-bridge] delayed close failed', error.message));
+      }
+    }, 10_000);
+  }
+
+  function scheduleElevenLabsReconnect(reason = 'elevenlabs closed') {
+    if (state.closed || state.twilioStopped || !open(twilioWs)) return;
+    if (state.elevenlabsReconnectTimer) return;
+    state.elevenlabsReconnectTimer = setTimeout(async () => {
+      state.elevenlabsReconnectTimer = null;
+      if (state.closed || state.twilioStopped || !open(twilioWs)) return;
+      state.elevenlabsReconnectAttempts += 1;
+      try {
+        const context = await functionRequest('bridge-context', {
+          voiceCallSessionId: state.session?.id,
+          callContextToken: state.token,
+          twilioStreamSid: state.streamSid,
+          twilioCallSid: state.callSid,
+        });
+        state.session = context.voiceCallSession || state.session;
+        await connectElevenLabs(context);
+        await postBridgeEvent(state.session, state.token, {
+          type: 'bridge_reconnected',
+          reason,
+          attempts: state.elevenlabsReconnectAttempts,
+          twilioStreamSid: state.streamSid,
+          timestamp: new Date().toISOString(),
+        });
+      } catch (error) {
+        await postBridgeEvent(state.session, state.token, {
+          type: 'bridge_error',
+          error: 'ElevenLabs reconnect failed: ' + error.message,
+          reason,
+          attempts: state.elevenlabsReconnectAttempts,
+          twilioStreamSid: state.streamSid,
+        });
+        if (state.elevenlabsReconnectAttempts < 15) {
+          scheduleElevenLabsReconnect('retry after reconnect failure');
+        }
+      }
+    }, Math.min(1000 + state.elevenlabsReconnectAttempts * 500, 5000));
+  }
+
   async function connectElevenLabs(context) {
     const elevenlabsWs = new WebSocket(context.elevenlabs.signedUrl);
     state.elevenlabsWs = elevenlabsWs;
 
     elevenlabsWs.on('open', () => {
+      state.elevenlabsReconnectAttempts = 0;
       sendJson(elevenlabsWs, buildInitiation(context));
       postBridgeEvent(state.session, state.token, {
         type: 'call_started',
@@ -204,7 +259,11 @@ function handleTwilioConnection(twilioWs, req) {
     });
 
     elevenlabsWs.on('close', () => {
-      closeBoth().catch((error) => console.error('[voice-bridge] close failed', error.message));
+      if (state.twilioStopped || !open(twilioWs)) {
+        scheduleFinalCloseAfterTwilioStop('twilio stopped after elevenlabs closed');
+        return;
+      }
+      scheduleElevenLabsReconnect('elevenlabs websocket closed while twilio remained active');
     });
   }
 
@@ -247,8 +306,12 @@ function handleTwilioConnection(twilioWs, req) {
     }
 
     if (message.event === 'stop') {
-      closeBoth().catch((error) => console.error('[voice-bridge] stop close failed', error.message));
+      scheduleFinalCloseAfterTwilioStop('twilio stop event');
     }
+  });
+
+  twilioWs.on('close', () => {
+    scheduleFinalCloseAfterTwilioStop('twilio websocket closed');
   });
 
   twilioWs.on('error', (error) => {
@@ -257,10 +320,6 @@ function handleTwilioConnection(twilioWs, req) {
       error: error.message,
       twilioStreamSid: state.streamSid,
     });
-  });
-
-  twilioWs.on('close', () => {
-    closeBoth().catch((error) => console.error('[voice-bridge] twilio close failed', error.message));
   });
 
   console.log('[voice-bridge] Twilio media connection accepted', req.socket.remoteAddress);

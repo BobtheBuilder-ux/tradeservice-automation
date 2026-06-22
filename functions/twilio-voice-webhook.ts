@@ -67,6 +67,11 @@ function firstValue(...values: any[]) {
   return null;
 }
 
+function dynamicString(value: any) {
+  if (value === undefined || value === null) return '';
+  return String(value);
+}
+
 function safeError(error: any, fallback = 'Twilio voice webhook failed') {
   return String(error?.message || fallback)
     .replace(/(authorization|bearer|token|secret|api[_-]?key|xi-api-key)(=|:)?\s*[^\s,}]+/gi, '$1=[redacted]')
@@ -110,7 +115,7 @@ async function verifySessionToken(session: JsonRecord, token: string) {
 }
 
 async function loadContextRows(db: any, session: JsonRecord) {
-  const [tenants, leads, agents, bookingRows, knowledgeRows] = await Promise.all([
+  const [tenants, leads, agents, bookingRows, knowledgeRows, actionRows] = await Promise.all([
     unwrap(await db.database.from('tenants').select('*').eq('id', session.tenant_id).limit(1), 'Failed to load tenant'),
     session.lead_id
       ? unwrap(await db.database.from('leads').select('*').eq('tenant_id', session.tenant_id).eq('id', session.lead_id).limit(1), 'Failed to load lead')
@@ -138,6 +143,9 @@ async function loadContextRows(db: any, session: JsonRecord) {
         .limit(50),
       'Failed to load tenant knowledge documents'
     ),
+    session.bob_action_id
+      ? unwrap(await db.database.from('bob_actions').select('*').eq('tenant_id', session.tenant_id).eq('id', session.bob_action_id).limit(1), 'Failed to load Bob action')
+      : Promise.resolve([]),
   ]);
   return {
     tenant: tenants?.[0] || null,
@@ -145,6 +153,7 @@ async function loadContextRows(db: any, session: JsonRecord) {
     agent: agents?.[0] || null,
     bookingIntegration: bookingRows?.[0] || null,
     knowledgeDocuments: knowledgeRows || [],
+    bobAction: actionRows?.[0] || null,
   };
 }
 
@@ -161,7 +170,15 @@ function buildCallFirstMessage(rows: JsonRecord) {
   const tenantName = rows.tenant?.name || 'the company';
   const service = serviceInterest(rows.lead);
   const reason = service ? `your recent request about ${service}` : 'your recent request';
-  return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}, and I can help with the next step.`;
+  const preferredLanguage = rows.lead?.preferred_language;
+  const actionPayload = rows.bobAction?.payload || {};
+  if (actionPayload.reboundCall || actionPayload.rebound_call) {
+    return actionPayload.reboundOpening || `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. Sorry for the interruption — our call dropped. I’m calling back to continue helping with ${reason}.`;
+  }
+  if (preferredLanguage) {
+    return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}, and I’ll continue in ${preferredLanguage} as your preferred language.`;
+  }
+  return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}, and I can help with the next step. Before we continue, what language would you prefer we speak in?`;
 }
 
 function buildCallPrompt(rows: JsonRecord) {
@@ -175,16 +192,26 @@ function buildCallPrompt(rows: JsonRecord) {
   return [
     `You are ${agentName}, an AI outreach and booking assistant for ${tenantName}.`,
     `This is an outbound campaign call to ${leadDisplayName(rows.lead)} about ${service}.`,
+    rows.bobAction?.payload?.reboundCall || rows.bobAction?.payload?.rebound_call
+      ? 'This is a rebound call after an interrupted/drop event. Start by apologizing briefly for the interruption, then continue the same purpose without restarting awkwardly.'
+      : '',
     'Open with your identity, company, and reason for calling. Never begin with "is now a good time" or a similar permission-only line.',
+    'In the introduction, ask what language the lead would prefer to communicate in unless preferred_language is already set. When the lead answers, immediately call update_lead_status with preferredLanguage, then continue in that language.',
+    'If the lead asks to switch language mid-call, never end the call. Acknowledge the request, save preferredLanguage with update_lead_status, and continue all subsequent responses in that language.',
+    'Never end the call because of background noise, cross-talk, multiple interruptions, silence, or a language change. Treat interruptions as normal conversation. If the lead is silent, patiently prompt again instead of ending.',
+    rows.lead?.preferred_language ? `Lead preferred language: ${rows.lead.preferred_language}. Continue in this language unless the lead changes it.` : 'Lead preferred language is not set yet.',
     'After the lead responds, keep the conversation warm, concise, and useful. If they are busy, offer to send an SMS follow-up or schedule a better time.',
     'Use the tenant knowledge base for company-specific services, process, pricing guidance, objections, and policies. If knowledge is missing, do not invent details; offer to have the team follow up.',
     'Use get_lead_context before answering detailed lead/setup questions, booking, or sending follow-up messages.',
     `Booking provider: ${bookingProvider}. Booking path: ${bookingPath}.`,
-    'When the lead is interested, ask for a preferred time, use check_availability where available, and call create_booking after a time is agreed. If direct booking is not available, share the manual booking link honestly.',
+    'Before booking, qualify the lead with a short dynamic question set based on their service interest and tenant knowledge. Ask only relevant questions, one at a time, normally 3 to 7 questions. For insurance-like services, examples include marital/common-law status, children, home ownership, what they want to protect, free review interest, age range, and current insurance status. For other services, infer comparable qualification questions from the service and knowledge base.',
+    'After collecting qualification answers, call update_lead_status with qualificationQuestions, qualificationAnswers, qualificationSummary, qualificationStatus, qualificationScore when useful, and leadStage or schedulingState.',
+    'When the lead is qualified, interested, or clearly ready to book, your first attempt must be to book directly on the phone by asking for a preferred date/time and calling create_booking. Sending a booking link by SMS/email is only a fallback when the lead explicitly asks to choose a time later, asks for the link, refuses to pick a time on the call, or cannot decide.',
     'If a booking is created, the tool handles SMS confirmation and reminders when SMS consent exists.',
+    'Do not read, pronounce, or spell long URLs by default. Say that the meeting link will be sent by SMS/email. If the lead explicitly asks you to read a link aloud, read it slowly in short chunks.',
     'Use send_sms for requested texts, recaps, booking links, or follow-ups only when SMS consent exists. Respect opt-outs immediately.',
     'Record outcomes with record_call_outcome before ending when practical.',
-  ].join('\n\n');
+  ].filter(Boolean).join('\n\n');
 }
 
 function knowledgeRefs(documents: JsonRecord[]) {
@@ -225,7 +252,7 @@ async function getElevenLabsSignedUrl(agentId: string) {
   return body.signed_url;
 }
 
-function streamTwiml(reqUrl: URL, session: JsonRecord, token: string) {
+function streamTwiml(reqUrl: URL, session: JsonRecord, token: string, preConnectSay = '') {
   const bridgeUrl = session.media_bridge_url || Deno.env.get('VOICE_MEDIA_BRIDGE_WS_URL');
   if (!bridgeUrl || !String(bridgeUrl).startsWith('wss://')) {
     return xmlResponse('<?xml version="1.0" encoding="UTF-8"?><Response><Say>Voice automation is not configured yet. A team member will follow up. Goodbye.</Say><Hangup/></Response>');
@@ -237,6 +264,7 @@ function streamTwiml(reqUrl: URL, session: JsonRecord, token: string) {
   const body = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<Response>',
+    preConnectSay ? `  <Say>${xmlEscape(preConnectSay)}</Say>` : '',
     '  <Connect>',
     `    <Stream url="${xmlEscape(bridgeUrl)}" name="${xmlEscape(`voice-${session.id}`)}" statusCallback="${xmlEscape(statusCallback.toString())}" statusCallbackMethod="POST">`,
     `      <Parameter name="VoiceCallSessionId" value="${xmlEscape(session.id)}" />`,
@@ -250,6 +278,17 @@ function streamTwiml(reqUrl: URL, session: JsonRecord, token: string) {
   ].join('\n');
 
   return xmlResponse(body);
+}
+
+async function reboundPreConnectSay(db: any, session: JsonRecord) {
+  if (!session.bob_action_id) return '';
+  const rows = await unwrap(
+    await db.database.from('bob_actions').select('payload').eq('tenant_id', session.tenant_id).eq('id', session.bob_action_id).limit(1),
+    'Failed to load Bob action for rebound intro'
+  );
+  const payload = rows?.[0]?.payload || {};
+  if (!payload.reboundCall && !payload.rebound_call) return '';
+  return payload.reboundOpening || 'Sorry for the interruption — our call dropped. I am calling back so we can continue from where we left off.';
 }
 
 async function handleIntro(db: any, reqUrl: URL, body: JsonRecord) {
@@ -286,7 +325,7 @@ async function handleIntro(db: any, reqUrl: URL, body: JsonRecord) {
     }).eq('id', session.bob_action_id).eq('tenant_id', session.tenant_id);
   }
 
-  return streamTwiml(reqUrl, session, token);
+  return streamTwiml(reqUrl, session, token, await reboundPreConnectSay(db, session));
 }
 
 async function handleStatus(db: any, reqUrl: URL, body: JsonRecord) {
@@ -388,21 +427,29 @@ async function handleBridgeContext(db: any, req: Request, body: JsonRecord) {
     elevenlabs: {
       signedUrl,
     },
-    conversationConfigOverride: buildConversationConfigOverride(rows),
+    ...(Deno.env.get('ENABLE_ELEVENLABS_CONVERSATION_OVERRIDE') === 'true'
+      ? { conversationConfigOverride: buildConversationConfigOverride(rows) }
+      : {}),
     dynamicVariables: {
-      tenant_id: session.tenant_id,
-      tenant_name: rows.tenant?.name || null,
-      lead_id: session.lead_id,
-      tenant_agent_id: session.tenant_agent_id,
-      agent_name: rows.agent?.display_name || 'Bob',
-      company_name: rows.tenant?.name || null,
-      lead_name: leadDisplayName(rows.lead),
-      service_interest: serviceInterest(rows.lead) || null,
-      booking_context: rows.lead?.preferred_meeting_window || null,
-      booking_provider: rows.bookingIntegration?.provider || null,
-      booking_url: rows.bookingIntegration?.booking_url || null,
-      call_reason: serviceInterest(rows.lead) ? `Follow up about ${serviceInterest(rows.lead)}` : 'Follow up on recent request',
-      ready_knowledge_documents: rows.knowledgeDocuments?.length || 0,
+      tenant_id: dynamicString(session.tenant_id),
+      tenant_name: dynamicString(rows.tenant?.name),
+      lead_id: dynamicString(session.lead_id),
+      tenant_agent_id: dynamicString(session.tenant_agent_id),
+      agent_name: dynamicString(rows.agent?.display_name || 'Bob'),
+      company_name: dynamicString(rows.tenant?.name),
+      lead_name: dynamicString(leadDisplayName(rows.lead)),
+      service_interest: dynamicString(serviceInterest(rows.lead)),
+      preferred_language: dynamicString(rows.lead?.preferred_language),
+      booking_context: dynamicString(rows.lead?.preferred_meeting_window),
+      booking_provider: dynamicString(rows.bookingIntegration?.provider),
+      booking_url: dynamicString(rows.bookingIntegration?.booking_url),
+      call_reason: dynamicString(serviceInterest(rows.lead) ? `Follow up about ${serviceInterest(rows.lead)}` : 'Follow up on recent request'),
+      ready_knowledge_documents: dynamicString(rows.knowledgeDocuments?.length || 0),
+      current_date: dynamicString(new Date().toISOString().slice(0, 10)),
+      current_time: dynamicString(new Date().toISOString()),
+      current_timezone: dynamicString(rows.tenant?.default_timezone || 'UTC'),
+      rebound_call: dynamicString(rows.bobAction?.payload?.reboundCall || rows.bobAction?.payload?.rebound_call ? 'true' : ''),
+      previous_call_summary: dynamicString(rows.bobAction?.payload?.previousCallSummary || rows.bobAction?.payload?.previous_call_summary),
     },
   });
 }
@@ -428,12 +475,89 @@ async function logTimelineMessage(db: any, session: JsonRecord, input: JsonRecor
   return rows?.[0] || null;
 }
 
+function callObservedSeconds(session: JsonRecord, completedAt: string) {
+  if (Number.isFinite(Number(session.duration_seconds)) && Number(session.duration_seconds) > 0) {
+    return Number(session.duration_seconds);
+  }
+  const answeredAt = session.answered_at ? new Date(session.answered_at).getTime() : 0;
+  const endedAt = completedAt ? new Date(completedAt).getTime() : Date.now();
+  if (!answeredAt || Number.isNaN(answeredAt) || Number.isNaN(endedAt)) return null;
+  return Math.max(0, Math.round((endedAt - answeredAt) / 1000));
+}
+
+function isMeaningfulTranscript(transcript: any) {
+  return String(transcript || '').trim().length >= 12;
+}
+
+function isEmptyCallSummary(summary: any) {
+  const normalized = String(summary || '').trim().toLowerCase();
+  return !normalized || normalized === 'voice call ended.' || normalized === 'voice call ended';
+}
+
+function reboundAttemptFromPayload(payload: JsonRecord) {
+  return Number(payload?.reboundAttempt || payload?.rebound_attempt || 0);
+}
+
+async function scheduleReboundCall(db: any, session: JsonRecord, input: JsonRecord) {
+  if (!session.lead_id || !session.bob_action_id) return null;
+  const actionRows = await unwrap(
+    await db.database
+      .from('bob_actions')
+      .select('*')
+      .eq('tenant_id', session.tenant_id)
+      .eq('id', session.bob_action_id)
+      .limit(1),
+    'Failed to load action for rebound scheduling'
+  );
+  const action = actionRows?.[0] || null;
+  const previousPayload = action?.payload || {};
+  const nextAttempt = reboundAttemptFromPayload(previousPayload) + 1;
+  if (nextAttempt > 1) return null;
+
+  const scheduledFor = new Date(Date.now() + Number(input.reboundDelayMs || 45_000)).toISOString();
+  const reboundPayload = {
+    ...previousPayload,
+    source: 'voice_rebound',
+    reboundCall: true,
+    reboundAttempt: nextAttempt,
+    previousVoiceCallSessionId: session.id,
+    previousBobActionId: session.bob_action_id,
+    previousCallSummary: input.summary || 'Previous call was interrupted before the conversation could continue.',
+    tenantAgentId: session.tenant_agent_id || previousPayload.tenantAgentId || previousPayload.tenant_agent_id || null,
+  };
+
+  const rows = await unwrap(
+    await db.database.from('bob_actions').insert([{
+      tenant_id: session.tenant_id,
+      campaign_id: action?.campaign_id || null,
+      campaign_lead_id: action?.campaign_lead_id || null,
+      lead_id: session.lead_id,
+      conversation_id: session.conversation_id || action?.conversation_id || null,
+      action_type: 'queue_call_attempt',
+      channel: 'phone',
+      status: 'awaiting_call',
+      reason: 'Rebound call after interrupted voice stream',
+      scheduled_for: scheduledFor,
+      payload: reboundPayload,
+    }]).select(),
+    'Failed to schedule rebound call'
+  );
+  return rows?.[0] || null;
+}
+
 async function finalizeCallState(db: any, session: JsonRecord, input: JsonRecord) {
   const completedAt = firstValue(input.timestamp, nowIso());
   const outcome = String(input.outcome || 'completed');
-  const callSucceeded = outcome !== 'failed';
   const summary = input.summary || session.summary || `Voice call ended with outcome: ${outcome}`;
   const transcript = input.transcript || session.transcript || null;
+  const observedSeconds = callObservedSeconds(session, completedAt);
+  const interrupted = outcome !== 'failed'
+    && !isMeaningfulTranscript(transcript)
+    && isEmptyCallSummary(summary)
+    && (observedSeconds === null || observedSeconds <= 8);
+  const finalOutcome = interrupted ? 'interrupted' : outcome;
+  const callSucceeded = finalOutcome !== 'failed' && finalOutcome !== 'interrupted';
+  const reboundAction = interrupted ? await scheduleReboundCall(db, session, { timestamp: completedAt, summary }) : null;
 
   if (session.lead_id) {
     const leadRows = await unwrap(
@@ -451,9 +575,9 @@ async function finalizeCallState(db: any, session: JsonRecord, input: JsonRecord
 
   if (session.conversation_id) {
     await db.database.from('lead_conversations').update({
-      conversation_status: callSucceeded ? 'completed' : 'failed',
-      last_summary: summary,
-      last_intent: outcome,
+      conversation_status: callSucceeded ? 'completed' : (interrupted ? 'interrupted' : 'failed'),
+      last_summary: interrupted ? 'Call interrupted before conversation could continue. Rebound call queued.' : summary,
+      last_intent: finalOutcome,
       last_intent_at: completedAt,
       updated_at: completedAt,
       metadata: {
@@ -461,6 +585,8 @@ async function finalizeCallState(db: any, session: JsonRecord, input: JsonRecord
         voiceCallSessionId: session.id,
         elevenlabsConversationId: input.elevenlabsConversationId || session.elevenlabs_conversation_id || null,
         transcript,
+        interrupted,
+        reboundActionId: reboundAction?.id || null,
       },
     }).eq('id', session.conversation_id).eq('tenant_id', session.tenant_id);
   }
@@ -471,15 +597,18 @@ async function finalizeCallState(db: any, session: JsonRecord, input: JsonRecord
       'Failed to load action for call finalization'
     );
     await db.database.from('bob_actions').update({
-      status: callSucceeded ? 'completed' : 'failed',
+      status: callSucceeded ? 'completed' : (interrupted && reboundAction ? 'skipped' : 'failed'),
       executed_at: completedAt,
       updated_at: completedAt,
       result: {
         ...(actionRows?.[0]?.result || {}),
         voiceCallSessionId: session.id,
-        callOutcome: outcome,
-        callSummary: summary,
+        callOutcome: finalOutcome,
+        callSummary: interrupted ? 'Call interrupted before conversation could continue. Rebound call queued.' : summary,
         elevenlabsConversationId: input.elevenlabsConversationId || session.elevenlabs_conversation_id || null,
+        interrupted,
+        observedSeconds,
+        reboundActionId: reboundAction?.id || null,
       },
     }).eq('id', session.bob_action_id).eq('tenant_id', session.tenant_id);
   }
@@ -496,18 +625,21 @@ async function finalizeCallState(db: any, session: JsonRecord, input: JsonRecord
     );
     for (const campaignLead of campaignRows || []) {
       await db.database.from('campaign_leads').update({
-        status: callSucceeded ? 'running' : 'failed',
-        current_step: callSucceeded ? 'voice_call_completed' : 'voice_call_failed',
+        status: callSucceeded || reboundAction ? 'running' : 'failed',
+        current_step: callSucceeded ? 'voice_call_completed' : (reboundAction ? 'rebound_call_queued' : 'voice_call_failed'),
         updated_at: completedAt,
         metadata: {
           ...(campaignLead.metadata || {}),
           lastVoiceCallSessionId: session.id,
-          lastVoiceCallOutcome: outcome,
+          lastVoiceCallOutcome: finalOutcome,
           lastVoiceCallAt: completedAt,
+          reboundActionId: reboundAction?.id || null,
         },
       }).eq('id', campaignLead.id).eq('tenant_id', session.tenant_id);
     }
   }
+
+  return { interrupted, finalOutcome, observedSeconds, reboundAction };
 }
 
 async function handleBridgeEvent(db: any, req: Request, body: JsonRecord) {
@@ -555,18 +687,39 @@ async function handleBridgeEvent(db: any, req: Request, body: JsonRecord) {
       metadata: { source: 'elevenlabs', eventType },
     });
   } else if (eventType === 'call_ended') {
-    await finalizeCallState(db, session, {
+    const finalization = await finalizeCallState(db, session, {
       timestamp: firstValue(body.timestamp, nowIso()),
       outcome: body.outcome || 'completed',
       summary: body.summary || null,
       transcript: body.transcript || null,
       elevenlabsConversationId: body.elevenlabsConversationId || session.elevenlabs_conversation_id || null,
     });
+    if (finalization.interrupted) {
+      await db.database.from('voice_call_sessions').update({
+        status: 'failed',
+        outcome: 'interrupted',
+        summary: 'Call interrupted before conversation could continue. Rebound call queued.',
+        metadata: {
+          ...(session.metadata || {}),
+          lastBridgeEvent: eventType,
+          interrupted: true,
+          observedSeconds: finalization.observedSeconds,
+          reboundActionId: finalization.reboundAction?.id || null,
+        },
+      }).eq('id', session.id).eq('tenant_id', session.tenant_id);
+    }
     await logTimelineMessage(db, session, {
       direction: 'system',
       messageType: 'call_outcome',
-      bodyText: body.summary || `Voice call ended with outcome: ${body.outcome || 'completed'}`,
-      metadata: { source: 'voice_bridge', outcome: body.outcome || 'completed' },
+      bodyText: finalization.interrupted
+        ? 'Call was interrupted before the conversation could continue. A rebound call was queued.'
+        : (body.summary || `Voice call ended with outcome: ${body.outcome || 'completed'}`),
+      metadata: {
+        source: 'voice_bridge',
+        outcome: finalization.finalOutcome,
+        interrupted: finalization.interrupted,
+        reboundActionId: finalization.reboundAction?.id || null,
+      },
     });
   }
 

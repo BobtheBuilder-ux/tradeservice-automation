@@ -46,6 +46,22 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function bookingTimeGuard(start: Date, tenantTimezone = 'UTC') {
+  const now = new Date();
+  if (start.getTime() < now.getTime() + 5 * 60 * 1000) {
+    return {
+      success: false,
+      code: 'BOOKING_TIME_IN_PAST',
+      error: `The requested booking time ${start.toISOString()} is in the past or too soon. Current time is ${now.toISOString()} (${tenantTimezone}). Ask the lead to confirm a future date and time before booking.`,
+      requestedStartTime: start.toISOString(),
+      currentTime: now.toISOString(),
+      currentTimezone: tenantTimezone,
+      askLeadToConfirmTime: true,
+    };
+  }
+  return null;
+}
+
 function firstValue(...values: any[]) {
   for (const value of values) {
     if (value !== undefined && value !== null && String(value).trim() !== '') return value;
@@ -105,6 +121,7 @@ function publicLead(lead: JsonRecord) {
     leadStage: lead.lead_stage || null,
     schedulingState: lead.scheduling_state || null,
     preferredContactChannel: lead.preferred_contact_channel || null,
+    preferredLanguage: lead.preferred_language || null,
     preferredMeetingWindow: lead.preferred_meeting_window || null,
     serviceInterest: lead.service_interest || null,
     locationSummary: lead.location_summary || null,
@@ -324,6 +341,8 @@ function sanitizeLeadPatch(input: JsonRecord) {
     scheduling_state: 'scheduling_state',
     preferredContactChannel: 'preferred_contact_channel',
     preferred_contact_channel: 'preferred_contact_channel',
+    preferredLanguage: 'preferred_language',
+    preferred_language: 'preferred_language',
     preferredMeetingWindow: 'preferred_meeting_window',
     preferred_meeting_window: 'preferred_meeting_window',
     serviceInterest: 'service_interest',
@@ -349,8 +368,45 @@ function sanitizeLeadPatch(input: JsonRecord) {
   return patch;
 }
 
+function qualificationUpdate(input: JsonRecord, context: JsonRecord) {
+  const questions = firstValue(input.qualificationQuestions, input.qualification_questions, input.questions);
+  const answers = firstValue(input.qualificationAnswers, input.qualification_answers, input.answers);
+  if (!questions && !answers) return null;
+  return {
+    capturedAt: nowIso(),
+    source: 'elevenlabs_tool',
+    serviceInterest: firstValue(input.serviceInterest, input.service_interest, context.lead?.service_interest),
+    preferredLanguage: firstValue(input.preferredLanguage, input.preferred_language, context.lead?.preferred_language),
+    questions: questions || null,
+    answers: answers || null,
+    summary: firstValue(input.qualificationSummary, input.qualification_summary, input.qualificationNotes, input.qualification_notes, null),
+  };
+}
+
 async function updateLeadStatus(db: any, context: JsonRecord, input: JsonRecord) {
   const patch = sanitizeLeadPatch(input);
+  const qualification = qualificationUpdate(input, context);
+  if (qualification) {
+    const customFields = context.lead?.custom_fields || {};
+    const existing = customFields.aiQualification || {};
+    const existingHistory = Array.isArray(existing.history)
+      ? existing.history
+      : existing.latest
+        ? [existing.latest]
+        : existing.questions || existing.answers
+          ? [existing]
+          : [];
+    patch.custom_fields = {
+      ...customFields,
+      aiQualification: {
+        latest: qualification,
+        history: [...existingHistory, qualification].slice(-20),
+      },
+    };
+    if (!patch.qualification_notes && qualification.summary) {
+      patch.qualification_notes = qualification.summary;
+    }
+  }
   if (!Object.keys(patch).length) throw new Error('No supported lead status fields were provided');
   const data = await unwrap(
     await db.database.from('leads').update(patch).eq('tenant_id', context.tenantId).eq('id', context.leadId).select(),
@@ -402,13 +458,19 @@ async function checkAvailability(db: any, context: JsonRecord, input: JsonRecord
   if (!booking || booking.status !== 'connected') {
     return { success: false, available: false, error: 'Booking integration is not connected', alternatives: [] };
   }
-  if (booking.provider === 'manual') {
+  if (booking.provider === 'manual' || booking.provider === 'calendly') {
+    const mode = booking.provider === 'calendly' ? 'calendly_link' : 'manual_link';
     return {
       success: true,
       available: true,
-      mode: 'manual_link',
+      provider: booking.provider,
+      mode,
       bookingUrl: booking.booking_url,
-      message: 'Use the tenant manual booking link to finish scheduling.',
+      eventTypeId: booking.event_type_id || null,
+      requestedTime: firstValue(input.startTime, input.start_time, input.requestedTime, input.requested_time),
+      message: booking.provider === 'calendly'
+        ? 'Use the tenant Calendly booking link to finish scheduling. If the lead asks to book without a specific time, send this link by SMS when consent is present.'
+        : 'Use the tenant manual booking link to finish scheduling.',
     };
   }
   return {
@@ -429,9 +491,95 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
   const startTime = firstValue(input.startTime, input.start_time, input.requestedTime, input.requested_time);
   const durationMinutes = Number(firstValue(input.durationMinutes, input.duration_minutes, 30));
   const start = startTime ? new Date(startTime) : null;
+
+  if ((!start || Number.isNaN(start.getTime())) && booking.booking_url) {
+    await db.database.from('leads').update({
+      scheduling_state: 'booking_link_sent',
+      updated_at: nowIso(),
+    }).eq('tenant_id', context.tenantId).eq('id', context.leadId);
+
+    await logTimelineMessage(db, {
+      tenantId: context.tenantId,
+      leadId: context.leadId,
+      channel: 'voice',
+      messageType: 'booking_link_offered',
+      bodyText: `Booking link offered: ${booking.booking_url}`,
+      metadata: { provider: booking.provider, bookingUrl: booking.booking_url, eventTypeId: booking.event_type_id || null },
+    });
+
+    let smsConfirmationSent = false;
+    let smsError: string | null = null;
+    let emailConfirmationSent = false;
+    let emailError: string | null = null;
+    try {
+      assertLeadAllowsChannel(context.lead, 'sms');
+      await sendSms(db, context, {
+        message: firstValue(
+          input.message,
+          input.smsMessage,
+          input.sms_message,
+          `Here is the booking link to choose a time that works for you: ${booking.booking_url}`
+        ),
+      });
+      smsConfirmationSent = true;
+    } catch (error) {
+      smsError = safeError(error, 'Booking link SMS was not sent');
+    }
+
+    try {
+      await sendBookingEmail(db, context, {
+        emailType: 'booking_link',
+        meetingUrl: booking.booking_url,
+        bookingUrl: booking.booking_url,
+        message: firstValue(
+          input.emailMessage,
+          input.email_message,
+          `Here is the booking link to choose a time that works for you: ${booking.booking_url}`
+        ),
+      });
+      emailConfirmationSent = true;
+    } catch (error) {
+      emailError = safeError(error, 'Booking link email was not sent');
+    }
+
+    return {
+      success: true,
+      mode: booking.provider === 'calendly' ? 'calendly_link' : 'booking_link',
+      booking: null,
+      bookingUrl: booking.booking_url,
+      eventTypeId: booking.event_type_id || null,
+      requiresLeadSelfSchedule: true,
+      smsConfirmationSent,
+      smsError,
+      emailConfirmationSent,
+      emailError,
+    };
+  }
+
   if (!start || Number.isNaN(start.getTime())) throw new Error('A valid start_time is required to create a booking');
+  const timeGuard = bookingTimeGuard(start, firstValue(input.timezone, context.tenant.default_timezone, 'UTC'));
+  if (timeGuard) {
+    await logTimelineMessage(db, {
+      tenantId: context.tenantId,
+      leadId: context.leadId,
+      channel: 'voice',
+      messageType: 'booking_rejected',
+      bodyText: timeGuard.error,
+      status: 'failed',
+      metadata: { source: 'elevenlabs_tool', requestedStartTime: timeGuard.requestedStartTime, currentTime: timeGuard.currentTime },
+    });
+    return timeGuard;
+  }
   const endTime = firstValue(input.endTime, input.end_time) || new Date(start.getTime() + durationMinutes * 60 * 1000).toISOString();
-  const meetingUrl = firstValue(input.meetingUrl, input.meeting_url, booking.booking_url);
+  const configuredMeetingLink = firstValue(
+    input.meetingLink,
+    input.meeting_link,
+    input.meetingUrl,
+    input.meeting_url,
+    booking.metadata?.meetingLink,
+    booking.metadata?.meeting_link
+  );
+  const meetingUrl = configuredMeetingLink || null;
   const title = firstValue(input.title, `Consultation with ${publicLead(context.lead).name || 'lead'}`);
 
   const rows = await unwrap(
@@ -454,6 +602,8 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
         source: 'elevenlabs_tool',
         provider: booking.provider,
         tenantAgentId: context.agentId,
+        bookingUrl: booking.booking_url || null,
+        configuredMeetingLink: meetingUrl,
       },
     }]).select(),
     'Failed to create booking'
@@ -479,25 +629,68 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
     metadata: { meetingId: meeting?.id, meetingUrl },
   });
 
-  assertLeadAllowsChannel(context.lead, 'sms');
-  const reminderRows = [24, 1]
-    .map((hours) => ({
-      tenant_id: context.tenantId,
-      meeting_id: meeting?.id,
-      reminder_type: `${hours}h`,
-      delivery_method: 'sms',
-      scheduled_for: new Date(start.getTime() - hours * 60 * 60 * 1000).toISOString(),
-      status: new Date(start.getTime() - hours * 60 * 60 * 1000).getTime() > Date.now() ? 'pending' : 'skipped',
-    }));
-  await unwrap(
-    await db.database.from('meeting_reminders').insert(reminderRows),
-    'Failed to schedule booking reminders'
-  );
-
+  let reminderRows: JsonRecord[] = [];
   const formattedTime = start.toLocaleString('en-US', { timeZone: context.tenant.default_timezone || 'UTC', dateStyle: 'medium', timeStyle: 'short' });
-  await sendSms(db, context, { message: `Your appointment is confirmed for ${formattedTime}.${meetingUrl ? ` Meeting details: ${meetingUrl}` : ''}` });
 
-  return { success: true, booking: meeting, smsConfirmationSent: true, remindersScheduled: reminderRows.filter((row) => row.status === 'pending').length };
+  const [smsResult, emailResult] = await Promise.all([
+    (async () => {
+      try {
+        assertLeadAllowsChannel(context.lead, 'sms');
+        reminderRows = [24, 1]
+          .map((hours) => ({
+            tenant_id: context.tenantId,
+            meeting_id: meeting?.id,
+            reminder_type: `${hours}h`,
+            delivery_method: 'sms',
+            scheduled_for: new Date(start.getTime() - hours * 60 * 60 * 1000).toISOString(),
+            status: new Date(start.getTime() - hours * 60 * 60 * 1000).getTime() > Date.now() ? 'pending' : 'skipped',
+          }));
+        await unwrap(
+          await db.database.from('meeting_reminders').insert(reminderRows),
+          'Failed to schedule booking reminders'
+        );
+        await sendSms(db, context, { message: `Your appointment is confirmed for ${formattedTime}.${meetingUrl ? ` Meeting link: ${meetingUrl}` : ''}` });
+        return { sent: true, error: null };
+      } catch (error) {
+        return { sent: false, error: safeError(error, 'Booking SMS confirmation was not sent') };
+      }
+    })(),
+    (async () => {
+      try {
+        await sendBookingEmail(db, context, {
+          ...input,
+          emailType: 'booking_confirmation',
+          startTime: start.toISOString(),
+          endTime,
+          meetingUrl,
+          title,
+          message: firstValue(
+            input.emailMessage,
+            input.email_message,
+            `Your ${title} is confirmed.${meetingUrl ? ` Meeting link: ${meetingUrl}` : ''}`
+          ),
+        });
+        return { sent: true, error: null };
+      } catch (error) {
+        return { sent: false, error: safeError(error, 'Booking email confirmation was not sent') };
+      }
+    })(),
+  ]);
+
+  const smsConfirmationSent = smsResult.sent;
+  const smsError = smsResult.error;
+  const emailConfirmationSent = emailResult.sent;
+  const emailError = emailResult.error;
+
+  return {
+    success: true,
+    booking: meeting,
+    smsConfirmationSent,
+    smsError,
+    emailConfirmationSent,
+    emailError,
+    remindersScheduled: reminderRows.filter((row) => row.status === 'pending').length,
+  };
 }
 
 async function sendSms(db: any, context: JsonRecord, input: JsonRecord) {
@@ -530,9 +723,25 @@ async function sendTenantTextMessage(context: JsonRecord, channel: 'sms' | 'what
       source: 'elevenlabs_tool',
     }),
   });
-  const delivery = await response.json().catch(() => ({}));
-  if (!response.ok || !delivery?.success) throw new Error(delivery?.error || `Failed to send tenant ${channel}`);
+  const raw = await response.text().catch(() => '');
+  let delivery: JsonRecord = {};
+  try {
+    delivery = raw ? JSON.parse(raw) : {};
+  } catch {
+    delivery = { raw };
+  }
+  if (!response.ok || !delivery?.success) {
+    const message = firstValue(delivery?.error, delivery?.message, delivery?.raw, `Failed to send tenant ${channel}`);
+    throw new Error(`${message} (status ${response.status})`);
+  }
   return { success: true, providerMessageId: delivery.providerMessageId || null, status: delivery.status || 'queued' };
+}
+
+async function sendBookingEmail(db: any, context: JsonRecord, input: JsonRecord) {
+  return sendEmail(db, context, {
+    ...input,
+    emailType: firstValue(input.emailType, input.email_type, 'booking_confirmation'),
+  });
 }
 
 async function sendEmail(db: any, context: JsonRecord, input: JsonRecord) {
@@ -556,6 +765,10 @@ async function sendEmail(db: any, context: JsonRecord, input: JsonRecord) {
       to: toEmail,
       emailType: firstValue(input.emailType, input.email_type, 'elevenlabs_follow_up'),
       message: firstValue(input.message, input.text, input.bodyText, input.body_text, null),
+      meetingUrl: firstValue(input.meetingUrl, input.meeting_url, null),
+      startTime: firstValue(input.startTime, input.start_time, null),
+      endTime: firstValue(input.endTime, input.end_time, null),
+      title: firstValue(input.title, null),
       serviceInterest: context.lead.service_interest || null,
       metadata: { source: 'elevenlabs_tool', externalConversationId: context.externalConversationId || null },
     }),

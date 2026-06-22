@@ -278,7 +278,7 @@ export default function AdminDashboard() {
     setError('Queued call execution is being moved to an InsForge function. It is not available from the dashboard yet.');
   };
 
-  const handleTestSms = async (event) => {
+  const handleTestWhatsapp = async (event) => {
     event.preventDefault();
     setTestCallError('');
     setTestCallResult(null);
@@ -288,7 +288,7 @@ export default function AdminDashboard() {
       return;
     }
     if (!testCallForm.callConsent) {
-      setTestCallError('Confirm that you have permission to send this SMS.');
+      setTestCallError('Confirm that you have permission to send this WhatsApp message.');
       return;
     }
 
@@ -302,15 +302,15 @@ export default function AdminDashboard() {
           phone: testCallForm.phone.trim(),
           email: testCallForm.email.trim() || undefined,
           serviceInterest: testCallForm.serviceInterest.trim() || undefined,
-          smsConsent: true,
+          whatsappConsent: true,
         },
       });
       const response = await invokeFunction('bob-queue-actions', {
-        action: 'test-sms',
+        action: 'test-whatsapp',
         body: {
           tenantId: user?.tenantId,
           leadId: leadResponse.lead?.id,
-          message: `SMS test from your tenant. Reply STOP to opt out.`,
+          message: `WhatsApp test from your tenant. Reply STOP to opt out.`,
         },
       });
       setTestCallResult(response.message);
@@ -323,8 +323,8 @@ export default function AdminDashboard() {
       });
       await Promise.all([fetchBobActivity(), fetchLeads()]);
     } catch (err) {
-      console.error('Error sending SMS test:', err);
-      setTestCallError(err.message || 'Failed to send the SMS test.');
+      console.error('Error sending WhatsApp test:', err);
+      setTestCallError(err.message || 'Failed to send the WhatsApp test.');
     } finally {
       setTestCallLoading(false);
     }
@@ -866,16 +866,16 @@ export default function AdminDashboard() {
                 </div>
               </div>
 
-              <form onSubmit={handleTestSms} className="ops-panel p-4">
+              <form onSubmit={handleTestWhatsapp} className="ops-panel p-4">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <MessageSquare className="h-5 w-5 text-info" />
-                      <h3 className="text-sm font-semibold text-text-primary">Run SMS test</h3>
+                      <h3 className="text-sm font-semibold text-text-primary">Run WhatsApp test</h3>
                       <span className="ops-badge bg-info-soft text-info">Live providers</span>
                     </div>
                     <p className="mt-1 text-xs text-text-muted">
-                      Send one tenant-scoped SMS through Twilio using the tenant's assigned number.
+                      Send one tenant-scoped WhatsApp message through Twilio using the tenant's approved sender.
                     </p>
                   </div>
 
@@ -935,7 +935,7 @@ export default function AdminDashboard() {
                         className="mt-0.5 rounded border-border text-accent focus:ring-accent"
                         disabled={testCallLoading}
                       />
-                      <span>I have consent to send this test SMS.</span>
+                      <span>I have consent to send this test WhatsApp message.</span>
                     </label>
 
                     <button
@@ -944,7 +944,7 @@ export default function AdminDashboard() {
                       disabled={testCallLoading || !testCallForm.fullName.trim() || !testCallForm.phone.trim() || !testCallForm.callConsent}
                     >
                       <MessageSquare className="h-4 w-4" />
-                      {testCallLoading ? 'Sending SMS…' : 'Run test SMS'}
+                      {testCallLoading ? 'Sending WhatsApp…' : 'Run test WhatsApp'}
                     </button>
                   </div>
                 </div>
@@ -960,7 +960,7 @@ export default function AdminDashboard() {
                   <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-success bg-success-soft px-3 py-2 text-sm text-success">
                     <span className="inline-flex items-center gap-2 font-medium">
                       <Check className="h-4 w-4" />
-                      SMS queued
+                      WhatsApp queued
                     </span>
                     <span>To: {testCallResult.to || 'Unknown'}</span>
                     <span>Status: {testCallResult.status || 'queued'}</span>

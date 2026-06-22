@@ -60,6 +60,7 @@ const emptyPhoneForm = {
 const emptyBookingForm = {
   provider: 'manual',
   bookingUrl: '',
+  meetingLink: '',
   eventTypeId: '',
   defaultMeetingType: 'phone',
 };
@@ -169,6 +170,7 @@ export default function CompanySettingsPage() {
         setBookingForm({
           provider: data.bookingIntegration.provider || 'manual',
           bookingUrl: data.bookingIntegration.bookingUrl || '',
+          meetingLink: data.bookingIntegration.metadata?.meetingLink || '',
           eventTypeId: data.bookingIntegration.eventTypeId || '',
           defaultMeetingType: data.bookingIntegration.defaultMeetingType || 'phone',
         });
@@ -766,6 +768,12 @@ export default function CompanySettingsPage() {
                     placeholder="Booking URL"
                     value={bookingForm.bookingUrl}
                     onChange={(event) => setBookingForm({ ...bookingForm, bookingUrl: event.target.value })}
+                  />
+                  <input
+                    className="ops-input"
+                    placeholder="Meeting link after booking (Zoom, Google Meet, or Teams)"
+                    value={bookingForm.meetingLink}
+                    onChange={(event) => setBookingForm({ ...bookingForm, meetingLink: event.target.value })}
                   />
                   <input
                     className="ops-input"

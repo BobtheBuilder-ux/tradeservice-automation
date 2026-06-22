@@ -134,6 +134,7 @@ function buildDraftInstructions(action: string, context: any, input: any) {
         name: context.lead?.full_name || [context.lead?.first_name, context.lead?.last_name].filter(Boolean).join(' ') || input.leadName || input.name || null,
         email: context.lead?.email || firstValue(input.to, input.toEmail, input.to_email) || null,
         serviceInterest: context.lead?.service_interest || input.serviceInterest || input.service_interest || null,
+        preferredLanguage: context.lead?.preferred_language || input.preferredLanguage || input.preferred_language || null,
       },
       booking: {
         time: firstValue(input.time, input.startTime, input.start_time) || null,
@@ -158,12 +159,13 @@ async function draftWithOpenAI(action: string, context: any, input: any) {
   if (!apiKey) throw new Error('OPENAI_API_KEY is not configured');
   const model = Deno.env.get('OPENAI_EMAIL_MODEL') || 'gpt-5.5';
   const instructions = buildDraftInstructions(action, context, input);
+  const preferredLanguage = context.lead?.preferred_language || input.preferredLanguage || input.preferred_language;
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model,
-      instructions: instructions.content,
+      instructions: `${instructions.content}${preferredLanguage ? ` Write the email in ${preferredLanguage}.` : ''}`,
       input: JSON.stringify(instructions.input),
       text: {
         format: {
@@ -195,6 +197,38 @@ async function draftWithOpenAI(action: string, context: any, input: any) {
   }
   if (!draft?.subject || !draft?.text || !draft?.html) throw new Error('OpenAI returned an incomplete email draft');
   return { subject: draft.subject, text: draft.text, html: draft.html, model, responseId: data.id || null };
+}
+
+function formatBookingTime(input: any, tenant: any) {
+  const raw = firstValue(input.time, input.startTime, input.start_time);
+  if (!raw) return null;
+  const date = new Date(String(raw));
+  if (Number.isNaN(date.getTime())) return String(raw);
+  const timezone = input.timezone || tenant?.default_timezone || 'UTC';
+  return date.toLocaleString('en-US', { timeZone: timezone, dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function deterministicBookingDraft(action: string, context: any, input: any) {
+  if (emailIntent(action, input) !== 'booking_confirmation') return null;
+  const recipientName = context.lead?.full_name || [context.lead?.first_name, context.lead?.last_name].filter(Boolean).join(' ') || 'there';
+  const service = context.lead?.service_interest || input.serviceInterest || input.service_interest || 'consultation';
+  const time = formatBookingTime(input, context.tenant);
+  const meetingUrl = firstValue(input.meetingUrl, input.meeting_url) || null;
+  const subject = service + ' appointment confirmed';
+  const timeText = time ? ' for ' + time : '';
+  const text = [
+    'Hi ' + recipientName + ',',
+    'Your ' + service + ' appointment is confirmed' + timeText + '.',
+    meetingUrl ? 'Meeting link: ' + meetingUrl : '',
+    'Thank you.',
+  ].filter(Boolean).join('\\n\\n');
+  const html = [
+    '<p>Hi ' + escapeHtml(recipientName) + ',</p>',
+    '<p>Your ' + escapeHtml(service) + ' appointment is confirmed' + (time ? ' for <strong>' + escapeHtml(time) + '</strong>' : '') + '.</p>',
+    meetingUrl ? '<p>Meeting link: <a href="' + escapeHtml(meetingUrl) + '">' + escapeHtml(meetingUrl) + '</a></p>' : '',
+    '<p>Thank you.</p>',
+  ].filter(Boolean).join('');
+  return { subject, text, html, model: 'deterministic-booking-confirmation', responseId: null, generatedBy: 'template' };
 }
 
 async function sendViaResend(input: any, sender: any) {
@@ -238,7 +272,7 @@ async function recordDelivery(client: any, tenantId: string, input: any, sender:
     email_type: emailIntent(input.action || 'send-email', input),
     status,
     sent_at: status === 'sent' ? new Date().toISOString() : null,
-    generated_by: draft ? 'openai' : null,
+    generated_by: draft?.generatedBy || (draft ? 'openai' : null),
     generation_model: draft?.model || null,
     generation_status: generationError ? 'failed' : draft ? 'generated' : 'skipped',
     generation_error: generationError,
@@ -256,7 +290,7 @@ async function sendAutomatedEmail(client: any, action: string, input: any) {
   const context = await loadEmailContext(client, tenantId, input);
   await assertEmailAllowed(context.lead);
   const sender = await resolveSender(client, tenantId);
-  const draft = await draftWithOpenAI(action, context, input);
+  const draft = deterministicBookingDraft(action, context, input) || await draftWithOpenAI(action, context, input);
   const resend = await sendViaResend({ ...input, ...draft }, sender);
   const queued = await recordDelivery(client, tenantId, { ...input, action }, sender, draft, resend);
   return { queued, resend, sender: { resolution: sender.resolution, fromEmail: sender.fromEmail }, draft: { model: draft.model, subject: draft.subject } };

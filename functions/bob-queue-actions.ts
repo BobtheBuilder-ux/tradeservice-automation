@@ -226,6 +226,7 @@ async function startOutboundCall(input: { to: string; from: string; twimlUrl: st
     from: input.from,
     url: input.twimlUrl,
     method: 'POST',
+    timeout: 60,
     statusCallback: input.statusCallbackUrl,
     statusCallbackMethod: 'POST',
     statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
@@ -276,6 +277,52 @@ async function sendDashboardTestSms(db: any, body: JsonRecord) {
     'Failed to record SMS test message'
   );
   return { providerMessageId: sms.sid || null, status: sms.status || 'queued', message: rows?.[0] || null };
+}
+
+function whatsappAddress(phone: string) {
+  const normalized = normalizePhone(phone || '');
+  return normalized ? `whatsapp:${normalized}` : '';
+}
+
+async function sendDashboardTestWhatsapp(db: any, body: JsonRecord) {
+  const tenantId = body.tenantId || body.tenant_id || DEFAULT_TENANT_ID;
+  const lead = await loadLead(db, tenantId, body.leadId || body.lead_id);
+  if (!lead) throw new Error('Tenant lead was not found');
+  const policy = leadAllowsChannel(lead, 'whatsapp');
+  if (!policy.allowed) throw new Error(policy.reason);
+
+  const primaryPhone = await getTenantPrimaryPhoneNumber(db, tenantId);
+  if (!primaryPhone?.phone_number || primaryPhone.status !== 'active') throw new Error('Tenant primary phone number is not active');
+  if (primaryPhone.whatsapp_status !== 'active') throw new Error('Tenant WhatsApp account is not active');
+  const from = whatsappAddress(primaryPhone.phone_number);
+  const to = whatsappAddress(lead.phone || '');
+  const message = String(body.message || 'This is a tenant WhatsApp test message. Reply STOP to opt out.').trim();
+  if (!from) throw new Error('Tenant WhatsApp sender is not configured');
+  if (!to) throw new Error('Lead WhatsApp phone number is required');
+  if (!message) throw new Error('WhatsApp message body is required');
+
+  const callback = new URL('/twilio-sms-webhook', functionBaseUrl());
+  callback.searchParams.set('mode', 'status');
+  const whatsapp = await getTwilioClient().messages.create({ from, to, body: message, statusCallback: callback.toString() });
+  const conversation = await ensureLeadConversation(db, tenantId, lead, 'whatsapp');
+  const rows = await unwrap(
+    await db.database.from('lead_conversation_messages').insert([{
+      tenant_id: tenantId,
+      conversation_id: conversation?.id || null,
+      lead_id: lead.id,
+      direction: 'outbound',
+      channel: 'whatsapp',
+      message_type: 'whatsapp',
+      body_text: message,
+      provider_message_id: whatsapp.sid || null,
+      provider_status: whatsapp.status || 'queued',
+      status: whatsapp.status || 'queued',
+      sent_at: nowIso(),
+      metadata: { source: 'admin_dashboard_test_whatsapp', senderResolution: 'tenant_primary' },
+    }]).select(),
+    'Failed to record WhatsApp test message'
+  );
+  return { providerMessageId: whatsapp.sid || null, status: whatsapp.status || 'queued', message: rows?.[0] || null };
 }
 
 function leadName(lead: any) {
@@ -472,7 +519,7 @@ async function launchVoiceCall(db: any, input: JsonRecord) {
   return publicCall(call, session);
 }
 
-const bobQueueActions = ['status', 'tick', 'start-calls', 'skip', 'campaign-pause', 'campaign-resume', 'campaign-stop', 'test-lead', 'test-call', 'test-sms', 'live-start', 'live-status'];
+const bobQueueActions = ['status', 'tick', 'start-calls', 'skip', 'campaign-pause', 'campaign-resume', 'campaign-stop', 'test-lead', 'test-call', 'test-sms', 'test-whatsapp', 'live-start', 'live-status'];
 
 async function getBobRunStatus(db: any, leadId: string, conversationId?: string) {
   const { data: leads } = await db.database.from('leads').select('*').eq('id', leadId).limit(1);
@@ -514,6 +561,7 @@ async function createLiveLeadRun(db: any, body: any) {
     lead_stage: body.leadStage || 'new_inquiry',
     scheduling_state: body.schedulingState || 'not_started',
     preferred_contact_channel: body.preferredContactChannel || 'email',
+    preferred_language: body.preferredLanguage || body.preferred_language || null,
     preferred_meeting_window: body.preferredMeetingWindow || null,
     service_interest: body.serviceInterest || null,
     timeline: body.timeline || null,
@@ -848,6 +896,10 @@ export default async function(req: Request): Promise<Response> {
 
     if (action === 'test-sms') {
       return jsonResponse({ success: true, message: await sendDashboardTestSms(db, body) });
+    }
+
+    if (action === 'test-whatsapp') {
+      return jsonResponse({ success: true, message: await sendDashboardTestWhatsapp(db, body) });
     }
 
     return jsonResponse({

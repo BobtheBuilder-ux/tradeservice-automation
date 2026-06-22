@@ -172,19 +172,26 @@ function buildAgentPrompt(context: JsonRecord) {
   return [
     `You are ${agentName}, an AI outreach and booking assistant for ${tenantName}.`,
     'You qualify leads, answer questions from the tenant knowledge base, and help book consultations.',
-    'Start outbound calls with a clear introduction: say your name, the company name, and the specific reason for the call using the lead/service context. Do not open with "is now a good time" or similar permission-only language.',
+    'Start outbound calls with a clear introduction: say your name, the company name, and the specific reason for the call using the lead/service context. In that same introduction, ask what language the lead would prefer to communicate in. Do not open with "is now a good time" or similar permission-only language.',
+    'When the lead gives a preferred language, immediately call update_lead_status with preferredLanguage set to the spoken language, then continue the conversation in that language. If the lead already has preferred_language, greet them and continue in that language without asking again unless they ask to change it.',
+    'If the lead asks to switch language mid-call, never end the call. Acknowledge the request, save preferredLanguage with update_lead_status, and continue all subsequent responses in that language.',
+    'Never end the call because of background noise, cross-talk, multiple interruptions, silence, or a language change. Treat interruptions as normal conversation. If the lead is silent, patiently prompt again instead of ending.',
     'If the lead sounds busy after the introduction, offer a quick SMS follow-up or a better time. Do not pressure them.',
     'Early in the conversation, use get_lead_context when you need lead, company, campaign, or setup context. Use tenant knowledge before answering company-specific service, policy, pricing, or process questions.',
-    'When the lead is interested or asks for next steps, offer to book a consultation. Use check_availability where available, then create_booking once a time is agreed. If direct provider booking is not available, use the configured manual booking link honestly.',
-    'After a booking is created, SMS confirmation and reminders are handled by the booking tool. Do not promise SMS unless the lead has SMS consent.',
-    'If the lead asks for a text, follow-up, booking link, or recap, use send_sms only when SMS consent is present. Respect STOP/opt-out immediately.',
+    'Before booking, qualify the lead with a short dynamic question set based on their service interest and tenant knowledge. Ask only relevant questions, one at a time, normally 3 to 7 questions. For insurance-like services, examples include marital/common-law status, children, home ownership, what they want to protect, free review interest, age range, and current insurance status. For other services, infer comparable qualification questions from the service and knowledge base.',
+    'After collecting qualification answers, call update_lead_status with qualificationQuestions, qualificationAnswers, qualificationSummary, qualificationStatus, qualificationScore when useful, and leadStage or schedulingState. Do not book until the lead has answered enough qualification questions, refuses, or clearly asks to skip qualification.',
+    'Use current_date, current_time, and current_timezone to resolve relative dates like today, tomorrow, Monday, next week, or later today. Never use old example dates or training-data dates. If the date/time is ambiguous, ask one short confirmation question before booking.',
+    'When the lead is interested or asks for next steps, your first attempt must be to book the appointment directly on the phone by asking for a preferred date/time and calling create_booking. Sending a booking link by SMS/email is only a fallback when the lead explicitly asks to choose a time later, asks for the link, refuses to pick a time on the call, or cannot decide.',
+    'After a booking is created, SMS and email confirmation are handled by the booking tool when consent and provider configuration exist. If a confirmation channel fails, tell the lead which channel failed and provide the link verbally.',
+    'Do not read, pronounce, or spell long URLs by default. Say that the meeting link will be sent by SMS/email. If the lead explicitly asks you to read a link aloud, read it slowly in short chunks.',
+    'If the lead asks for a text, follow-up, booking link, or recap, use send_sms only when SMS consent is present. If the lead asks for email, use send_email only when email consent and an email address are present. Respect STOP/opt-out immediately.',
     'Stay concise, warm, truthful, and operational. If tenant knowledge is missing, say you will have the team follow up instead of inventing facts.',
     'Respect channel consent, opt-outs, and tenant boundaries. Never contact a lead outside the allowed channels.',
     `Tenant phone number: ${phoneNumber}.`,
     `Tenant sender email: ${senderEmail}.`,
     `Booking provider: ${bookingProvider}. Booking URL or event reference: ${bookingUrl}.`,
     `Tool webhook URL: ${toolWebhookUrl || 'not configured'}.`,
-    'Runtime dynamic variables may include tenant_id, tenant_name, tenant_agent_id, agent_name, lead_id, lead_name, service_interest, booking_provider, booking_url, tenant_phone_number, sender_email, and tool_webhook_url.',
+    'Runtime dynamic variables may include tenant_id, tenant_name, tenant_agent_id, agent_name, lead_id, lead_name, service_interest, preferred_language, booking_provider, booking_url, tenant_phone_number, sender_email, tool_webhook_url, current_date, current_time, and current_timezone.',
     'Use the configured webhook tools for get_lead_context, update_lead_status, check_availability, create_booking, send_sms, send_whatsapp, send_email, record_call_outcome, escalate_to_human, and mark_opt_out.',
   ].join('\n\n');
 }
@@ -199,18 +206,18 @@ function knowledgeRefs(documents: JsonRecord[]) {
     }));
 }
 
-function buildConversationConfig(context: JsonRecord, documents: JsonRecord[]) {
+function buildConversationConfig(context: JsonRecord, documents: JsonRecord[], toolIds: string[] = []) {
   const agentName = context.agent?.display_name || 'Bob';
   const tenantName = context.tenant?.name || 'the company';
   const voiceId = context.agent?.voice_id || DEFAULT_VOICE_ID;
 
   return {
     agent: {
-      first_message: `Hi, this is ${agentName} from ${tenantName}. I’m calling about your recent request and wanted to help with the next step.`,
-      language: 'en',
+      first_message: `Hi, this is ${agentName} from ${tenantName}. I’m calling about your recent request and wanted to help with the next step. Before we continue, what language would you prefer we speak in?`,
       prompt: {
         prompt: buildAgentPrompt(context),
         knowledge_base: knowledgeRefs(documents),
+        tool_ids: toolIds,
       },
     },
     tts: {
@@ -228,17 +235,189 @@ function dynamicVariableDefaults(context: JsonRecord) {
     lead_id: 'test-lead-id',
     lead_name: 'Test Lead',
     service_interest: 'consultation',
+    preferred_language: '',
     booking_provider: context.bookingIntegration?.provider || 'manual',
     booking_url: context.bookingIntegration?.booking_url || '',
     tenant_phone_number: context.phoneNumber?.phone_number || '',
     sender_email: context.emailIdentity?.from_email || '',
     tool_webhook_url: elevenLabsToolWebhookUrl(),
+    current_date: new Date().toISOString().slice(0, 10),
+    current_time: new Date().toISOString(),
+    current_timezone: context.tenant?.default_timezone || 'UTC',
   };
 }
 
 function elevenLabsToolWebhookUrl() {
   const baseUrl = Deno.env.get('INSFORGE_FUNCTION_BASE_URL');
   return baseUrl ? `${baseUrl.replace(/\/$/, '')}/elevenlabs-tool-webhooks` : '';
+}
+
+function elevenLabsToolSecret() {
+  const secret = Deno.env.get('ELEVENLABS_TOOL_SECRET');
+  if (!secret) throw new Error('ELEVENLABS_TOOL_SECRET is not configured in InsForge secrets');
+  return secret;
+}
+
+function literal(type: 'string' | 'boolean' | 'integer' | 'number', description: string, extra: JsonRecord = {}) {
+  return { type, description, ...extra };
+}
+
+function dynamic(type: 'string' | 'boolean' | 'integer' | 'number', variable: string) {
+  return { type, dynamic_variable: variable };
+}
+
+function toolBodySchema(properties: JsonRecord, required: string[] = []) {
+  const baseProperties = {
+    tenantId: dynamic('string', 'tenant_id'),
+    leadId: dynamic('string', 'lead_id'),
+    agentId: dynamic('string', 'tenant_agent_id'),
+  };
+  return {
+    type: 'object',
+    required: ['tenantId', 'leadId', 'agentId', ...required],
+    properties: {
+      ...baseProperties,
+      ...properties,
+    },
+  };
+}
+
+function webhookToolConfig(name: string, description: string, properties: JsonRecord = {}, required: string[] = []) {
+  const webhookUrl = elevenLabsToolWebhookUrl();
+  if (!webhookUrl) throw new Error('INSFORGE_FUNCTION_BASE_URL is not configured in InsForge secrets');
+
+  return {
+    tool_config: {
+      type: 'webhook',
+      name,
+      description,
+      response_timeout_secs: 20,
+      api_schema: {
+        url: `${webhookUrl}?action=${encodeURIComponent(name)}`,
+        method: 'POST',
+        content_type: 'application/json',
+        request_headers: {
+          'x-elevenlabs-tool-secret': elevenLabsToolSecret(),
+        },
+        request_body_schema: toolBodySchema(properties, required),
+      },
+    },
+  };
+}
+
+function elevenLabsToolDefinitions() {
+  return [
+    webhookToolConfig(
+      'get_lead_context',
+      'Load the current lead, tenant, campaign, consent, booking, and readiness context before answering company-specific questions or taking actions.'
+    ),
+    webhookToolConfig(
+      'check_availability',
+      'Check the tenant booking path. Use before booking. For Calendly or booking-link tenants, this returns the booking link Bob can offer or text to the lead.',
+      {
+        requestedTime: literal('string', 'Optional ISO date/time the lead requested. Include timezone if the lead gave one.'),
+        timezone: literal('string', 'Optional IANA timezone or spoken timezone for the requested time.'),
+      }
+    ),
+    webhookToolConfig(
+      'create_booking',
+      'Create a booking once the lead agrees to a time. If no time is agreed and a Calendly/booking link exists, use this to send the booking link by SMS when consent exists.',
+      {
+        startTime: literal('string', 'ISO start time agreed with the lead. Omit only when sending the booking link instead.'),
+        durationMinutes: literal('integer', 'Appointment duration in minutes. Default to 30 if unsure.'),
+        timezone: literal('string', 'IANA timezone for the appointment, such as America/New_York.'),
+        title: literal('string', 'Short meeting title based on the service interest.'),
+        meetingType: literal('string', 'Meeting type, usually consultation.'),
+        message: literal('string', 'Optional SMS text to send with the booking link if no time was agreed.'),
+      }
+    ),
+    webhookToolConfig(
+      'send_sms',
+      'Send a concise SMS follow-up, recap, or booking link to the lead. Only use when the lead has SMS consent.',
+      {
+        message: literal('string', 'The SMS body to send to the lead. Keep it concise and include the booking link when relevant.'),
+      },
+      ['message']
+    ),
+    webhookToolConfig(
+      'send_email',
+      'Send a concise email follow-up, recap, or booking confirmation to the lead. Only use when the lead has email consent and an email address.',
+      {
+        emailType: literal('string', 'Email type, such as booking_confirmation, follow_up, recap, or booking_link.'),
+        message: literal('string', 'The email intent or short message. OpenAI writes the final email copy server-side.'),
+        startTime: literal('string', 'Optional booking start time when sending a booking confirmation.'),
+        meetingUrl: literal('string', 'Optional meeting or booking link to include.'),
+      }
+    ),
+    webhookToolConfig(
+      'update_lead_status',
+      'Update the lead status, qualification, scheduling state, preferred channel, or notes after the lead gives new information.',
+      {
+        status: literal('string', 'Optional CRM status update.'),
+        qualificationStatus: literal('string', 'Optional qualification status update.'),
+        leadStage: literal('string', 'Optional lead stage update.'),
+        schedulingState: literal('string', 'Optional scheduling state, such as interested, scheduled, or booking_link_sent.'),
+        preferredLanguage: literal('string', 'The lead spoken language preference, such as English, Spanish, French, Yoruba, Igbo, Hausa, Arabic, or Portuguese. Save exactly what the lead asks for.'),
+        qualificationQuestions: literal('string', 'JSON or concise text list of the qualification questions asked in this conversation.'),
+        qualificationAnswers: literal('string', 'JSON or concise text list of the lead answers to the qualification questions.'),
+        qualificationSummary: literal('string', 'Short summary of the qualification result and why the lead is or is not ready to book.'),
+        qualificationNotes: literal('string', 'Brief notes from the conversation.'),
+        nextContactAt: literal('string', 'Optional ISO date/time for the next follow-up.'),
+      }
+    ),
+    webhookToolConfig(
+      'record_call_outcome',
+      'Record the final call outcome, summary, and transcript details at the end of the call.',
+      {
+        outcome: literal('string', 'Final call outcome, such as booked, interested, no_answer, not_interested, callback_requested, or completed.'),
+        summary: literal('string', 'Short summary of what happened on the call.'),
+        transcript: literal('string', 'Optional transcript or key call notes.'),
+      },
+      ['outcome']
+    ),
+  ];
+}
+
+async function listElevenLabsToolsByName(name: string) {
+  const response = await elevenLabsRequest(`/convai/tools?search=${encodeURIComponent(name)}&page_size=100`, {
+    method: 'GET',
+  });
+  const tools = response?.tools || response?.data || [];
+  return tools.filter((tool: JsonRecord) => tool?.tool_config?.name === name || tool?.name === name);
+}
+
+function toolId(tool: JsonRecord) {
+  return tool?.id || tool?.tool_id || tool?.toolConfig?.id || null;
+}
+
+async function ensureElevenLabsWebhookTool(definition: JsonRecord) {
+  const name = definition.tool_config.name;
+  const existing = (await listElevenLabsToolsByName(name))?.[0] || null;
+  if (existing) {
+    const id = toolId(existing);
+    if (!id) throw new Error(`ElevenLabs tool ${name} did not include an ID`);
+    await elevenLabsRequest(`/convai/tools/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(definition),
+    });
+    return id;
+  }
+
+  const created = await elevenLabsRequest('/convai/tools', {
+    method: 'POST',
+    body: JSON.stringify(definition),
+  });
+  const id = toolId(created);
+  if (!id) throw new Error(`ElevenLabs did not return a tool ID for ${name}`);
+  return id;
+}
+
+async function syncElevenLabsWebhookTools() {
+  const ids: string[] = [];
+  for (const definition of elevenLabsToolDefinitions()) {
+    ids.push(await ensureElevenLabsWebhookTool(definition));
+  }
+  return ids;
 }
 
 async function updateKnowledgeDocument(db: any, document: JsonRecord, patch: JsonRecord) {
@@ -336,10 +515,11 @@ async function updateTenantAgent(db: any, agent: JsonRecord, patch: JsonRecord) 
 async function createOrUpdateAgent(db: any, context: JsonRecord, documents: JsonRecord[]) {
   const agent = context.agent;
   const name = safeName(`${context.tenant?.name || 'Tenant'} - ${agent.display_name || 'Bob'}`, 'Tenant agent');
+  const toolIds = await syncElevenLabsWebhookTools();
   const payload = {
     name,
     tags: ['bob-automation', `tenant:${context.tenant?.id || agent.tenant_id}`, agent.template_key || 'custom-agent'],
-    conversation_config: buildConversationConfig(context, documents),
+    conversation_config: buildConversationConfig(context, documents, toolIds),
     platform_settings: {
       evaluation: {
         criteria: [],
@@ -373,6 +553,7 @@ async function createOrUpdateAgent(db: any, context: JsonRecord, documents: Json
       promptVersion: agent.prompt_version || DEFAULT_PROMPT_VERSION,
       dynamicVariableDefaults: dynamicVariableDefaults(context),
       knowledgeDocumentCount: knowledgeRefs(documents).length,
+      toolIds,
     },
   };
 
