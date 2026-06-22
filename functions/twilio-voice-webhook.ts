@@ -196,8 +196,8 @@ function buildCallPrompt(rows: JsonRecord) {
       ? 'This is a rebound call after an interrupted/drop event. Start by apologizing briefly for the interruption, then continue the same purpose without restarting awkwardly.'
       : '',
     'Open with your identity, company, and reason for calling. Never begin with "is now a good time" or a similar permission-only line.',
-    'In the introduction, ask what language the lead would prefer to communicate in unless preferred_language is already set. When the lead answers, immediately call update_lead_status with preferredLanguage, then continue in that language.',
-    'If the lead asks to switch language mid-call, never end the call. Acknowledge the request, save preferredLanguage with update_lead_status, and continue all subsequent responses in that language.',
+    'In the introduction, ask what language the lead would prefer to communicate in unless preferred_language is already set. When the lead answers, immediately call update_lead_status with preferredLanguage, then continue in that language. Do not repeat the introduction or ask the language question again after the language is selected.',
+    'If the lead asks to switch language mid-call, never end the call and never restart the introduction. Acknowledge the request, save preferredLanguage with update_lead_status, and continue all subsequent responses in that language from the current point in the conversation.',
     'Never end the call because of background noise, cross-talk, multiple interruptions, silence, or a language change. Treat interruptions as normal conversation. If the lead is silent, patiently prompt again instead of ending.',
     rows.lead?.preferred_language ? `Lead preferred language: ${rows.lead.preferred_language}. Continue in this language unless the lead changes it.` : 'Lead preferred language is not set yet.',
     'After the lead responds, keep the conversation warm, concise, and useful. If they are busy, offer to send an SMS follow-up or schedule a better time.',

@@ -32,6 +32,73 @@ function sendJson(ws, payload) {
   if (open(ws)) ws.send(JSON.stringify(payload));
 }
 
+function normalizeLanguageName(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return '';
+  const languageMap = [
+    ['French', /\b(french|francais|français|francaise|française)\b/i],
+    ['English', /\b(english|anglais)\b/i],
+    ['Spanish', /\b(spanish|espanol|español)\b/i],
+    ['Portuguese', /\b(portuguese|portugues|português)\b/i],
+    ['Arabic', /\b(arabic|arabe)\b/i],
+    ['Yoruba', /\b(yoruba|yorùbá)\b/i],
+    ['Igbo', /\b(igbo|ibo)\b/i],
+    ['Hausa', /\b(hausa)\b/i],
+  ];
+  for (const [language, pattern] of languageMap) {
+    if (pattern.test(text)) return language;
+  }
+  return String(value || '').trim();
+}
+
+function detectLanguagePreference(text) {
+  const value = String(text || '').trim();
+  if (!value) return '';
+  const lowered = value.toLowerCase();
+  const hasLanguageIntent = /\b(switch|change|speak|talk|continue|communicate|prefer|preferred|language|langue|parler|anglais|français|francais|french|english|spanish|español|portuguese|arabic|yoruba|igbo|hausa)\b/i.test(lowered);
+  if (!hasLanguageIntent) return '';
+  return normalizeLanguageName(value);
+}
+
+function preferredLanguageFromContext(context) {
+  const dynamicVariables = context?.dynamicVariables || {};
+  return normalizeLanguageName(
+    dynamicVariables.preferred_language
+      || dynamicVariables.preferredLanguage
+      || dynamicVariables.active_language
+      || ''
+  );
+}
+
+function resumeFirstMessage(language, reason) {
+  const normalized = normalizeLanguageName(language);
+  if (normalized === 'French') {
+    return 'D’accord, je vais continuer en français. Reprenons là où nous en étions.';
+  }
+  if (normalized === 'Spanish') {
+    return 'De acuerdo, continuaré en español. Sigamos desde donde nos quedamos.';
+  }
+  if (normalized === 'Portuguese') {
+    return 'Combinado, vou continuar em português. Vamos continuar de onde paramos.';
+  }
+  if (normalized === 'Arabic') {
+    return 'تمام، سأتابع بالعربية. دعنا نكمل من حيث توقفنا.';
+  }
+  if (normalized === 'Yoruba') {
+    return 'Ó dáa, màá tẹ̀síwájú ní èdè Yorùbá. Ẹ jẹ́ ká tẹ̀síwájú láti ibi tá a dúró.';
+  }
+  if (normalized === 'Igbo') {
+    return 'Ọ dị mma, aga m aga n’ihu n’asụsụ Igbo. Ka anyị gaa n’ihu ebe anyị kwụsịrị.';
+  }
+  if (normalized === 'Hausa') {
+    return 'To, zan ci gaba da Hausa. Mu ci gaba daga inda muka tsaya.';
+  }
+  if (reason && /language/i.test(reason)) {
+    return 'Absolutely, I’ll continue in your preferred language. Let’s keep going from where we left off.';
+  }
+  return 'Thanks for staying with me. I’ll continue from where we left off.';
+}
+
 async function functionRequest(mode, body) {
   if (!FUNCTION_BASE_URL) throw new Error('INSFORGE_FUNCTION_BASE_URL is not configured');
   const url = new URL('/twilio-voice-webhook', FUNCTION_BASE_URL);
@@ -55,13 +122,28 @@ function customParameters(start) {
   return start?.customParameters || start?.custom_parameters || {};
 }
 
-function buildInitiation(context) {
+function buildInitiation(context, options = {}) {
+  const dynamicVariables = {
+    ...(context.dynamicVariables || {}),
+    ...(options.activeLanguage ? { preferred_language: options.activeLanguage, active_language: options.activeLanguage } : {}),
+    ...(options.resume ? { reconnected_call: 'true', intro_already_played: 'true' } : {}),
+  };
   const payload = {
     type: 'conversation_initiation_client_data',
-    dynamic_variables: context.dynamicVariables || {},
+    dynamic_variables: dynamicVariables,
   };
-  if (context.conversationConfigOverride) {
-    payload.conversation_config_override = context.conversationConfigOverride;
+  if (context.conversationConfigOverride || options.resume) {
+    payload.conversation_config_override = {
+      ...(context.conversationConfigOverride || {}),
+      agent: {
+        ...((context.conversationConfigOverride || {}).agent || {}),
+        ...(options.resume
+          ? {
+              first_message: resumeFirstMessage(options.activeLanguage, options.resumeReason),
+            }
+          : {}),
+      },
+    };
   }
   return payload;
 }
@@ -93,6 +175,11 @@ function handleTwilioConnection(twilioWs, req) {
     twilioStoppedAt: 0,
     elevenlabsReconnectAttempts: 0,
     elevenlabsReconnectTimer: null,
+    initialIntroSent: false,
+    callStartedPosted: false,
+    activeLanguage: '',
+    languageSwitchRequested: false,
+    lastUserTranscriptAt: 0,
   };
 
   async function closeBoth(code = 1000, reason = 'bridge closing') {
@@ -143,11 +230,12 @@ function handleTwilioConnection(twilioWs, req) {
           twilioCallSid: state.callSid,
         });
         state.session = context.voiceCallSession || state.session;
-        await connectElevenLabs(context);
+        await connectElevenLabs(context, { resume: true, resumeReason: reason });
         await postBridgeEvent(state.session, state.token, {
           type: 'bridge_reconnected',
           reason,
           attempts: state.elevenlabsReconnectAttempts,
+          activeLanguage: state.activeLanguage || undefined,
           twilioStreamSid: state.streamSid,
           timestamp: new Date().toISOString(),
         });
@@ -166,18 +254,27 @@ function handleTwilioConnection(twilioWs, req) {
     }, Math.min(1000 + state.elevenlabsReconnectAttempts * 500, 5000));
   }
 
-  async function connectElevenLabs(context) {
+  async function connectElevenLabs(context, options = {}) {
     const elevenlabsWs = new WebSocket(context.elevenlabs.signedUrl);
     state.elevenlabsWs = elevenlabsWs;
+    state.activeLanguage = state.activeLanguage || preferredLanguageFromContext(context);
 
     elevenlabsWs.on('open', () => {
-      state.elevenlabsReconnectAttempts = 0;
-      sendJson(elevenlabsWs, buildInitiation(context));
-      postBridgeEvent(state.session, state.token, {
-        type: 'call_started',
-        twilioStreamSid: state.streamSid,
-        timestamp: new Date().toISOString(),
-      });
+      const resume = Boolean(options.resume || state.initialIntroSent);
+      sendJson(elevenlabsWs, buildInitiation(context, {
+        resume,
+        resumeReason: options.resumeReason,
+        activeLanguage: state.activeLanguage,
+      }));
+      state.initialIntroSent = true;
+      if (!state.callStartedPosted) {
+        state.callStartedPosted = true;
+        postBridgeEvent(state.session, state.token, {
+          type: 'call_started',
+          twilioStreamSid: state.streamSid,
+          timestamp: new Date().toISOString(),
+        });
+      }
     });
 
     elevenlabsWs.on('message', (raw) => {
@@ -211,9 +308,16 @@ function handleTwilioConnection(twilioWs, req) {
         const text = data.user_transcription_event?.user_transcript || '';
         if (text) {
           state.userTranscript.push(text);
+          state.lastUserTranscriptAt = Date.now();
+          const requestedLanguage = detectLanguagePreference(text);
+          if (requestedLanguage) {
+            state.activeLanguage = requestedLanguage;
+            state.languageSwitchRequested = true;
+          }
           postBridgeEvent(state.session, state.token, {
             type: 'user_transcript',
             text,
+            ...(requestedLanguage ? { detectedLanguagePreference: requestedLanguage } : {}),
             twilioStreamSid: state.streamSid,
           });
         }

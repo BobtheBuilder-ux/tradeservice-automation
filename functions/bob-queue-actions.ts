@@ -89,6 +89,19 @@ async function getTenantPrimaryPhoneNumber(db: any, tenantId: string) {
   return Array.isArray(data) ? data[0] || null : data || null;
 }
 
+async function getTenantPhoneNumberForChannel(db: any, tenantId: string, channel: 'voice' | 'sms' | 'whatsapp') {
+  if (!tenantId) return null;
+  let query = db.database.from('tenant_phone_numbers').select('*').eq('tenant_id', tenantId).eq('status', 'active');
+  if (channel === 'voice') query = query.eq('voice_enabled', true);
+  if (channel === 'sms') query = query.eq('sms_enabled', true);
+  if (channel === 'whatsapp') query = query.eq('whatsapp_status', 'active');
+  const rows = await unwrap(
+    await query.order('is_primary', { ascending: false }).order('created_at', { ascending: true }).limit(1),
+    `Failed to load tenant ${channel} phone number`
+  );
+  return rows?.[0] || null;
+}
+
 async function loadTenant(db: any, tenantId: string) {
   if (!tenantId) return null;
   const rows = await unwrap(
@@ -240,7 +253,7 @@ async function sendDashboardTestSms(db: any, body: JsonRecord) {
   const policy = leadAllowsChannel(lead, 'sms');
   if (!policy.allowed) throw new Error(policy.reason);
 
-  const primaryPhone = await getTenantPrimaryPhoneNumber(db, tenantId);
+  const primaryPhone = await getTenantPhoneNumberForChannel(db, tenantId, 'sms');
   const fallbackFrom = normalizePhone(Deno.env.get('TWILIO_PHONE_NUMBER') || '');
   const tenantFrom = primaryPhone?.status === 'active' && primaryPhone?.sms_enabled ? normalizePhone(primaryPhone.phone_number) : '';
   const from = tenantFrom || fallbackFrom;
@@ -284,6 +297,15 @@ function whatsappAddress(phone: string) {
   return normalized ? `whatsapp:${normalized}` : '';
 }
 
+function whatsappTemplateVariables(lead: any) {
+  return JSON.stringify({
+    '1': leadName(lead),
+    '2': 'Bob',
+    '3': 'Bob Automation',
+    '4': lead?.service_interest || 'your request',
+  });
+}
+
 async function sendDashboardTestWhatsapp(db: any, body: JsonRecord) {
   const tenantId = body.tenantId || body.tenant_id || DEFAULT_TENANT_ID;
   const lead = await loadLead(db, tenantId, body.leadId || body.lead_id);
@@ -291,7 +313,7 @@ async function sendDashboardTestWhatsapp(db: any, body: JsonRecord) {
   const policy = leadAllowsChannel(lead, 'whatsapp');
   if (!policy.allowed) throw new Error(policy.reason);
 
-  const primaryPhone = await getTenantPrimaryPhoneNumber(db, tenantId);
+  const primaryPhone = await getTenantPhoneNumberForChannel(db, tenantId, 'whatsapp');
   if (!primaryPhone?.phone_number || primaryPhone.status !== 'active') throw new Error('Tenant primary phone number is not active');
   if (primaryPhone.whatsapp_status !== 'active') throw new Error('Tenant WhatsApp account is not active');
   const from = whatsappAddress(primaryPhone.phone_number);
@@ -303,7 +325,11 @@ async function sendDashboardTestWhatsapp(db: any, body: JsonRecord) {
 
   const callback = new URL('/twilio-sms-webhook', functionBaseUrl());
   callback.searchParams.set('mode', 'status');
-  const whatsapp = await getTwilioClient().messages.create({ from, to, body: message, statusCallback: callback.toString() });
+  const contentSid = Deno.env.get('TWILIO_WHATSAPP_TEMPLATE_CONTENT_SID');
+  const whatsappPayload: any = contentSid
+    ? { from, to, contentSid, contentVariables: whatsappTemplateVariables(lead), statusCallback: callback.toString() }
+    : { from, to, body: message, statusCallback: callback.toString() };
+  const whatsapp = await getTwilioClient().messages.create(whatsappPayload);
   const conversation = await ensureLeadConversation(db, tenantId, lead, 'whatsapp');
   const rows = await unwrap(
     await db.database.from('lead_conversation_messages').insert([{
@@ -313,12 +339,12 @@ async function sendDashboardTestWhatsapp(db: any, body: JsonRecord) {
       direction: 'outbound',
       channel: 'whatsapp',
       message_type: 'whatsapp',
-      body_text: message,
+      body_text: contentSid ? `WhatsApp template sent: ${contentSid}` : message,
       provider_message_id: whatsapp.sid || null,
       provider_status: whatsapp.status || 'queued',
       status: whatsapp.status || 'queued',
       sent_at: nowIso(),
-      metadata: { source: 'admin_dashboard_test_whatsapp', senderResolution: 'tenant_primary' },
+      metadata: { source: 'admin_dashboard_test_whatsapp', senderResolution: 'tenant_primary', contentSid: contentSid || null },
     }]).select(),
     'Failed to record WhatsApp test message'
   );
@@ -340,7 +366,7 @@ async function sendTenantSms(db: any, input: { tenantId: string; lead: any; mess
   const policy = leadAllowsChannel(input.lead, 'sms');
   if (!policy.allowed) throw new Error(policy.reason);
 
-  const primaryPhone = await getTenantPrimaryPhoneNumber(db, input.tenantId);
+  const primaryPhone = await getTenantPhoneNumberForChannel(db, input.tenantId, 'sms');
   const fallbackFrom = normalizePhone(Deno.env.get('TWILIO_PHONE_NUMBER') || '');
   const tenantFrom = primaryPhone?.status === 'active' && primaryPhone?.sms_enabled ? normalizePhone(primaryPhone.phone_number) : '';
   const from = tenantFrom || fallbackFrom;
@@ -402,7 +428,7 @@ async function createVoiceCallSession(db: any, input: JsonRecord) {
   if (!tenantAgent?.id) throw new Error('No tenant AI agent is configured for this call');
   if (!tenantAgent.elevenlabs_agent_id) throw new Error('Tenant AI agent is not synced to ElevenLabs yet');
 
-  const primaryPhoneNumber = await getTenantPrimaryPhoneNumber(db, tenantId);
+  const primaryPhoneNumber = await getTenantPhoneNumberForChannel(db, tenantId, 'voice');
   const from = normalizePhone(input.from || primaryPhoneNumber?.phone_number || Deno.env.get('TWILIO_PHONE_NUMBER') || '');
   const to = normalizePhone(input.to || lead?.phone || '');
   if (!from) throw new Error('No tenant or fallback caller phone number is configured');

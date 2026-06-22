@@ -93,6 +93,15 @@ async function getTenantPrimaryPhoneNumber(db: any, tenantId: string) {
   return Array.isArray(data) ? data[0] || null : data || null;
 }
 
+async function getTenantPhoneNumberForChannel(db: any, tenantId: string, channel: 'sms' | 'whatsapp') {
+  let query = db.database.from('tenant_phone_numbers').select('*').eq('tenant_id', tenantId).eq('status', 'active');
+  if (channel === 'sms') query = query.eq('sms_enabled', true);
+  if (channel === 'whatsapp') query = query.eq('whatsapp_status', 'active');
+  const { data, error } = await query.order('is_primary', { ascending: false }).order('created_at', { ascending: true }).limit(1);
+  if (error) throw new Error(error.message || `Failed to load tenant ${channel} phone number`);
+  return data?.[0] || null;
+}
+
 async function findLeadByPhone(db: any, tenantId: string, phone: unknown) {
   const normalized = normalizePhone(phone);
   if (!normalized) return null;
@@ -183,7 +192,7 @@ async function insertMessage(db: any, row: Record<string, unknown>) {
 async function sendTwilioMessage(db: any, input: { tenantId: string; lead: any; channel: 'sms' | 'whatsapp'; body: string; replyToMessageId?: string | null; source: string; ai?: any }) {
   const policy = channelAllowed(input.lead, input.channel);
   if (!policy.allowed) throw new Error(policy.reason);
-  const phoneNumber = await getTenantPrimaryPhoneNumber(db, input.tenantId);
+  const phoneNumber = await getTenantPhoneNumberForChannel(db, input.tenantId, input.channel);
   const fallbackSender = normalizePhone(Deno.env.get('TWILIO_PHONE_NUMBER'));
   const tenantSenderActive = Boolean(phoneNumber?.phone_number && phoneNumber.status === 'active');
   if (input.channel === 'sms' && !tenantSenderActive && !fallbackSender) throw new Error('No tenant or fallback SMS sender is configured');
@@ -200,10 +209,26 @@ async function sendTwilioMessage(db: any, input: { tenantId: string; lead: any; 
   const recipient = input.channel === 'whatsapp' ? whatsappAddress(to) : to;
   const callback = new URL('/twilio-sms-webhook', functionBaseUrl());
   callback.searchParams.set('mode', 'status');
+  const contentSid = input.channel === 'whatsapp' && !input.replyToMessageId
+    ? Deno.env.get('TWILIO_WHATSAPP_TEMPLATE_CONTENT_SID')
+    : '';
+  const form = new URLSearchParams({ From: from, To: recipient, StatusCallback: callback.toString() });
+  if (contentSid) {
+    const leadName = input.lead?.full_name || [input.lead?.first_name, input.lead?.last_name].filter(Boolean).join(' ') || 'there';
+    form.set('ContentSid', contentSid);
+    form.set('ContentVariables', JSON.stringify({
+      '1': leadName,
+      '2': 'Bob',
+      '3': 'Bob Automation',
+      '4': input.lead?.service_interest || 'your request',
+    }));
+  } else {
+    form.set('Body', input.body);
+  }
   const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`, {
     method: 'POST',
     headers: { Authorization: `Basic ${btoa(`${accountSid}:${authToken}`)}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ From: from, To: recipient, Body: input.body, StatusCallback: callback.toString() }),
+    body: form,
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(result?.message || `Twilio ${input.channel} failed with ${response.status}`);
@@ -214,7 +239,7 @@ async function sendTwilioMessage(db: any, input: { tenantId: string; lead: any; 
     provider_message_id: result.sid || null, provider_status: result.status || 'queued', status: result.status || 'queued',
     sent_at: new Date().toISOString(), reply_to_message_id: input.replyToMessageId || null,
     ai_model: input.ai?.model || null, ai_response_id: input.ai?.responseId || null,
-    metadata: { source: input.source, twilioStatus: result.status || null },
+    metadata: { source: input.source, twilioStatus: result.status || null, contentSid: contentSid || null },
   });
   await db.database.from('lead_conversations').update({ last_outbound_at: new Date().toISOString(), updated_at: new Date().toISOString() })
     .eq('tenant_id', input.tenantId).eq('id', conversation.id);
@@ -291,7 +316,7 @@ async function handleStatus(db: any, tenantId: string, lead: any, data: Record<s
   const smsMessage = rows?.[0];
   if (!smsMessage || smsMessage.channel !== 'sms' || !FAILURE_STATUSES.has(providerStatus) || smsMessage.fallback_channel || !lead) return;
   if (!channelAllowed(lead, 'whatsapp').allowed) return;
-  const phoneNumber = await getTenantPrimaryPhoneNumber(db, tenantId);
+  const phoneNumber = await getTenantPhoneNumberForChannel(db, tenantId, 'whatsapp');
   if (phoneNumber?.whatsapp_status !== 'active') return;
   try {
     const fallback = await sendTwilioMessage(db, {
