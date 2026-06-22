@@ -148,6 +148,7 @@ async function loadContextRows(db: any, session: JsonRecord) {
       : Promise.resolve([]),
   ]);
   return {
+    session,
     tenant: tenants?.[0] || null,
     lead: leads?.[0] || null,
     agent: agents?.[0] || null,
@@ -172,8 +173,9 @@ function buildCallFirstMessage(rows: JsonRecord) {
   const reason = service ? `your recent request about ${service}` : 'your recent request';
   const preferredLanguage = rows.lead?.preferred_language;
   const actionPayload = rows.bobAction?.payload || {};
-  if (actionPayload.reboundCall || actionPayload.rebound_call) {
-    return actionPayload.reboundOpening || `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. Sorry for the interruption — our call dropped. I’m calling back to continue helping with ${reason}.`;
+  const sessionMetadata = rows.session?.metadata || {};
+  if (actionPayload.reboundCall || actionPayload.rebound_call || sessionMetadata.reboundCall || sessionMetadata.rebound_call) {
+    return actionPayload.reboundOpening || sessionMetadata.reboundOpening || `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. Sorry for the interruption — our call dropped. I’m calling back to continue helping with ${reason}.`;
   }
   if (preferredLanguage) {
     return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}, and I’ll continue in ${preferredLanguage} as your preferred language.`;
@@ -192,7 +194,7 @@ function buildCallPrompt(rows: JsonRecord) {
   return [
     `You are ${agentName}, an AI outreach and booking assistant for ${tenantName}.`,
     `This is an outbound campaign call to ${leadDisplayName(rows.lead)} about ${service}.`,
-    rows.bobAction?.payload?.reboundCall || rows.bobAction?.payload?.rebound_call
+    rows.bobAction?.payload?.reboundCall || rows.bobAction?.payload?.rebound_call || rows.session?.metadata?.reboundCall || rows.session?.metadata?.rebound_call
       ? 'This is a rebound call after an interrupted/drop event. Start by apologizing briefly for the interruption, then continue the same purpose without restarting awkwardly.'
       : '',
     'Open with your identity, company, and reason for calling. Never begin with "is now a good time" or a similar permission-only line.',
@@ -281,6 +283,9 @@ function streamTwiml(reqUrl: URL, session: JsonRecord, token: string, preConnect
 }
 
 async function reboundPreConnectSay(db: any, session: JsonRecord) {
+  if (session.metadata?.reboundCall || session.metadata?.rebound_call) {
+    return session.metadata?.reboundOpening || 'Sorry for the interruption — our call dropped. I am calling back so we can continue from where we left off.';
+  }
   if (!session.bob_action_id) return '';
   const rows = await unwrap(
     await db.database.from('bob_actions').select('payload').eq('tenant_id', session.tenant_id).eq('id', session.bob_action_id).limit(1),

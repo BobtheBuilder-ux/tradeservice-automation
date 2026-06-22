@@ -180,7 +180,38 @@ function handleTwilioConnection(twilioWs, req) {
     activeLanguage: '',
     languageSwitchRequested: false,
     lastUserTranscriptAt: 0,
+    lastAgentResponse: '',
+    duplicateAgentResponseCount: 0,
+    introLoopRecoveryInProgress: false,
+    suppressAgentAudioUntil: 0,
   };
+
+  function normalizedResponse(text) {
+    return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  }
+
+  function recoverFromRepeatedAgentIntro(text) {
+    if (state.introLoopRecoveryInProgress || state.twilioStopped || !open(twilioWs)) return;
+    state.introLoopRecoveryInProgress = true;
+    state.suppressAgentAudioUntil = Date.now() + 8000;
+    sendJson(twilioWs, { event: 'clear', streamSid: state.streamSid });
+    postBridgeEvent(state.session, state.token, {
+      type: 'bridge_error',
+      error: 'Repeated agent intro detected; reconnecting ElevenLabs in resume mode.',
+      repeatedText: text,
+      duplicateCount: state.duplicateAgentResponseCount,
+      twilioStreamSid: state.streamSid,
+      timestamp: new Date().toISOString(),
+    });
+    if (open(state.elevenlabsWs)) {
+      state.elevenlabsWs.close(1000, 'intro loop recovery');
+    } else {
+      scheduleElevenLabsReconnect('intro loop recovery');
+    }
+    setTimeout(() => {
+      state.introLoopRecoveryInProgress = false;
+    }, 10_000);
+  }
 
   async function closeBoth(code = 1000, reason = 'bridge closing') {
     if (state.closed) return;
@@ -326,16 +357,30 @@ function handleTwilioConnection(twilioWs, req) {
       if (data.type === 'agent_response') {
         const text = data.agent_response_event?.agent_response || '';
         if (text) {
+          const normalized = normalizedResponse(text);
+          const repeated = normalized && normalized === normalizedResponse(state.lastAgentResponse);
+          if (repeated && state.userTranscript.length === 0) {
+            state.duplicateAgentResponseCount += 1;
+          } else {
+            state.duplicateAgentResponseCount = 0;
+          }
+          state.lastAgentResponse = text;
+          if (state.duplicateAgentResponseCount >= 2) {
+            recoverFromRepeatedAgentIntro(text);
+            return;
+          }
           state.agentResponses.push(text);
           postBridgeEvent(state.session, state.token, {
             type: 'agent_response',
             text,
+            ...(state.duplicateAgentResponseCount ? { duplicateAgentResponseCount: state.duplicateAgentResponseCount } : {}),
             twilioStreamSid: state.streamSid,
           });
         }
       }
 
       if (data.type === 'audio' && SEND_ELEVENLABS_AUDIO_TO_TWILIO) {
+        if (Date.now() < state.suppressAgentAudioUntil) return;
         const audioBase64 = data.audio_event?.audio_base_64;
         const payload = audioBase64
           ? pcm16Base64ToTwilioMuLaw(audioBase64, ELEVENLABS_PCM_SAMPLE_RATE)

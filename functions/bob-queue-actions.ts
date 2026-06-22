@@ -464,6 +464,12 @@ async function createVoiceCallSession(db: any, input: JsonRecord) {
         to,
         from,
         agentDisplayName: tenantAgent.display_name,
+        ...(input.reboundCall || input.rebound_call
+          ? {
+              reboundCall: true,
+              reboundOpening: input.reboundOpening || input.rebound_opening || null,
+            }
+          : {}),
       },
     }]).select(),
     'Failed to create voice call session'
