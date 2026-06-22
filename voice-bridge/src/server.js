@@ -132,11 +132,11 @@ function buildInitiation(context, options = {}) {
     type: 'conversation_initiation_client_data',
     dynamic_variables: dynamicVariables,
   };
-  if (context.conversationConfigOverride || options.resume) {
+  if ((context.conversationConfigOverride && !options.disableOverride) || options.resume) {
     payload.conversation_config_override = {
-      ...(context.conversationConfigOverride || {}),
+      ...(!options.disableOverride ? (context.conversationConfigOverride || {}) : {}),
       agent: {
-        ...((context.conversationConfigOverride || {}).agent || {}),
+        ...(!options.disableOverride ? ((context.conversationConfigOverride || {}).agent || {}) : {}),
         ...(options.resume
           ? {
               first_message: resumeFirstMessage(options.activeLanguage, options.resumeReason),
@@ -184,7 +184,42 @@ function handleTwilioConnection(twilioWs, req) {
     duplicateAgentResponseCount: 0,
     introLoopRecoveryInProgress: false,
     suppressAgentAudioUntil: 0,
+    elevenlabsAudioChunks: 0,
+    noAudioTimer: null,
+    noAudioRecoveryAttempted: false,
+    disableConversationOverride: false,
   };
+
+  function clearNoAudioTimer() {
+    if (state.noAudioTimer) {
+      clearTimeout(state.noAudioTimer);
+      state.noAudioTimer = null;
+    }
+  }
+
+  function scheduleNoAudioRecovery(context, reason = 'no ElevenLabs audio after initiation') {
+    clearNoAudioTimer();
+    state.noAudioTimer = setTimeout(() => {
+      state.noAudioTimer = null;
+      if (state.closed || state.twilioStopped || !open(twilioWs)) return;
+      if (state.elevenlabsAudioChunks > 0 || state.agentResponses.length > 0) return;
+      postBridgeEvent(state.session, state.token, {
+        type: 'bridge_error',
+        error: reason + '; retrying without conversation override.',
+        twilioStreamSid: state.streamSid,
+        timestamp: new Date().toISOString(),
+      });
+      if (!state.noAudioRecoveryAttempted) {
+        state.noAudioRecoveryAttempted = true;
+        state.disableConversationOverride = true;
+        if (open(state.elevenlabsWs)) {
+          state.elevenlabsWs.close(1000, 'no audio recovery');
+        } else {
+          scheduleElevenLabsReconnect('no audio recovery');
+        }
+      }
+    }, Number(process.env.ELEVENLABS_NO_AUDIO_TIMEOUT_MS || 9000));
+  }
 
   function normalizedResponse(text) {
     return String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -216,18 +251,22 @@ function handleTwilioConnection(twilioWs, req) {
   async function closeBoth(code = 1000, reason = 'bridge closing') {
     if (state.closed) return;
     state.closed = true;
+    clearNoAudioTimer();
     if (open(state.elevenlabsWs)) state.elevenlabsWs.close(code, reason);
     if (open(twilioWs)) twilioWs.close(code, reason);
     if (state.session?.id && state.token) {
+      const noAgentAudio = state.elevenlabsAudioChunks === 0 && state.agentResponses.length === 0 && state.userTranscript.length === 0;
       await postBridgeEvent(state.session, state.token, {
         type: 'call_ended',
         twilioStreamSid: state.streamSid,
-        outcome: 'completed',
-        summary: state.agentResponses.at(-1) || state.userTranscript.at(-1) || 'Voice call ended.',
+        outcome: noAgentAudio ? 'failed' : 'completed',
+        summary: noAgentAudio ? 'Voice call ended before ElevenLabs emitted agent audio.' : (state.agentResponses.at(-1) || state.userTranscript.at(-1) || 'Voice call ended.'),
         transcript: [
           ...state.userTranscript.map((text) => 'Lead: ' + text),
           ...state.agentResponses.map((text) => 'Agent: ' + text),
         ].join('\n'),
+        noAgentAudio,
+        elevenlabsAudioChunks: state.elevenlabsAudioChunks,
         elevenlabsConversationId: state.elevenlabsConversationId || undefined,
         timestamp: new Date().toISOString(),
       });
@@ -261,7 +300,7 @@ function handleTwilioConnection(twilioWs, req) {
           twilioCallSid: state.callSid,
         });
         state.session = context.voiceCallSession || state.session;
-        await connectElevenLabs(context, { resume: true, resumeReason: reason });
+        await connectElevenLabs(context, { resume: true, resumeReason: reason, disableOverride: state.disableConversationOverride });
         await postBridgeEvent(state.session, state.token, {
           type: 'bridge_reconnected',
           reason,
@@ -296,8 +335,17 @@ function handleTwilioConnection(twilioWs, req) {
         resume,
         resumeReason: options.resumeReason,
         activeLanguage: state.activeLanguage,
+        disableOverride: options.disableOverride || state.disableConversationOverride,
       }));
       state.initialIntroSent = true;
+      postBridgeEvent(state.session, state.token, {
+        type: 'initiation_sent',
+        resume,
+        overrideDisabled: Boolean(options.disableOverride || state.disableConversationOverride),
+        twilioStreamSid: state.streamSid,
+        timestamp: new Date().toISOString(),
+      });
+      scheduleNoAudioRecovery(context);
       if (!state.callStartedPosted) {
         state.callStartedPosted = true;
         postBridgeEvent(state.session, state.token, {
@@ -357,6 +405,7 @@ function handleTwilioConnection(twilioWs, req) {
       if (data.type === 'agent_response') {
         const text = data.agent_response_event?.agent_response || '';
         if (text) {
+          clearNoAudioTimer();
           const normalized = normalizedResponse(text);
           const repeated = normalized && normalized === normalizedResponse(state.lastAgentResponse);
           if (repeated && state.userTranscript.length === 0) {
@@ -382,6 +431,17 @@ function handleTwilioConnection(twilioWs, req) {
       if (data.type === 'audio' && SEND_ELEVENLABS_AUDIO_TO_TWILIO) {
         if (Date.now() < state.suppressAgentAudioUntil) return;
         const audioBase64 = data.audio_event?.audio_base_64;
+        if (audioBase64) {
+          state.elevenlabsAudioChunks += 1;
+          if (state.elevenlabsAudioChunks === 1) {
+            clearNoAudioTimer();
+            postBridgeEvent(state.session, state.token, {
+              type: 'agent_audio_started',
+              twilioStreamSid: state.streamSid,
+              timestamp: new Date().toISOString(),
+            });
+          }
+        }
         const payload = audioBase64
           ? pcm16Base64ToTwilioMuLaw(audioBase64, ELEVENLABS_PCM_SAMPLE_RATE)
           : null;

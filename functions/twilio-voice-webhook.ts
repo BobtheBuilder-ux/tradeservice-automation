@@ -227,6 +227,14 @@ function knowledgeRefs(documents: JsonRecord[]) {
 }
 
 function buildConversationConfigOverride(rows: JsonRecord) {
+  const mode = String(Deno.env.get('ELEVENLABS_CONVERSATION_OVERRIDE_MODE') || 'first_message').toLowerCase();
+  if (mode !== 'full') {
+    return {
+      agent: {
+        first_message: buildCallFirstMessage(rows),
+      },
+    };
+  }
   return {
     agent: {
       first_message: buildCallFirstMessage(rows),
@@ -453,7 +461,7 @@ async function handleBridgeContext(db: any, req: Request, body: JsonRecord) {
       current_date: dynamicString(new Date().toISOString().slice(0, 10)),
       current_time: dynamicString(new Date().toISOString()),
       current_timezone: dynamicString(rows.tenant?.default_timezone || 'UTC'),
-      rebound_call: dynamicString(rows.bobAction?.payload?.reboundCall || rows.bobAction?.payload?.rebound_call ? 'true' : ''),
+      rebound_call: dynamicString(rows.bobAction?.payload?.reboundCall || rows.bobAction?.payload?.rebound_call || rows.session?.metadata?.reboundCall || rows.session?.metadata?.rebound_call ? 'true' : ''),
       previous_call_summary: dynamicString(rows.bobAction?.payload?.previousCallSummary || rows.bobAction?.payload?.previous_call_summary),
     },
   });
@@ -559,7 +567,7 @@ async function finalizeCallState(db: any, session: JsonRecord, input: JsonRecord
   const interrupted = outcome !== 'failed'
     && !isMeaningfulTranscript(transcript)
     && isEmptyCallSummary(summary)
-    && (observedSeconds === null || observedSeconds <= 8);
+    && (observedSeconds === null || observedSeconds <= 90);
   const finalOutcome = interrupted ? 'interrupted' : outcome;
   const callSucceeded = finalOutcome !== 'failed' && finalOutcome !== 'interrupted';
   const reboundAction = interrupted ? await scheduleReboundCall(db, session, { timestamp: completedAt, summary }) : null;
