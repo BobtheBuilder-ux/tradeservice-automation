@@ -86,6 +86,8 @@ export default function AdminDashboard() {
   const [showDeleteAllLeadsModal, setShowDeleteAllLeadsModal] = useState(false);
   const [deleteAllLeadsConfirmation, setDeleteAllLeadsConfirmation] = useState('');
   const [deleteAllLeadsLoading, setDeleteAllLeadsLoading] = useState(false);
+  const [leadRecallBusy, setLeadRecallBusy] = useState('');
+  const [leadRecallMessage, setLeadRecallMessage] = useState('');
   const [testCallForm, setTestCallForm] = useState({
     fullName: '',
     phone: '',
@@ -232,6 +234,66 @@ export default function AdminDashboard() {
       setLeads(loadedLeads);
     } catch (err) {
       console.error('Error fetching leads:', err);
+    }
+  };
+
+  const isCallableAgent = (agent) => (
+    agent
+    && ['live', 'testing'].includes(agent.status)
+    && agent.elevenlabsAgentId
+  );
+
+  const resolveRecallAgent = (lead) => {
+    const assignedAgent = aiAgents.find((agent) => agent.id === lead?.assignedTenantAgentId);
+    if (isCallableAgent(assignedAgent)) return assignedAgent;
+    return aiAgents.find((agent) => agent.status === 'live' && agent.elevenlabsAgentId)
+      || aiAgents.find((agent) => agent.status === 'testing' && agent.elevenlabsAgentId)
+      || null;
+  };
+
+  const handleRecallLead = async (lead) => {
+    if (!lead?.id || leadRecallBusy) return;
+    setError(null);
+    setLeadRecallMessage('');
+
+    if (lead.doNotContact) {
+      setLeadRecallMessage('This lead is marked do not contact.');
+      return;
+    }
+    if (!lead.phone) {
+      setLeadRecallMessage('This lead has no phone number.');
+      return;
+    }
+    if (!lead.callConsent) {
+      setLeadRecallMessage('Call consent is missing for this lead.');
+      return;
+    }
+
+    const recallAgent = resolveRecallAgent(lead);
+    if (!recallAgent) {
+      setLeadRecallMessage('No synced live or testing AI agent is available. Create and sync an AI agent before recalling leads.');
+      return;
+    }
+
+    try {
+      setLeadRecallBusy(lead.id);
+      const response = await invokeFunction('bob-queue-actions', {
+        action: 'test-call',
+        body: {
+          tenantId: user?.tenantId,
+          leadId: lead.id,
+          tenantAgentId: recallAgent.id,
+          reboundCall: true,
+          reboundOpening: `Hi ${lead.fullName || 'there'}, this is ${recallAgent.displayName || 'your AI assistant'}. Sorry for the interruption, I am calling back to continue helping with your request.`,
+        },
+      });
+      setLeadRecallMessage(`Recall started${response?.call?.sid ? ` (${response.call.sid})` : ''}.`);
+      await Promise.all([fetchLeads(), fetchBobActivity()]);
+    } catch (err) {
+      console.error('Error starting recall:', err);
+      setLeadRecallMessage(err.message || 'Failed to start recall.');
+    } finally {
+      setLeadRecallBusy('');
     }
   };
 
@@ -750,45 +812,24 @@ export default function AdminDashboard() {
                 <div className="divide-y divide-border">
                   {aiAgents.filter((agent) => agent.status !== 'archived').map((agent) => {
                     const busy = agentActionBusy === agent.id;
-                    const isDefault = agent.templateKey === 'bob-default';
                     const liveOrTesting = ['live', 'testing'].includes(agent.status);
                     return (
                       <div key={agent.id} className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
                             <p className="truncate text-sm font-semibold text-text-primary">{agent.displayName || 'AI Agent'}</p>
-                            {isDefault && <span className="ops-badge bg-info-soft text-info">Default</span>}
                             <span className={`ops-badge ${liveOrTesting ? 'bg-success-soft text-success' : 'bg-warning-soft text-warning'}`}>
                               {(agent.status || 'testing').replace(/_/g, ' ')}
                             </span>
                           </div>
-                          <p className="mt-1 text-xs text-text-muted">{agent.voiceId || 'Voice not assigned'} · {agent.promptVersion || 'v1'}</p>
+                          <p className="mt-1 text-xs text-text-muted">
+                            {agent.metadata?.voiceProfile?.selectedVoiceName || agent.metadata?.voiceProfile?.label || agent.voiceId || 'Voice not assigned'}
+                            {' · '}
+                            {agent.metadata?.personality?.label || 'Professional'}
+                          </p>
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
-                          {isDefault && agent.status !== 'live' && (
-                            <button
-                              type="button"
-                              onClick={() => handleAgentStatusChange(agent, 'live')}
-                              disabled={busy}
-                              className="ops-button-secondary"
-                            >
-                              <Check className="h-4 w-4" />
-                              <span>Live</span>
-                            </button>
-                          )}
-                          {isDefault && agent.status === 'live' && (
-                            <button
-                              type="button"
-                              onClick={() => handleAgentStatusChange(agent, 'testing')}
-                              disabled={busy}
-                              className="ops-button-secondary"
-                            >
-                              <ShieldOff className="h-4 w-4" />
-                              <span>Testing</span>
-                            </button>
-                          )}
-                          {!isDefault && (
-                            agent.status === 'paused' ? (
+                          {agent.status === 'paused' ? (
                               <button
                                 type="button"
                                 onClick={() => handleAgentStatusChange(agent, 'live')}
@@ -809,8 +850,8 @@ export default function AdminDashboard() {
                                 <span>Pause</span>
                               </button>
                             )
-                          )}
-                          {!isDefault && agent.status !== 'testing' && (
+                          }
+                          {agent.status !== 'testing' && (
                             <button
                               type="button"
                               onClick={() => handleAgentStatusChange(agent, 'testing')}
@@ -1123,6 +1164,12 @@ export default function AdminDashboard() {
                 </div>
               </div>
 
+              {leadRecallMessage && (
+                <div className="rounded-lg border border-border bg-surface-secondary px-4 py-3 text-sm text-text-secondary">
+                  {leadRecallMessage}
+                </div>
+              )}
+
               <div className="bg-white rounded-lg shadow overflow-hidden">
                 <div className="overflow-x-auto">
                   <table className="min-w-full divide-y divide-gray-200">
@@ -1261,6 +1308,26 @@ export default function AdminDashboard() {
                                 >
                                   <Eye className="w-4 h-4 mr-1" />
                                   View
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleRecallLead(lead);
+                                  }}
+                                  disabled={Boolean(leadRecallBusy) || !lead.phone || !lead.callConsent || lead.doNotContact}
+                                  className="flex items-center text-accent hover:text-accent-hover disabled:cursor-not-allowed disabled:text-text-muted"
+                                  title={
+                                    lead.doNotContact
+                                      ? 'Lead is marked do not contact'
+                                      : !lead.phone
+                                        ? 'Lead has no phone number'
+                                        : !lead.callConsent
+                                          ? 'Lead is missing call consent'
+                                          : 'Start a rebound call'
+                                  }
+                                >
+                                  <Phone className="w-4 h-4 mr-1" />
+                                  {leadRecallBusy === lead.id ? 'Calling...' : 'Recall'}
                                 </button>
                                 <button
                                   onClick={(e) => {
@@ -1487,12 +1554,12 @@ export default function AdminDashboard() {
             </div>
           )}
 
-          {/* Bob Activity Tab */}
+          {/* Automation Activity Tab */}
           {activeTab === 'bob' && (
             <div className="space-y-6">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <h2 className="text-2xl font-bold text-gray-900">Bob Activity</h2>
+                  <h2 className="text-2xl font-bold text-gray-900">Automation Activity</h2>
                   <p className="text-sm text-gray-600">Review automation decisions, queued outreach, and leads that need admin attention.</p>
                 </div>
                 <button
@@ -1500,7 +1567,7 @@ export default function AdminDashboard() {
                   className="inline-flex items-center justify-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-slate-700 hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-slate-500"
                 >
                   <Bot className="-ml-1 mr-2 h-4 w-4" />
-                  Refresh Bob
+                  Refresh activity
                 </button>
               </div>
 
@@ -2421,11 +2488,9 @@ export default function AdminDashboard() {
               <p className="text-sm text-text-secondary">
                 Delete {deleteAgentTarget.displayName || 'this AI agent'} from active use? Historical lead and action records stay intact.
               </p>
-              {deleteAgentTarget.templateKey === 'bob-default' && (
-                <div className="rounded-md border border-border bg-info-soft px-3 py-2 text-sm text-info">
-                  Deleting the default agent will allow the platform to create a fresh Bob agent in testing mode.
-                </div>
-              )}
+              <div className="rounded-md border border-border bg-surface-secondary px-3 py-2 text-sm text-text-secondary">
+                Deleted agents stay archived and will not be recreated automatically.
+              </div>
             </div>
             <div className="flex justify-end gap-2 border-t border-border px-4 py-3">
               <button type="button" onClick={() => setDeleteAgentTarget(null)} className="ops-button-secondary">

@@ -297,30 +297,7 @@ function assertKnowledgeAgent(user, agents = [], agentId) {
   return agent.id;
 }
 
-export async function ensureDefaultTenantAgent(user) {
-  const existingRows = await selectTenantRows('tenant_agents', user, {
-    order: { column: 'created_at', ascending: true },
-  });
-  const existing = existingRows.find((agent) => agent.templateKey === 'bob-default' && agent.status !== 'archived');
-  if (existing) {
-    if (existing.status === 'draft' || existing.status === 'paused') {
-      return updateTenantRow('tenant_agents', user, existing.id, { status: 'testing' });
-    }
-    return existing;
-  }
-
-  return insertTenantRow('tenant_agents', user, {
-    createdByUserId: user?.authUserId || user?.id || null,
-    displayName: 'Bob',
-    templateKey: 'bob-default',
-    promptVersion: 'v1',
-    status: 'testing',
-    metadata: { source: 'frontend_insforge_product' },
-  });
-}
-
 export async function listTenantAgents(user) {
-  await ensureDefaultTenantAgent(user);
   return selectTenantRows('tenant_agents', user, {
     order: { column: 'created_at', ascending: true },
   });
@@ -443,15 +420,21 @@ export async function getTenantSettingsSummary(user) {
 export async function createTenantAgent(user, input = {}) {
   const displayName = input.displayName?.trim();
   if (!displayName) throw new Error('Agent name is required');
+  const metadata = {
+    ...(input.metadata || {}),
+    voiceProfile: input.voiceProfile || input.metadata?.voiceProfile || null,
+    personality: input.personality || input.metadata?.personality || null,
+    customPersonalityNotes: input.customPersonalityNotes?.trim() || input.metadata?.customPersonalityNotes || null,
+  };
 
   return insertTenantRow('tenant_agents', user, {
     createdByUserId: user?.authUserId || user?.id || null,
     displayName,
     templateKey: input.templateKey || 'custom-agent',
     voiceId: input.voiceId?.trim() || null,
-    promptVersion: input.promptVersion?.trim() || 'v1',
+    promptVersion: input.promptVersion?.trim() || 'agent-template-v2',
     status: input.status || 'testing',
-    metadata: input.metadata || {},
+    metadata,
   });
 }
 
@@ -701,11 +684,25 @@ export async function importLeadsFromCsv(user, { csvText, fileName } = {}) {
 }
 
 export async function deleteAllLeads(user) {
+  const tenantId = tenantIdFromUser(user);
+  await unwrap(
+    await insforge.database
+      .from('voice_call_sessions')
+      .update({
+        lead_id: null,
+        conversation_id: null,
+        bob_action_id: null,
+      })
+      .eq('tenant_id', tenantId)
+      .select('id'),
+    'Failed to detach voice call sessions from leads'
+  );
+
   const data = await unwrap(
     await insforge.database
       .from('leads')
       .delete()
-      .eq('tenant_id', tenantIdFromUser(user))
+      .eq('tenant_id', tenantId)
       .select('id'),
     'Failed to delete leads'
   );

@@ -153,27 +153,25 @@ async function loadTenantAgent(db: any, tenantId: string, agentId?: string | nul
   return rows?.[0] || null;
 }
 
-async function resolveTenantAgent(db: any, tenantId: string, lead: any, requestedAgentId?: string | null) {
-  const agentId = requestedAgentId || lead?.assigned_tenant_agent_id || null;
-  if (agentId) {
-    const rows = await unwrap(
-      await db.database.from('tenant_agents').select('*').eq('tenant_id', tenantId).eq('id', agentId).limit(1),
-      'Failed to load tenant agent'
-    );
-    if (rows?.[0]) return rows[0];
-  }
+function isCallableTenantAgent(agent: any) {
+  return Boolean(agent?.id && ['live', 'testing'].includes(agent.status) && agent.elevenlabs_agent_id);
+}
 
-  const defaults = await unwrap(
-    await db.database
-      .from('tenant_agents')
-      .select('*')
-      .eq('tenant_id', tenantId)
-      .eq('template_key', 'bob-default')
-      .neq('status', 'archived')
-      .limit(1),
-    'Failed to load default tenant agent'
-  );
-  if (defaults?.[0]) return defaults[0];
+async function resolveTenantAgent(db: any, tenantId: string, lead: any, requestedAgentId?: string | null) {
+  const requested = requestedAgentId ? await loadTenantAgent(db, tenantId, requestedAgentId) : null;
+  if (isCallableTenantAgent(requested)) return requested;
+
+  const assigned = lead?.assigned_tenant_agent_id && lead.assigned_tenant_agent_id !== requestedAgentId
+    ? await loadTenantAgent(db, tenantId, lead.assigned_tenant_agent_id)
+    : null;
+  if (isCallableTenantAgent(assigned)) return assigned;
+
+  if (lead?.id && (requestedAgentId || lead.assigned_tenant_agent_id)) {
+    await db.database.from('leads').update({
+      assigned_tenant_agent_id: null,
+      updated_at: nowIso(),
+    }).eq('tenant_id', tenantId).eq('id', lead.id);
+  }
 
   const active = await unwrap(
     await db.database
@@ -181,10 +179,12 @@ async function resolveTenantAgent(db: any, tenantId: string, lead: any, requeste
       .select('*')
       .eq('tenant_id', tenantId)
       .in('status', ['live', 'testing'])
-      .limit(1),
+      .order('status', { ascending: true })
+      .order('created_at', { ascending: true })
+      .limit(25),
     'Failed to load active tenant agent'
   );
-  return active?.[0] || null;
+  return (active || []).find(isCallableTenantAgent) || null;
 }
 
 function channelConsentColumn(channel: string) {
@@ -300,8 +300,8 @@ function whatsappAddress(phone: string) {
 function whatsappTemplateVariables(lead: any) {
   return JSON.stringify({
     '1': leadName(lead),
-    '2': 'Bob',
-    '3': 'Bob Automation',
+    '2': 'the AI assistant',
+    '3': 'the team',
     '4': lead?.service_interest || 'your request',
   });
 }
@@ -355,9 +355,17 @@ function leadName(lead: any) {
   return lead?.full_name || [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || 'there';
 }
 
+function reboundOpening(input: JsonRecord, lead: any, tenantAgent: any) {
+  const agentName = tenantAgent?.display_name || 'the AI assistant';
+  const generated = `Hi ${leadName(lead)}, this is ${agentName}. Sorry for the interruption, I am calling back to continue helping with your request.`;
+  const requested = String(input.reboundOpening || input.rebound_opening || '').trim();
+  if (!requested) return generated;
+  return requested.replace(/\b(Bob|James)\b/g, agentName);
+}
+
 function defaultCampaignSmsBody(input: { tenant?: any; agent?: any; lead: any }) {
   const tenantName = input.tenant?.name || 'our team';
-  const agentName = input.agent?.display_name || 'Bob';
+  const agentName = input.agent?.display_name || 'the AI assistant';
   const service = input.lead?.service_interest ? ` about ${input.lead.service_interest}` : '';
   return `Hi ${leadName(input.lead)}, this is ${agentName} from ${tenantName}. We’re following up${service}. Reply here and we can help book the best time. Reply STOP to opt out.`;
 }
@@ -466,10 +474,10 @@ async function createVoiceCallSession(db: any, input: JsonRecord) {
         agentDisplayName: tenantAgent.display_name,
         ...(input.reboundCall || input.rebound_call
           ? {
-              reboundCall: true,
-              reboundOpening: input.reboundOpening || input.rebound_opening || null,
-            }
-          : {}),
+          reboundCall: true,
+          reboundOpening: reboundOpening(input, lead, tenantAgent),
+        }
+      : {}),
       },
     }]).select(),
     'Failed to create voice call session'
@@ -944,6 +952,6 @@ export default async function(req: Request): Promise<Response> {
       actions: bobQueueActions,
     });
   } catch (error) {
-    return jsonResponse({ success: false, error: error?.message || 'Bob queue action failed' }, 500);
+    return jsonResponse({ success: false, error: error?.message || 'AI queue action failed' }, 500);
   }
 }

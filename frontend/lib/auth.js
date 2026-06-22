@@ -1,7 +1,5 @@
 import { useState, useEffect } from 'react';
 import { insforge } from './insforge';
-import { ensureDefaultTenantAgent } from './insforge-product';
-import { provisionElevenLabsAgent } from './insforge-functions';
 
 const AUTH_TOKEN_STORAGE_KEY = 'auth_token';
 const AUTH_PENDING_STORAGE_KEY = 'insforge_google_auth_pending';
@@ -78,17 +76,6 @@ async function resolvePortalUserWithInsForge(insforgeUser) {
   return normalizePortalUser(data, insforgeUser);
 }
 
-async function syncDefaultTenantAgentWithElevenLabs(portalUser) {
-  if (!portalUser?.tenantId) return null;
-
-  const defaultAgent = await ensureDefaultTenantAgent(portalUser);
-  if (!defaultAgent?.id || defaultAgent.elevenlabsAgentId || defaultAgent.status === 'archived') {
-    return defaultAgent || null;
-  }
-
-  return provisionElevenLabsAgent(portalUser, defaultAgent.id, { syncKnowledge: true });
-}
-
 class AuthManager {
   constructor() {
     this.user = null;
@@ -150,10 +137,6 @@ class AuthManager {
       this.lastError = null;
       this.clearPendingGoogleAuth();
       this.notifyListeners();
-
-      syncDefaultTenantAgentWithElevenLabs(portalUser).catch((syncError) => {
-        console.warn('Default ElevenLabs agent auto-sync failed:', syncError);
-      });
     } catch {
       this.clearLocalState();
       this.notifyListeners();

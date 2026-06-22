@@ -164,7 +164,7 @@ async function draftTextReply(db: any, tenantId: string, lead: any, channel: 'sm
       input: JSON.stringify({
         channel,
         tenant: { name: tenant?.name || null, industry: tenant?.industry || null },
-        agent: { name: agent?.display_name || 'Bob' },
+        agent: { name: agent?.display_name || 'the AI assistant' },
         lead: { name: lead?.full_name || [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || null, serviceInterest: lead?.service_interest || null, preferredLanguage },
         inboundMessage: inboundText,
       }),

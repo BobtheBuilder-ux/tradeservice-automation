@@ -62,6 +62,46 @@ function bookingTimeGuard(start: Date, tenantTimezone = 'UTC') {
   return null;
 }
 
+function normalizeFutureBookingStart(raw: any) {
+  if (!raw) {
+    return { start: null, originalStartTime: null, normalized: false, strategy: 'empty' };
+  }
+
+  const originalStartTime = String(raw);
+  const start = new Date(originalStartTime);
+  if (Number.isNaN(start.getTime())) {
+    return { start: null, originalStartTime, normalized: false, strategy: 'invalid' };
+  }
+
+  const minimumFutureMs = Date.now() + 5 * 60 * 1000;
+  if (start.getTime() >= minimumFutureMs) {
+    return { start, originalStartTime, normalized: false, strategy: 'already_future' };
+  }
+
+  const adjusted = new Date(start.getTime());
+  const pastByMs = minimumFutureMs - adjusted.getTime();
+
+  if (pastByMs <= 36 * 60 * 60 * 1000) {
+    do {
+      adjusted.setUTCDate(adjusted.getUTCDate() + 1);
+    } while (adjusted.getTime() < minimumFutureMs);
+    return { start: adjusted, originalStartTime, normalized: true, strategy: 'next_future_day' };
+  }
+
+  let guard = 0;
+  do {
+    adjusted.setUTCFullYear(adjusted.getUTCFullYear() + 1);
+    guard += 1;
+  } while (adjusted.getTime() < minimumFutureMs && guard < 10);
+
+  return {
+    start: adjusted,
+    originalStartTime,
+    normalized: adjusted.getTime() !== start.getTime(),
+    strategy: 'next_future_year_occurrence',
+  };
+}
+
 function firstValue(...values: any[]) {
   for (const value of values) {
     if (value !== undefined && value !== null && String(value).trim() !== '') return value;
@@ -164,6 +204,20 @@ function normalizePhone(phone: string) {
   if (!raw) return '';
   const digits = raw.replace(/\D/g, '');
   return digits ? `+${digits}` : raw;
+}
+
+function whatsappAddress(phone: string) {
+  const normalized = normalizePhone(phone);
+  return normalized ? `whatsapp:${normalized}` : '';
+}
+
+function escapeHtml(value: any) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 }
 
 async function unwrap(result: any, message: string) {
@@ -277,6 +331,204 @@ async function logTimelineMessage(db: any, input: JsonRecord) {
     'Failed to log timeline message'
   );
   return inserted?.[0] || null;
+}
+
+async function getTenantPhoneNumberForChannel(db: any, tenantId: string, channel: 'sms' | 'whatsapp') {
+  let query = db.database.from('tenant_phone_numbers').select('*').eq('tenant_id', tenantId).eq('status', 'active');
+  if (channel === 'sms') query = query.eq('sms_enabled', true);
+  if (channel === 'whatsapp') query = query.eq('whatsapp_status', 'active');
+  const rows = await unwrap(
+    await query.order('is_primary', { ascending: false }).order('created_at', { ascending: true }).limit(1),
+    `Failed to load tenant ${channel} phone number`
+  );
+  return rows?.[0] || null;
+}
+
+async function sendDirectTenantTextMessage(db: any, context: JsonRecord, channel: 'sms' | 'whatsapp', body: string) {
+  const phoneNumber = await getTenantPhoneNumberForChannel(db, context.tenantId, channel);
+  const fallbackSender = normalizePhone(Deno.env.get('TWILIO_PHONE_NUMBER') || '');
+  const tenantSender = normalizePhone(phoneNumber?.phone_number || '');
+  const fromPhone = tenantSender || fallbackSender;
+  const toPhone = normalizePhone(context.lead.phone || '');
+  if (!fromPhone) throw new Error('No tenant or fallback SMS sender is configured');
+  if (!toPhone) throw new Error('Lead phone number is required');
+  const accountSid = Deno.env.get('TWILIO_ACCOUNT_SID');
+  const authToken = Deno.env.get('TWILIO_AUTH_TOKEN');
+  if (!accountSid || !authToken) throw new Error('Twilio credentials are not configured');
+
+  const from = channel === 'whatsapp' ? whatsappAddress(fromPhone) : fromPhone;
+  const to = channel === 'whatsapp' ? whatsappAddress(toPhone) : toPhone;
+  const form = new URLSearchParams({ From: from, To: to, Body: body });
+  const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${btoa(`${accountSid}:${authToken}`)}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: form,
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result?.message || `Twilio ${channel} failed with ${response.status}`);
+
+  await logTimelineMessage(db, {
+    tenantId: context.tenantId,
+    leadId: context.leadId,
+    channel,
+    direction: 'outbound',
+    messageType: channel,
+    bodyText: body,
+    providerMessageId: result.sid || null,
+    status: result.status || 'queued',
+    sentAt: nowIso(),
+    metadata: { source: 'elevenlabs_tool', providerStatus: result.status || null, senderResolution: tenantSender ? 'tenant_active' : 'fallback_secret' },
+  });
+
+  return { success: true, providerMessageId: result.sid || null, status: result.status || 'queued' };
+}
+
+function formatMeetingTime(input: JsonRecord, tenant: JsonRecord) {
+  const raw = firstValue(input.time, input.startTime, input.start_time);
+  if (!raw) return '';
+  const date = new Date(String(raw));
+  if (Number.isNaN(date.getTime())) return String(raw);
+  return date.toLocaleString('en-US', {
+    timeZone: input.timezone || tenant?.default_timezone || 'UTC',
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  });
+}
+
+async function resolveEmailSender(db: any, tenantId: string) {
+  const identities = await unwrap(
+    await db.database
+      .from('tenant_email_identities')
+      .select('*')
+      .eq('tenant_id', tenantId)
+      .eq('status', 'active')
+      .eq('verified_status', 'verified')
+      .order('created_at', { ascending: false })
+      .limit(1),
+    'Failed to resolve tenant email sender'
+  );
+  const identity = identities?.[0] || null;
+  const fallbackEmail = Deno.env.get('EMAIL_FROM');
+  const fallbackName = Deno.env.get('EMAIL_FROM_NAME') || 'Bob Automation';
+  if (identity?.from_email) {
+    return {
+      from: `${identity.from_name || 'Support'} <${identity.from_email}>`,
+      fromEmail: identity.from_email,
+      fromName: identity.from_name || 'Support',
+      replyTo: identity.reply_to_email || null,
+      resolution: 'tenant_verified',
+      identityId: identity.id,
+    };
+  }
+  if (!fallbackEmail) throw new Error('Platform fallback sender is not configured');
+  return {
+    from: `${fallbackName} <${fallbackEmail}>`,
+    fromEmail: fallbackEmail,
+    fromName: fallbackName,
+    replyTo: null,
+    resolution: 'platform_fallback',
+    identityId: null,
+  };
+}
+
+function deterministicEmailDraft(context: JsonRecord, input: JsonRecord) {
+  const emailType = String(firstValue(input.emailType, input.email_type, 'elevenlabs_follow_up'));
+  const recipientName = context.lead.full_name || [context.lead.first_name, context.lead.last_name].filter(Boolean).join(' ') || 'there';
+  const service = context.lead.service_interest || input.serviceInterest || input.service_interest || 'consultation';
+  const meetingUrl = firstValue(input.meetingUrl, input.meeting_url, input.bookingUrl, input.booking_url) || null;
+  const time = formatMeetingTime(input, context.tenant);
+  const requestedMessage = firstValue(input.message, input.text, input.bodyText, input.body_text);
+  const subject = emailType === 'booking_confirmation'
+    ? `${service} appointment confirmed`
+    : `${service} follow-up`;
+  const text = emailType === 'booking_confirmation'
+    ? [
+      `Hi ${recipientName},`,
+      `Your ${service} appointment is confirmed${time ? ' for ' + time : ''}.`,
+      meetingUrl ? `Meeting link: ${meetingUrl}` : '',
+      'Thank you.',
+    ].filter(Boolean).join('\n\n')
+    : [
+      `Hi ${recipientName},`,
+      String(requestedMessage || `Following up on your ${service} request.`),
+      meetingUrl ? `Meeting link: ${meetingUrl}` : '',
+    ].filter(Boolean).join('\n\n');
+  const html = text.split('\n\n').map((line) => {
+    const escaped = escapeHtml(line);
+    return meetingUrl && line.includes(String(meetingUrl))
+      ? `<p>Meeting link: <a href="${escapeHtml(meetingUrl)}">${escapeHtml(meetingUrl)}</a></p>`
+      : `<p>${escaped}</p>`;
+  }).join('');
+  return { subject, text, html, emailType, model: 'deterministic-elevenlabs-tool-email' };
+}
+
+async function sendDirectTenantEmail(db: any, context: JsonRecord, input: JsonRecord) {
+  const toEmail = firstValue(input.to, input.toEmail, input.to_email, context.lead.email);
+  if (!toEmail) throw new Error('Lead email is required');
+  const apiKey = Deno.env.get('RESEND_API_KEY');
+  if (!apiKey) throw new Error('RESEND_API_KEY is not configured');
+  const sender = await resolveEmailSender(db, context.tenantId);
+  const draft = deterministicEmailDraft(context, { ...input, to: toEmail });
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from: sender.from,
+      to: [toEmail],
+      subject: draft.subject,
+      html: draft.html,
+      text: draft.text,
+      reply_to: sender.replyTo || undefined,
+    }),
+  });
+  const resend = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(resend?.message || resend?.error || `Resend failed with ${response.status}`);
+
+  const queued = await unwrap(
+    await db.database.from('email_queue').insert([{
+      tenant_id: context.tenantId,
+      lead_id: context.leadId,
+      to_email: toEmail,
+      from_email: sender.fromEmail,
+      sender_identity_id: sender.identityId,
+      sender_display_name: sender.fromName,
+      reply_to_email: sender.replyTo,
+      sender_resolution: sender.resolution,
+      delivery_provider: 'resend',
+      provider_message_id: resend?.id || null,
+      subject: draft.subject,
+      html_content: draft.html,
+      text_content: draft.text,
+      email_type: draft.emailType,
+      status: 'sent',
+      sent_at: nowIso(),
+      generated_by: 'template',
+      generation_model: draft.model,
+      generation_status: 'generated',
+      generated_at: nowIso(),
+      metadata: { source: 'elevenlabs_tool', externalConversationId: context.externalConversationId || null },
+    }]).select(),
+    'Failed to record email delivery'
+  );
+
+  await logTimelineMessage(db, {
+    tenantId: context.tenantId,
+    leadId: context.leadId,
+    channel: 'email',
+    direction: 'outbound',
+    messageType: 'email_sent',
+    subject: draft.subject,
+    bodyText: draft.text,
+    providerMessageId: resend?.id || null,
+    status: 'sent',
+    sentAt: nowIso(),
+    metadata: { emailQueueId: queued?.[0]?.id || null, senderResolution: sender.resolution, source: 'elevenlabs_tool' },
+  });
+
+  return { success: true, queued: queued?.[0] || null, providerMessageId: resend?.id || null, sender };
 }
 
 async function writeAuditLog(
@@ -490,7 +742,8 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
 
   const startTime = firstValue(input.startTime, input.start_time, input.requestedTime, input.requested_time);
   const durationMinutes = Number(firstValue(input.durationMinutes, input.duration_minutes, 30));
-  const start = startTime ? new Date(startTime) : null;
+  const futureStart = normalizeFutureBookingStart(startTime);
+  const start = futureStart.start;
 
   if ((!start || Number.isNaN(start.getTime())) && booking.booking_url) {
     await db.database.from('leads').update({
@@ -604,6 +857,10 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
         tenantAgentId: context.agentId,
         bookingUrl: booking.booking_url || null,
         configuredMeetingLink: meetingUrl,
+        dateDefault: 'future_occurrence',
+        originalStartTime: futureStart.originalStartTime,
+        normalizedStartTime: futureStart.normalized ? start.toISOString() : null,
+        dateNormalizationStrategy: futureStart.strategy,
       },
     }]).select(),
     'Failed to create booking'
@@ -626,7 +883,14 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
     channel: 'voice',
     messageType: 'booking_created',
     bodyText: `Booking confirmed for ${start.toISOString()}.`,
-    metadata: { meetingId: meeting?.id, meetingUrl },
+    metadata: {
+      meetingId: meeting?.id,
+      meetingUrl,
+      dateDefault: 'future_occurrence',
+      originalStartTime: futureStart.originalStartTime,
+      normalizedStartTime: futureStart.normalized ? start.toISOString() : null,
+      dateNormalizationStrategy: futureStart.strategy,
+    },
   });
 
   let reminderRows: JsonRecord[] = [];
@@ -697,17 +961,21 @@ async function sendSms(db: any, context: JsonRecord, input: JsonRecord) {
   assertLeadAllowsChannel(context.lead, 'sms');
   const body = String(firstValue(input.message, input.body, input.text, '') || '').trim();
   if (!body) throw new Error('SMS message body is required');
-  return sendTenantTextMessage(context, 'sms', body);
+  return sendTenantTextMessage(db, context, 'sms', body);
 }
 
 async function sendWhatsapp(db: any, context: JsonRecord, input: JsonRecord) {
   assertLeadAllowsChannel(context.lead, 'whatsapp');
   const body = String(firstValue(input.message, input.body, input.text, '') || '').trim();
   if (!body) throw new Error('WhatsApp message body is required');
-  return sendTenantTextMessage(context, 'whatsapp', body);
+  return sendTenantTextMessage(db, context, 'whatsapp', body);
 }
 
-async function sendTenantTextMessage(context: JsonRecord, channel: 'sms' | 'whatsapp', body: string) {
+async function sendTenantTextMessage(db: any, context: JsonRecord, channel: 'sms' | 'whatsapp', body: string) {
+  return sendDirectTenantTextMessage(db, context, channel, body);
+}
+
+async function sendTenantTextMessageViaFunction(context: JsonRecord, channel: 'sms' | 'whatsapp', body: string) {
   const functionBaseUrl = Deno.env.get('INSFORGE_FUNCTION_BASE_URL');
   const secret = Deno.env.get('MESSAGE_ACTIONS_SECRET') || Deno.env.get('ELEVENLABS_TOOL_SECRET');
   if (!functionBaseUrl) throw new Error('Tenant message delivery function is not configured');
@@ -748,6 +1016,7 @@ async function sendEmail(db: any, context: JsonRecord, input: JsonRecord) {
   assertLeadAllowsChannel(context.lead, 'email');
   const toEmail = firstValue(input.to, input.toEmail, input.to_email, context.lead.email);
   if (!toEmail) throw new Error('Lead email is required');
+  return sendDirectTenantEmail(db, context, { ...input, to: toEmail });
   const functionBaseUrl = Deno.env.get('INSFORGE_FUNCTION_BASE_URL');
   if (!functionBaseUrl) throw new Error('Email delivery function is not configured');
   const emailActionsSecret = Deno.env.get('EMAIL_ACTIONS_SECRET') || Deno.env.get('ELEVENLABS_TOOL_SECRET');

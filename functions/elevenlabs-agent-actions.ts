@@ -138,7 +138,8 @@ function elevenLabsApiKey() {
 }
 
 async function elevenLabsRequest(path: string, options: RequestInit = {}) {
-  const response = await fetch(`${ELEVENLABS_API_BASE}${path}`, {
+  const endpoint = path.startsWith('http') ? path : `${ELEVENLABS_API_BASE}${path}`;
+  const response = await fetch(endpoint, {
     ...options,
     headers: {
       'xi-api-key': elevenLabsApiKey(),
@@ -162,25 +163,34 @@ function safeName(value: string, fallback: string) {
 
 function buildAgentPrompt(context: JsonRecord) {
   const tenantName = context.tenant?.name || 'the company';
-  const agentName = context.agent?.display_name || 'Bob';
+  const agentName = context.agent?.display_name || 'the AI assistant';
   const bookingProvider = context.bookingIntegration?.provider || 'manual';
   const bookingUrl = context.bookingIntegration?.booking_url || 'not configured';
   const senderEmail = context.emailIdentity?.from_email || 'not configured';
   const phoneNumber = context.phoneNumber?.phone_number || 'not configured';
   const toolWebhookUrl = elevenLabsToolWebhookUrl();
+  const personality = context.agent?.metadata?.personality || {};
+  const voiceProfile = context.agent?.metadata?.voiceProfile || {};
+  const personalityLabel = personality.label || 'professional and warm';
+  const personalityInstruction = personality.prompt || 'Sound professional, warm, concise, helpful, and trustworthy.';
+  const customPersonalityNotes = context.agent?.metadata?.customPersonalityNotes || '';
 
   return [
     `You are ${agentName}, an AI outreach and booking assistant for ${tenantName}.`,
+    `Personality: ${personalityLabel}. ${personalityInstruction}`,
+    customPersonalityNotes ? `Additional personality notes: ${customPersonalityNotes}.` : '',
+    voiceProfile.label ? `Selected voice style: ${voiceProfile.label}.` : '',
     'You qualify leads, answer questions from the tenant knowledge base, and help book consultations.',
     'Start outbound calls with a clear introduction: say your name, the company name, and the specific reason for the call using the lead/service context. In that same introduction, ask what language the lead would prefer to communicate in. Do not open with "is now a good time" or similar permission-only language.',
-    'When the lead gives a preferred language, immediately call update_lead_status with preferredLanguage set to the spoken language, then continue the conversation in that language. Do not repeat the introduction or ask the language question again after the language is selected. If the lead already has preferred_language, greet them and continue in that language without asking again unless they ask to change it.',
-    'If the lead asks to switch language mid-call, never end the call and never restart the introduction. Acknowledge the request, save preferredLanguage with update_lead_status, and continue all subsequent responses in that language from the current point in the conversation.',
+    'When the lead gives a preferred language in the introduction, switch immediately in your next spoken response. Do not wait for a tool result before speaking. Then call update_lead_status with preferredLanguage set to the spoken language as a fast background-style state save. Do not repeat the introduction or ask the language question again after the language is selected. If the lead already has preferred_language, greet them and continue in that language without asking again unless they ask to change it.',
+    'If the lead asks to switch language mid-call, never end the call and never restart the introduction. Respond within one short sentence in the requested language, then continue all subsequent responses in that language from the current point in the conversation. Save preferredLanguage with update_lead_status after the spoken acknowledgement, but do not let the save delay the language switch.',
     'Never end the call because of background noise, cross-talk, multiple interruptions, silence, or a language change. Treat interruptions as normal conversation. If the lead is silent, patiently prompt again instead of ending.',
     'If the lead sounds busy after the introduction, offer a quick SMS follow-up or a better time. Do not pressure them.',
     'Early in the conversation, use get_lead_context when you need lead, company, campaign, or setup context. Use tenant knowledge before answering company-specific service, policy, pricing, or process questions.',
+    'The core purpose of the call is to understand what service the lead is interested in and move that interest toward qualification and booking. If service_interest is missing, generic, unclear, or the lead has not clearly expressed interest yet, do not abandon the workflow and do not mark them not_interested. Ask one concise clarifying question such as which service they wanted help with, what prompted the request, or what outcome they want. If tenant knowledge lists services, offer 2 to 4 likely service options. Once the interest is clear, save it with update_lead_status and continue qualification.',
     'Before booking, qualify the lead with a short dynamic question set based on their service interest and tenant knowledge. Ask only relevant questions, one at a time, normally 3 to 7 questions. For insurance-like services, examples include marital/common-law status, children, home ownership, what they want to protect, free review interest, age range, and current insurance status. For other services, infer comparable qualification questions from the service and knowledge base.',
     'After collecting qualification answers, call update_lead_status with qualificationQuestions, qualificationAnswers, qualificationSummary, qualificationStatus, qualificationScore when useful, and leadStage or schedulingState. Do not book until the lead has answered enough qualification questions, refuses, or clearly asks to skip qualification.',
-    'Use current_date, current_time, and current_timezone to resolve relative dates like today, tomorrow, Monday, next week, or later today. Never use old example dates or training-data dates. If the date/time is ambiguous, ask one short confirmation question before booking.',
+    'During an active call, treat every booking date the lead mentions as a future date by default. Use current_date, current_time, and current_timezone to resolve relative dates like today, tomorrow, Monday, next week, or later today to the next future occurrence. For month/day or weekday mentions without a year, choose the next future occurrence, never a past year. Never use old example dates or training-data dates. If the date/time is genuinely ambiguous, ask one short confirmation question before booking.',
     'When the lead is interested or asks for next steps, your first attempt must be to book the appointment directly on the phone by asking for a preferred date/time and calling create_booking. Sending a booking link by SMS/email is only a fallback when the lead explicitly asks to choose a time later, asks for the link, refuses to pick a time on the call, or cannot decide.',
     'After a booking is created, SMS and email confirmation are handled by the booking tool when consent and provider configuration exist. If a confirmation channel fails, tell the lead which channel failed and provide the link verbally.',
     'Do not read, pronounce, or spell long URLs by default. Say that the meeting link will be sent by SMS/email. If the lead explicitly asks you to read a link aloud, read it slowly in short chunks.',
@@ -193,7 +203,7 @@ function buildAgentPrompt(context: JsonRecord) {
     `Tool webhook URL: ${toolWebhookUrl || 'not configured'}.`,
     'Runtime dynamic variables may include tenant_id, tenant_name, tenant_agent_id, agent_name, lead_id, lead_name, service_interest, preferred_language, booking_provider, booking_url, tenant_phone_number, sender_email, tool_webhook_url, current_date, current_time, and current_timezone.',
     'Use the configured webhook tools for get_lead_context, update_lead_status, check_availability, create_booking, send_sms, send_whatsapp, send_email, record_call_outcome, escalate_to_human, and mark_opt_out.',
-  ].join('\n\n');
+  ].filter(Boolean).join('\n\n');
 }
 
 function knowledgeRefs(documents: JsonRecord[]) {
@@ -207,7 +217,7 @@ function knowledgeRefs(documents: JsonRecord[]) {
 }
 
 function buildConversationConfig(context: JsonRecord, documents: JsonRecord[], toolIds: string[] = []) {
-  const agentName = context.agent?.display_name || 'Bob';
+  const agentName = context.agent?.display_name || 'the assistant';
   const tenantName = context.tenant?.name || 'the company';
   const voiceId = context.agent?.voice_id || DEFAULT_VOICE_ID;
 
@@ -231,7 +241,7 @@ function dynamicVariableDefaults(context: JsonRecord) {
     tenant_id: context.tenant?.id || context.agent?.tenant_id || '',
     tenant_name: context.tenant?.name || '',
     tenant_agent_id: context.agent?.id || '',
-    agent_name: context.agent?.display_name || 'Bob',
+    agent_name: context.agent?.display_name || '',
     lead_id: 'test-lead-id',
     lead_name: 'Test Lead',
     service_interest: 'consultation',
@@ -282,7 +292,7 @@ function toolBodySchema(properties: JsonRecord, required: string[] = []) {
   };
 }
 
-function webhookToolConfig(name: string, description: string, properties: JsonRecord = {}, required: string[] = []) {
+function webhookToolConfig(name: string, description: string, properties: JsonRecord = {}, required: string[] = [], responseTimeoutSecs = 20) {
   const webhookUrl = elevenLabsToolWebhookUrl();
   if (!webhookUrl) throw new Error('INSFORGE_FUNCTION_BASE_URL is not configured in InsForge secrets');
 
@@ -291,7 +301,7 @@ function webhookToolConfig(name: string, description: string, properties: JsonRe
       type: 'webhook',
       name,
       description,
-      response_timeout_secs: 20,
+      response_timeout_secs: responseTimeoutSecs,
       api_schema: {
         url: `${webhookUrl}?action=${encodeURIComponent(name)}`,
         method: 'POST',
@@ -315,15 +325,17 @@ function elevenLabsToolDefinitions() {
       'check_availability',
       'Check the tenant booking path. Use before booking. For Calendly or booking-link tenants, this returns the booking link Bob can offer or text to the lead.',
       {
-        requestedTime: literal('string', 'Optional ISO date/time the lead requested. Include timezone if the lead gave one.'),
+        requestedTime: literal('string', 'Optional ISO date/time the lead requested. Resolve spoken call dates to the next future occurrence by default. Include timezone if the lead gave one.'),
         timezone: literal('string', 'Optional IANA timezone or spoken timezone for the requested time.'),
-      }
+      },
+      [],
+      2
     ),
     webhookToolConfig(
       'create_booking',
       'Create a booking once the lead agrees to a time. If no time is agreed and a Calendly/booking link exists, use this to send the booking link by SMS when consent exists.',
       {
-        startTime: literal('string', 'ISO start time agreed with the lead. Omit only when sending the booking link instead.'),
+        startTime: literal('string', 'ISO start time agreed with the lead. Resolve all spoken call dates to the next future occurrence by default. Omit only when sending the booking link instead.'),
         durationMinutes: literal('integer', 'Appointment duration in minutes. Default to 30 if unsure.'),
         timezone: literal('string', 'IANA timezone for the appointment, such as America/New_York.'),
         title: literal('string', 'Short meeting title based on the service interest.'),
@@ -351,7 +363,7 @@ function elevenLabsToolDefinitions() {
     ),
     webhookToolConfig(
       'update_lead_status',
-      'Update the lead status, qualification, scheduling state, preferred channel, or notes after the lead gives new information.',
+      'Fast state save for lead status, qualification, scheduling state, preferred language/channel, service interest, or notes after the lead gives new information. For language switches, speak in the requested language first, then use this tool.',
       {
         status: literal('string', 'Optional CRM status update.'),
         qualificationStatus: literal('string', 'Optional qualification status update.'),
@@ -363,7 +375,9 @@ function elevenLabsToolDefinitions() {
         qualificationSummary: literal('string', 'Short summary of the qualification result and why the lead is or is not ready to book.'),
         qualificationNotes: literal('string', 'Brief notes from the conversation.'),
         nextContactAt: literal('string', 'Optional ISO date/time for the next follow-up.'),
-      }
+      },
+      [],
+      2
     ),
     webhookToolConfig(
       'record_call_outcome',
@@ -418,6 +432,59 @@ async function syncElevenLabsWebhookTools() {
     ids.push(await ensureElevenLabsWebhookTool(definition));
   }
   return ids;
+}
+
+function agentProviderTags(context: JsonRecord) {
+  const agent = context.agent || {};
+  const tenantId = context.tenant?.id || agent.tenant_id;
+  return [
+    'bob-automation',
+    tenantId ? `tenant:${tenantId}` : null,
+    agent.id ? `tenant-agent:${agent.id}` : null,
+    agent.template_key || 'custom-agent',
+  ].filter(Boolean);
+}
+
+function providerAgentId(agent: JsonRecord) {
+  return agent?.agent_id || agent?.id || null;
+}
+
+async function findReusableElevenLabsAgent(name: string, tags: string[]) {
+  const response = await elevenLabsRequest(`/convai/agents?search=${encodeURIComponent(name)}&page_size=100&archived=false`, {
+    method: 'GET',
+  });
+  const agents = response?.agents || response?.data || [];
+  const tenantAgentTag = tags.find((tag) => String(tag).startsWith('tenant-agent:'));
+  const tenantTag = tags.find((tag) => String(tag).startsWith('tenant:'));
+
+  return agents.find((agent: JsonRecord) => {
+    const agentTags = Array.isArray(agent.tags) ? agent.tags : [];
+    if (tenantAgentTag && agentTags.includes(tenantAgentTag)) return true;
+    return tenantTag && agentTags.includes(tenantTag) && agent.name === name;
+  }) || null;
+}
+
+function simplifyVoice(voice: JsonRecord) {
+  const labels = voice.labels || {};
+  return {
+    voiceId: voice.voice_id,
+    name: voice.name,
+    category: voice.category || null,
+    description: voice.description || labels.description || '',
+    previewUrl: voice.preview_url || null,
+    labels,
+    gender: labels.gender || '',
+    accent: labels.accent || '',
+    age: labels.age || '',
+    useCase: labels.use_case || '',
+  };
+}
+
+async function listElevenLabsVoices() {
+  const response = await elevenLabsRequest('https://api.elevenlabs.io/v2/voices?page_size=100', {
+    method: 'GET',
+  });
+  return (response?.voices || []).map(simplifyVoice).filter((voice: JsonRecord) => voice.voiceId);
 }
 
 async function updateKnowledgeDocument(db: any, document: JsonRecord, patch: JsonRecord) {
@@ -514,11 +581,12 @@ async function updateTenantAgent(db: any, agent: JsonRecord, patch: JsonRecord) 
 
 async function createOrUpdateAgent(db: any, context: JsonRecord, documents: JsonRecord[]) {
   const agent = context.agent;
-  const name = safeName(`${context.tenant?.name || 'Tenant'} - ${agent.display_name || 'Bob'}`, 'Tenant agent');
+  const name = safeName(`${context.tenant?.name || 'Tenant'} - ${agent.display_name || 'AI Agent'}`, 'Tenant agent');
   const toolIds = await syncElevenLabsWebhookTools();
+  const tags = agentProviderTags(context);
   const payload = {
     name,
-    tags: ['bob-automation', `tenant:${context.tenant?.id || agent.tenant_id}`, agent.template_key || 'custom-agent'],
+    tags,
     conversation_config: buildConversationConfig(context, documents, toolIds),
     platform_settings: {
       evaluation: {
@@ -526,9 +594,11 @@ async function createOrUpdateAgent(db: any, context: JsonRecord, documents: Json
       },
     },
   };
+  const reusableAgent = agent.elevenlabs_agent_id ? null : await findReusableElevenLabsAgent(name, tags);
+  const targetAgentId = agent.elevenlabs_agent_id || providerAgentId(reusableAgent);
 
-  const providerResult = agent.elevenlabs_agent_id
-    ? await elevenLabsRequest(`/convai/agents/${agent.elevenlabs_agent_id}`, {
+  const providerResult = targetAgentId
+    ? await elevenLabsRequest(`/convai/agents/${targetAgentId}`, {
       method: 'PATCH',
       body: JSON.stringify({
         ...payload,
@@ -540,7 +610,7 @@ async function createOrUpdateAgent(db: any, context: JsonRecord, documents: Json
       body: JSON.stringify(payload),
     });
 
-  const elevenlabsAgentId = providerResult?.agent_id || agent.elevenlabs_agent_id;
+  const elevenlabsAgentId = providerResult?.agent_id || targetAgentId;
   if (!elevenlabsAgentId) throw new Error('ElevenLabs did not return an agent ID');
 
   const metadata = {
@@ -628,8 +698,8 @@ export default async function(req: Request): Promise<Response> {
 
   const db = createInsForgeClient(req);
   const url = new URL(req.url);
-  const action = url.searchParams.get('action') || 'status';
   const body = req.method === 'GET' ? {} : await req.json().catch(() => ({}));
+  const action = url.searchParams.get('action') || body.action || 'status';
 
   try {
     if (action === 'status') {
@@ -637,7 +707,7 @@ export default async function(req: Request): Promise<Response> {
         success: true,
         service: 'elevenlabs-agent-actions',
         configured: Boolean(Deno.env.get('ELEVENLABS_API_KEY')),
-        actions: ['status', 'provision-agent', 'sync-knowledge', 'test-agent'],
+        actions: ['status', 'provision-agent', 'sync-knowledge', 'test-agent', 'list-voices'],
       });
     }
 
@@ -664,6 +734,13 @@ export default async function(req: Request): Promise<Response> {
       return jsonResponse({
         success: true,
         setup: await testAgentSetup(db, tenantId, agentId),
+      });
+    }
+
+    if (action === 'list-voices') {
+      return jsonResponse({
+        success: true,
+        voices: await listElevenLabsVoices(),
       });
     }
 

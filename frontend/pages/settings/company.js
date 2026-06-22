@@ -29,6 +29,7 @@ import {
 import {
   provisionElevenLabsAgent,
   testElevenLabsAgent,
+  listElevenLabsVoices,
   getCalendlyConnectUrl,
   listCalendlyEventTypes,
 } from '../../lib/insforge-functions';
@@ -36,9 +37,33 @@ import {
 const emptyAgentForm = {
   displayName: '',
   voiceId: '',
-  promptVersion: 'v1',
+  voiceProfile: 'any',
+  personality: 'professional',
+  customPersonalityNotes: '',
   status: 'testing',
 };
+
+const voiceProfiles = [
+  { key: 'any', label: 'Any available voice', match: () => true },
+  { key: 'male', label: 'Male voice', match: (voice) => voice.gender?.toLowerCase() === 'male' },
+  { key: 'female', label: 'Female voice', match: (voice) => voice.gender?.toLowerCase() === 'female' },
+  { key: 'neutral', label: 'Neutral voice', match: (voice) => voice.gender?.toLowerCase() === 'neutral' },
+  { key: 'british_male', label: 'Englishman / British male', match: (voice) => voice.gender?.toLowerCase() === 'male' && /british|english|uk/i.test(voice.accent || '') },
+  { key: 'british_female', label: 'British woman', match: (voice) => voice.gender?.toLowerCase() === 'female' && /british|english|uk/i.test(voice.accent || '') },
+  { key: 'spanish_female', label: 'Spanish woman', match: (voice) => voice.gender?.toLowerCase() === 'female' && /spanish|spain|latin/i.test(`${voice.accent || ''} ${voice.name || ''} ${voice.description || ''}`) },
+  { key: 'american_male', label: 'American man', match: (voice) => voice.gender?.toLowerCase() === 'male' && /american|us/i.test(voice.accent || '') },
+  { key: 'american_female', label: 'American woman', match: (voice) => voice.gender?.toLowerCase() === 'female' && /american|us/i.test(voice.accent || '') },
+];
+
+const personalityPresets = [
+  { key: 'professional', label: 'Professional', prompt: 'Sound polished, calm, concise, and trustworthy. Keep the conversation focused and practical.' },
+  { key: 'friendly', label: 'Friendly', prompt: 'Sound warm, approachable, patient, and clear. Make the lead feel comfortable without being too casual.' },
+  { key: 'funny', label: 'Lightly funny', prompt: 'Use light tasteful humor where appropriate, but never joke about sensitive services, pricing, or consent.' },
+  { key: 'direct', label: 'Direct', prompt: 'Be brief, confident, and action-oriented. Avoid fluff and get to qualification or booking quickly.' },
+  { key: 'luxury', label: 'Luxury concierge', prompt: 'Sound refined, attentive, composed, and premium. Make the lead feel personally looked after.' },
+  { key: 'sales_closer', label: 'Sales closer', prompt: 'Sound confident and persuasive while staying honest. Ask clear next-step questions and guide toward booking.' },
+  { key: 'receptionist', label: 'Receptionist', prompt: 'Sound like a helpful front desk receptionist: organized, friendly, clear, and service-focused.' },
+];
 
 const emptyEmailForm = {
   fromName: '',
@@ -115,6 +140,8 @@ export default function CompanySettingsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(null);
   const [agentProviderBusy, setAgentProviderBusy] = useState(null);
+  const [voiceOptions, setVoiceOptions] = useState([]);
+  const [voiceLoading, setVoiceLoading] = useState(false);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [agentSetupResult, setAgentSetupResult] = useState(null);
@@ -175,10 +202,24 @@ export default function CompanySettingsPage() {
           defaultMeetingType: data.bookingIntegration.defaultMeetingType || 'phone',
         });
       }
+      fetchVoiceOptions();
     } catch (err) {
       setError(err.message || 'Failed to load settings');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function fetchVoiceOptions() {
+    try {
+      setVoiceLoading(true);
+      const result = await listElevenLabsVoices(user);
+      setVoiceOptions(result.voices || []);
+    } catch (err) {
+      console.warn('Failed to load ElevenLabs voices:', err);
+      setVoiceOptions([]);
+    } finally {
+      setVoiceLoading(false);
     }
   }
 
@@ -188,7 +229,23 @@ export default function CompanySettingsPage() {
       setSaving('agent');
       setError(null);
       setNotice(null);
-      await createTenantAgent(user, agentForm);
+      const selectedVoice = voiceOptions.find((voice) => voice.voiceId === agentForm.voiceId);
+      const selectedVoiceProfile = voiceProfiles.find((profile) => profile.key === agentForm.voiceProfile) || voiceProfiles[0];
+      const selectedPersonality = personalityPresets.find((preset) => preset.key === agentForm.personality) || personalityPresets[0];
+      await createTenantAgent(user, {
+        ...agentForm,
+        voiceProfile: {
+          key: selectedVoiceProfile.key,
+          label: selectedVoiceProfile.label,
+          selectedVoiceName: selectedVoice?.name || null,
+          selectedVoiceLabels: selectedVoice?.labels || null,
+        },
+        personality: {
+          key: selectedPersonality.key,
+          label: selectedPersonality.label,
+          prompt: selectedPersonality.prompt,
+        },
+      });
       setAgentForm(emptyAgentForm);
       setNotice('AI agent saved');
       await fetchSettings();
@@ -361,6 +418,11 @@ export default function CompanySettingsPage() {
     () => summary.phoneNumbers.filter((phoneNumber) => phoneNumber.status !== 'released'),
     [summary.phoneNumbers]
   );
+  const filteredVoiceOptions = useMemo(() => {
+    const profile = voiceProfiles.find((item) => item.key === agentForm.voiceProfile) || voiceProfiles[0];
+    const matches = voiceOptions.filter(profile.match);
+    return matches.length ? matches : voiceOptions;
+  }, [agentForm.voiceProfile, voiceOptions]);
 
   if (loading || authLoading) {
     return (
@@ -544,10 +606,13 @@ export default function CompanySettingsPage() {
                           <td className="px-3 py-3">
                             <div className="text-sm font-medium text-text-primary">{agent.displayName}</div>
                             {agent.templateKey === 'bob-default' ? (
-                              <div className="mt-1 text-xs text-text-muted">Default Bob template</div>
+                              <div className="mt-1 text-xs text-text-muted">Legacy default template</div>
                             ) : null}
                           </td>
-                          <td className="px-3 py-3 text-sm text-text-secondary">{agent.voiceId || 'Provider default'}</td>
+                          <td className="px-3 py-3">
+                            <div className="text-sm text-text-secondary">{agent.metadata?.voiceProfile?.selectedVoiceName || agent.metadata?.voiceProfile?.label || agent.voiceId || 'Provider default'}</div>
+                            <div className="mt-1 text-xs text-text-muted">{agent.metadata?.personality?.label || 'Professional'}</div>
+                          </td>
                           <td className="px-3 py-3"><StatusBadge value={agent.status} /></td>
                           <td className="px-3 py-3">
                             {agent.elevenlabsAgentId ? (
@@ -682,19 +747,47 @@ export default function CompanySettingsPage() {
                     value={agentForm.displayName}
                     onChange={(event) => setAgentForm({ ...agentForm, displayName: event.target.value })}
                   />
-                  <input
-                    className="ops-input"
-                    placeholder="Voice ID"
+                  <select
+                    className="ops-select"
+                    value={agentForm.voiceProfile}
+                    onChange={(event) => setAgentForm({ ...agentForm, voiceProfile: event.target.value, voiceId: '' })}
+                  >
+                    {voiceProfiles.map((profile) => (
+                      <option key={profile.key} value={profile.key}>{profile.label}</option>
+                    ))}
+                  </select>
+                  <select
+                    className="ops-select"
                     value={agentForm.voiceId}
                     onChange={(event) => setAgentForm({ ...agentForm, voiceId: event.target.value })}
+                  >
+                    <option value="">{voiceLoading ? 'Loading ElevenLabs voices…' : 'Use provider default voice'}</option>
+                    {filteredVoiceOptions.map((voice) => (
+                      <option key={voice.voiceId} value={voice.voiceId}>
+                        {voice.name}
+                        {voice.gender || voice.accent ? ` — ${[voice.gender, voice.accent].filter(Boolean).join(', ')}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    className="ops-select"
+                    value={agentForm.personality}
+                    onChange={(event) => setAgentForm({ ...agentForm, personality: event.target.value })}
+                  >
+                    {personalityPresets.map((preset) => (
+                      <option key={preset.key} value={preset.key}>{preset.label}</option>
+                    ))}
+                  </select>
+                  <textarea
+                    className="ops-input min-h-20 py-2"
+                    placeholder="Optional personality notes, e.g. calm, witty, luxury, no slang"
+                    value={agentForm.customPersonalityNotes}
+                    onChange={(event) => setAgentForm({ ...agentForm, customPersonalityNotes: event.target.value })}
                   />
                   <div className="grid grid-cols-2 gap-3">
-                    <input
-                      className="ops-input"
-                      placeholder="Prompt version"
-                      value={agentForm.promptVersion}
-                      onChange={(event) => setAgentForm({ ...agentForm, promptVersion: event.target.value })}
-                    />
+                    <div className="rounded-lg border border-border bg-surface-secondary px-3 py-2 text-xs text-text-muted">
+                      Template version is managed automatically.
+                    </div>
                     <select
                       className="ops-select"
                       value={agentForm.status}

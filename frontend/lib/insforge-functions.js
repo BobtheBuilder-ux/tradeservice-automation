@@ -64,6 +64,15 @@ export async function testElevenLabsAgent(user, agentId) {
   });
 }
 
+export async function listElevenLabsVoices(user) {
+  return invokeFunction('elevenlabs-agent-actions', {
+    action: 'list-voices',
+    body: {
+      tenantId: user?.tenantId,
+    },
+  });
+}
+
 export async function getCalendlyConnectUrl() {
   return invokeFunction('calendly-oauth', { action: 'connect-url', body: {} });
 }

@@ -15,6 +15,8 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Voice-Bridge-Secret',
 };
 
+const ELEVENLABS_API_BASE = 'https://api.elevenlabs.io/v1';
+
 function optionsResponse() {
   return new Response(null, { status: 204, headers: corsHeaders });
 }
@@ -105,6 +107,42 @@ async function loadSession(db: any, sessionId: string) {
   return session;
 }
 
+function isCallableTenantAgent(agent: JsonRecord | null) {
+  return Boolean(agent?.id && ['live', 'testing'].includes(agent.status) && agent.elevenlabs_agent_id);
+}
+
+async function assertCallableSessionAgent(db: any, session: JsonRecord) {
+  if (!session.tenant_agent_id) {
+    throw new Error('Voice call session is missing active tenant AI agent context');
+  }
+  const rows = await unwrap(
+    await db.database
+      .from('tenant_agents')
+      .select('*')
+      .eq('tenant_id', session.tenant_id)
+      .eq('id', session.tenant_agent_id)
+      .limit(1),
+    'Failed to load voice call tenant agent'
+  );
+  const agent = rows?.[0] || null;
+  if (!isCallableTenantAgent(agent)) {
+    throw new Error('Voice call tenant AI agent is not live/testing and synced to ElevenLabs');
+  }
+  if (session.elevenlabs_agent_id !== agent.elevenlabs_agent_id) {
+    await db.database.from('voice_call_sessions').update({
+      elevenlabs_agent_id: agent.elevenlabs_agent_id,
+      updated_at: nowIso(),
+      metadata: {
+        ...(session.metadata || {}),
+        correctedElevenLabsAgentId: true,
+        previousElevenLabsAgentId: session.elevenlabs_agent_id || null,
+      },
+    }).eq('id', session.id).eq('tenant_id', session.tenant_id);
+    session.elevenlabs_agent_id = agent.elevenlabs_agent_id;
+  }
+  return agent;
+}
+
 async function verifySessionToken(session: JsonRecord, token: string) {
   if (!token) throw new Error('Call context token is required');
   if (new Date(session.context_expires_at).getTime() < Date.now()) {
@@ -167,7 +205,7 @@ function serviceInterest(lead: JsonRecord) {
 }
 
 function buildCallFirstMessage(rows: JsonRecord) {
-  const agentName = rows.agent?.display_name || 'Bob';
+  const agentName = rows.agent?.display_name || 'the AI assistant';
   const tenantName = rows.tenant?.name || 'the company';
   const service = serviceInterest(rows.lead);
   const reason = service ? `your recent request about ${service}` : 'your recent request';
@@ -184,7 +222,7 @@ function buildCallFirstMessage(rows: JsonRecord) {
 }
 
 function buildCallPrompt(rows: JsonRecord) {
-  const agentName = rows.agent?.display_name || 'Bob';
+  const agentName = rows.agent?.display_name || 'the AI assistant';
   const tenantName = rows.tenant?.name || 'the company';
   const service = serviceInterest(rows.lead) || 'the service they asked about';
   const booking = rows.bookingIntegration || {};
@@ -198,16 +236,18 @@ function buildCallPrompt(rows: JsonRecord) {
       ? 'This is a rebound call after an interrupted/drop event. Start by apologizing briefly for the interruption, then continue the same purpose without restarting awkwardly.'
       : '',
     'Open with your identity, company, and reason for calling. Never begin with "is now a good time" or a similar permission-only line.',
-    'In the introduction, ask what language the lead would prefer to communicate in unless preferred_language is already set. When the lead answers, immediately call update_lead_status with preferredLanguage, then continue in that language. Do not repeat the introduction or ask the language question again after the language is selected.',
-    'If the lead asks to switch language mid-call, never end the call and never restart the introduction. Acknowledge the request, save preferredLanguage with update_lead_status, and continue all subsequent responses in that language from the current point in the conversation.',
+    'In the introduction, ask what language the lead would prefer to communicate in unless preferred_language is already set. When the lead answers, switch immediately in your next spoken response. Do not wait for a tool result before speaking. Then call update_lead_status with preferredLanguage as a fast state save. Do not repeat the introduction or ask the language question again after the language is selected.',
+    'If the lead asks to switch language mid-call, never end the call and never restart the introduction. Respond within one short sentence in the requested language, then continue all subsequent responses in that language from the current point in the conversation. Save preferredLanguage with update_lead_status after the spoken acknowledgement, but do not let the save delay the language switch.',
     'Never end the call because of background noise, cross-talk, multiple interruptions, silence, or a language change. Treat interruptions as normal conversation. If the lead is silent, patiently prompt again instead of ending.',
     rows.lead?.preferred_language ? `Lead preferred language: ${rows.lead.preferred_language}. Continue in this language unless the lead changes it.` : 'Lead preferred language is not set yet.',
     'After the lead responds, keep the conversation warm, concise, and useful. If they are busy, offer to send an SMS follow-up or schedule a better time.',
     'Use the tenant knowledge base for company-specific services, process, pricing guidance, objections, and policies. If knowledge is missing, do not invent details; offer to have the team follow up.',
     'Use get_lead_context before answering detailed lead/setup questions, booking, or sending follow-up messages.',
     `Booking provider: ${bookingProvider}. Booking path: ${bookingPath}.`,
+    'The core purpose of this outbound call is to understand the lead’s service interest and move that interest toward qualification and booking. If service_interest is missing, generic, unclear, or the lead has not clearly expressed interest yet, do not abandon the workflow and do not mark them not_interested. Ask one concise clarifying question such as which service they wanted help with, what prompted the request, or what outcome they want. If tenant knowledge lists services, offer 2 to 4 likely service options. Once the interest is clear, save it with update_lead_status and continue qualification.',
     'Before booking, qualify the lead with a short dynamic question set based on their service interest and tenant knowledge. Ask only relevant questions, one at a time, normally 3 to 7 questions. For insurance-like services, examples include marital/common-law status, children, home ownership, what they want to protect, free review interest, age range, and current insurance status. For other services, infer comparable qualification questions from the service and knowledge base.',
     'After collecting qualification answers, call update_lead_status with qualificationQuestions, qualificationAnswers, qualificationSummary, qualificationStatus, qualificationScore when useful, and leadStage or schedulingState.',
+    'During this active call, treat every booking date the lead mentions as a future date by default. Use current_date, current_time, and current_timezone to resolve relative dates like today, tomorrow, Monday, next week, or later today to the next future occurrence. For month/day or weekday mentions without a year, choose the next future occurrence, never a past year. Never use old example dates or training-data dates. If the date/time is genuinely ambiguous, ask one short confirmation question before booking.',
     'When the lead is qualified, interested, or clearly ready to book, your first attempt must be to book directly on the phone by asking for a preferred date/time and calling create_booking. Sending a booking link by SMS/email is only a fallback when the lead explicitly asks to choose a time later, asks for the link, refuses to pick a time on the call, or cannot decide.',
     'If a booking is created, the tool handles SMS confirmation and reminders when SMS consent exists.',
     'Do not read, pronounce, or spell long URLs by default. Say that the meeting link will be sent by SMS/email. If the lead explicitly asks you to read a link aloud, read it slowly in short chunks.',
@@ -244,6 +284,40 @@ function buildConversationConfigOverride(rows: JsonRecord) {
       },
     },
   };
+}
+
+function buildCallDynamicVariables(session: JsonRecord, rows: JsonRecord) {
+  const service = serviceInterest(rows.lead);
+  return {
+    tenant_id: dynamicString(session.tenant_id),
+    tenant_name: dynamicString(rows.tenant?.name),
+    lead_id: dynamicString(session.lead_id),
+    tenant_agent_id: dynamicString(session.tenant_agent_id),
+    agent_name: dynamicString(rows.agent?.display_name || 'the AI assistant'),
+    company_name: dynamicString(rows.tenant?.name),
+    lead_name: dynamicString(leadDisplayName(rows.lead)),
+    service_interest: dynamicString(service),
+    service_interest_status: dynamicString(service ? 'known' : 'missing_or_unclear'),
+    preferred_language: dynamicString(rows.lead?.preferred_language),
+    language_switch_mode: 'instant_spoken_ack_then_fast_save',
+    booking_date_default: 'future_occurrence',
+    booking_context: dynamicString(rows.lead?.preferred_meeting_window),
+    booking_provider: dynamicString(rows.bookingIntegration?.provider),
+    booking_url: dynamicString(rows.bookingIntegration?.booking_url),
+    call_reason: dynamicString(service ? 'Follow up about ' + service : 'Follow up on recent request'),
+    ready_knowledge_documents: dynamicString(rows.knowledgeDocuments?.length || 0),
+    current_date: dynamicString(new Date().toISOString().slice(0, 10)),
+    current_time: dynamicString(new Date().toISOString()),
+    current_timezone: dynamicString(rows.tenant?.default_timezone || 'UTC'),
+    rebound_call: dynamicString(rows.bobAction?.payload?.reboundCall || rows.bobAction?.payload?.rebound_call || rows.session?.metadata?.reboundCall || rows.session?.metadata?.rebound_call ? 'true' : ''),
+    previous_call_summary: dynamicString(rows.bobAction?.payload?.previousCallSummary || rows.bobAction?.payload?.previous_call_summary),
+  };
+}
+
+function elevenLabsApiKey() {
+  const apiKey = Deno.env.get('ELEVENLABS_API_KEY');
+  if (!apiKey) throw new Error('ELEVENLABS_API_KEY is not configured');
+  return apiKey;
 }
 
 async function getElevenLabsSignedUrl(agentId: string) {
@@ -304,11 +378,55 @@ async function reboundPreConnectSay(db: any, session: JsonRecord) {
   return payload.reboundOpening || 'Sorry for the interruption — our call dropped. I am calling back so we can continue from where we left off.';
 }
 
+async function callPreConnectSay(db: any, session: JsonRecord) {
+  const reboundMessage = await reboundPreConnectSay(db, session);
+  if (reboundMessage) return reboundMessage;
+  const rows = await loadContextRows(db, session);
+  return buildCallFirstMessage(rows);
+}
+
+async function registerElevenLabsTwilioCall(db: any, session: JsonRecord, body: JsonRecord) {
+  const rows = await loadContextRows(db, session);
+  const fromNumber = firstValue(body.From, session.metadata?.from);
+  const toNumber = firstValue(body.To, session.metadata?.to);
+  if (!fromNumber || !toNumber) throw new Error('Twilio From and To numbers are required for ElevenLabs register call');
+
+  const conversationInitiationClientData: JsonRecord = {
+    dynamic_variables: buildCallDynamicVariables(session, rows),
+  };
+
+  if (Deno.env.get('ENABLE_ELEVENLABS_CONVERSATION_OVERRIDE') === 'true') {
+    conversationInitiationClientData.conversation_config_override = buildConversationConfigOverride(rows);
+  }
+
+  const response = await fetch(ELEVENLABS_API_BASE + '/convai/twilio/register-call', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'xi-api-key': elevenLabsApiKey(),
+    },
+    body: JSON.stringify({
+      agent_id: session.elevenlabs_agent_id,
+      from_number: fromNumber,
+      to_number: toNumber,
+      direction: session.direction || 'outbound',
+      conversation_initiation_client_data: conversationInitiationClientData,
+    }),
+  });
+
+  const twiml = await response.text();
+  if (!response.ok) {
+    throw new Error('ElevenLabs register call failed: ' + response.status + ' ' + twiml.slice(0, 300));
+  }
+  return xmlResponse(twiml);
+}
+
 async function handleIntro(db: any, reqUrl: URL, body: JsonRecord) {
   const sessionId = reqUrl.searchParams.get('sessionId') || body.VoiceCallSessionId || body.sessionId || '';
   const token = reqUrl.searchParams.get('token') || body.CallContextToken || body.token || '';
   const session = await loadSession(db, sessionId);
   await verifySessionToken(session, token);
+  await assertCallableSessionAgent(db, session);
 
   await db.database.from('voice_call_sessions').update({
     twilio_call_sid: firstValue(body.CallSid, session.twilio_call_sid) || null,
@@ -338,7 +456,11 @@ async function handleIntro(db: any, reqUrl: URL, body: JsonRecord) {
     }).eq('id', session.bob_action_id).eq('tenant_id', session.tenant_id);
   }
 
-  return streamTwiml(reqUrl, session, token, await reboundPreConnectSay(db, session));
+  if (Deno.env.get('ELEVENLABS_TWILIO_REGISTER_CALL_ENABLED') === 'true') {
+    return await registerElevenLabsTwilioCall(db, session, body);
+  }
+
+  return streamTwiml(reqUrl, session, token, await callPreConnectSay(db, session));
 }
 
 async function handleStatus(db: any, reqUrl: URL, body: JsonRecord) {
@@ -423,6 +545,7 @@ async function handleBridgeContext(db: any, req: Request, body: JsonRecord) {
   const token = body.callContextToken || body.token || body.CallContextToken || '';
   const session = await loadSession(db, sessionId);
   await verifySessionToken(session, token);
+  await assertCallableSessionAgent(db, session);
   const rows = await loadContextRows(db, session);
   const signedUrl = await getElevenLabsSignedUrl(session.elevenlabs_agent_id);
 
@@ -443,27 +566,7 @@ async function handleBridgeContext(db: any, req: Request, body: JsonRecord) {
     ...(Deno.env.get('ENABLE_ELEVENLABS_CONVERSATION_OVERRIDE') === 'true'
       ? { conversationConfigOverride: buildConversationConfigOverride(rows) }
       : {}),
-    dynamicVariables: {
-      tenant_id: dynamicString(session.tenant_id),
-      tenant_name: dynamicString(rows.tenant?.name),
-      lead_id: dynamicString(session.lead_id),
-      tenant_agent_id: dynamicString(session.tenant_agent_id),
-      agent_name: dynamicString(rows.agent?.display_name || 'Bob'),
-      company_name: dynamicString(rows.tenant?.name),
-      lead_name: dynamicString(leadDisplayName(rows.lead)),
-      service_interest: dynamicString(serviceInterest(rows.lead)),
-      preferred_language: dynamicString(rows.lead?.preferred_language),
-      booking_context: dynamicString(rows.lead?.preferred_meeting_window),
-      booking_provider: dynamicString(rows.bookingIntegration?.provider),
-      booking_url: dynamicString(rows.bookingIntegration?.booking_url),
-      call_reason: dynamicString(serviceInterest(rows.lead) ? `Follow up about ${serviceInterest(rows.lead)}` : 'Follow up on recent request'),
-      ready_knowledge_documents: dynamicString(rows.knowledgeDocuments?.length || 0),
-      current_date: dynamicString(new Date().toISOString().slice(0, 10)),
-      current_time: dynamicString(new Date().toISOString()),
-      current_timezone: dynamicString(rows.tenant?.default_timezone || 'UTC'),
-      rebound_call: dynamicString(rows.bobAction?.payload?.reboundCall || rows.bobAction?.payload?.rebound_call || rows.session?.metadata?.reboundCall || rows.session?.metadata?.rebound_call ? 'true' : ''),
-      previous_call_summary: dynamicString(rows.bobAction?.payload?.previousCallSummary || rows.bobAction?.payload?.previous_call_summary),
-    },
+    dynamicVariables: buildCallDynamicVariables(session, rows),
   });
 }
 
@@ -753,6 +856,7 @@ export default async function(req: Request): Promise<Response> {
       streamConfigured: Boolean(Deno.env.get('VOICE_MEDIA_BRIDGE_WS_URL')),
       bridgeContextProtected: Boolean(Deno.env.get('VOICE_BRIDGE_CONTEXT_SECRET')),
       elevenlabsConfigured: Boolean(Deno.env.get('ELEVENLABS_API_KEY')),
+      elevenlabsRegisterCallEnabled: Deno.env.get('ELEVENLABS_TWILIO_REGISTER_CALL_ENABLED') === 'true',
     });
   }
 
