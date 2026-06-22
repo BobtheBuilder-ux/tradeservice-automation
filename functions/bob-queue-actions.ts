@@ -1,7 +1,6 @@
 import { createClient } from 'npm:@insforge/sdk';
 import twilio from 'npm:twilio';
 
-const DEFAULT_TENANT_ID = '00000000-0000-4000-8000-000000000001';
 const CALL_CONTEXT_TTL_MS = 20 * 60 * 1000;
 
 type JsonRecord = Record<string, any>;
@@ -63,6 +62,12 @@ async function unwrap(result: any, message: string) {
   return result?.data;
 }
 
+function requiredTenantId(input: any) {
+  const tenantId = input?.tenantId || input?.tenant_id;
+  if (!tenantId) throw new Error('tenantId is required');
+  return String(tenantId);
+}
+
 async function sha256Hex(value: string) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
   return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -74,11 +79,11 @@ function randomContextToken() {
 
 async function resolveTenantIdByPhone(db: any, phone: string) {
   const normalized = normalizePhone(phone);
-  if (!normalized) return DEFAULT_TENANT_ID;
+  if (!normalized) return null;
   const { data } = await db.database.rpc('resolve_tenant_by_phone_number', {
     p_phone_number: normalized,
   });
-  return data || DEFAULT_TENANT_ID;
+  return data || null;
 }
 
 async function getTenantPrimaryPhoneNumber(db: any, tenantId: string) {
@@ -247,7 +252,7 @@ async function startOutboundCall(input: { to: string; from: string; twimlUrl: st
 }
 
 async function sendDashboardTestSms(db: any, body: JsonRecord) {
-  const tenantId = body.tenantId || body.tenant_id || DEFAULT_TENANT_ID;
+  const tenantId = requiredTenantId(body);
   const lead = await loadLead(db, tenantId, body.leadId || body.lead_id);
   if (!lead) throw new Error('Tenant lead was not found');
   const policy = leadAllowsChannel(lead, 'sms');
@@ -307,7 +312,7 @@ function whatsappTemplateVariables(lead: any) {
 }
 
 async function sendDashboardTestWhatsapp(db: any, body: JsonRecord) {
-  const tenantId = body.tenantId || body.tenant_id || DEFAULT_TENANT_ID;
+  const tenantId = requiredTenantId(body);
   const lead = await loadLead(db, tenantId, body.leadId || body.lead_id);
   if (!lead) throw new Error('Tenant lead was not found');
   const policy = leadAllowsChannel(lead, 'whatsapp');
@@ -420,7 +425,7 @@ async function sendTenantSms(db: any, input: { tenantId: string; lead: any; mess
 }
 
 async function createVoiceCallSession(db: any, input: JsonRecord) {
-  const tenantId = input.tenantId || input.tenant_id || DEFAULT_TENANT_ID;
+  const tenantId = requiredTenantId(input);
   const leadId = input.leadId || input.lead_id || null;
   const lead = await loadLead(db, tenantId, leadId);
 
@@ -561,22 +566,24 @@ async function launchVoiceCall(db: any, input: JsonRecord) {
 
 const bobQueueActions = ['status', 'tick', 'start-calls', 'skip', 'campaign-pause', 'campaign-resume', 'campaign-stop', 'test-lead', 'test-call', 'test-sms', 'test-whatsapp', 'live-start', 'live-status'];
 
-async function getBobRunStatus(db: any, leadId: string, conversationId?: string) {
-  const { data: leads } = await db.database.from('leads').select('*').eq('id', leadId).limit(1);
+async function getBobRunStatus(db: any, tenantId: string, leadId: string, conversationId?: string) {
+  const { data: leads } = await db.database.from('leads').select('*').eq('tenant_id', tenantId).eq('id', leadId).limit(1);
   const lead = leads?.[0] || null;
   const { data: conversations } = conversationId
-    ? await db.database.from('lead_conversations').select('*').eq('id', conversationId).limit(1)
-    : await db.database.from('lead_conversations').select('*').eq('lead_id', leadId).limit(1);
+    ? await db.database.from('lead_conversations').select('*').eq('tenant_id', tenantId).eq('id', conversationId).limit(1)
+    : await db.database.from('lead_conversations').select('*').eq('tenant_id', tenantId).eq('lead_id', leadId).limit(1);
   const conversation = conversations?.[0] || null;
   const { data: actions } = await db.database
     .from('bob_actions')
     .select('*')
+    .eq('tenant_id', tenantId)
     .eq('lead_id', leadId)
     .order('scheduled_for', { ascending: true })
     .limit(100);
   const { data: voiceCalls } = await db.database
     .from('voice_call_sessions')
     .select('*')
+    .eq('tenant_id', tenantId)
     .eq('lead_id', leadId)
     .order('created_at', { ascending: false })
     .limit(20);
@@ -584,7 +591,7 @@ async function getBobRunStatus(db: any, leadId: string, conversationId?: string)
 }
 
 async function createLiveLeadRun(db: any, body: any) {
-  const tenantId = body.tenantId || body.tenant_id || DEFAULT_TENANT_ID;
+  const tenantId = requiredTenantId(body);
   const email = body.email || `live-test-${Date.now()}@example.com`;
   const fullName = [body.firstName || 'Live', body.lastName || 'Test'].filter(Boolean).join(' ');
   const { data: leads } = await db.database.from('leads').insert([{
@@ -635,21 +642,21 @@ async function createLiveLeadRun(db: any, body: any) {
   if (body.includeSms) actionRows.push({ tenant_id: tenantId, lead_id: lead.id, conversation_id: conversation.id, action_type: 'send_sms', channel: 'sms', status: smsPolicy.allowed ? 'pending' : 'awaiting_human', reason: smsPolicy.allowed ? 'Live test SMS action' : smsPolicy.reason, scheduled_for: nowIso(), payload: { source: 'function_live_test', contactPolicy: smsPolicy } });
   if (body.includeCall) actionRows.push({ tenant_id: tenantId, lead_id: lead.id, conversation_id: conversation.id, action_type: 'queue_call_attempt', channel: 'phone', status: callPolicy.allowed ? 'awaiting_call' : 'awaiting_human', reason: callPolicy.allowed ? 'Live test call action' : callPolicy.reason, scheduled_for: nowIso(), payload: { source: 'function_live_test', contactPolicy: callPolicy, tenantAgentId: body.tenantAgentId || body.tenant_agent_id || null } });
   if (actionRows.length) await db.database.from('bob_actions').insert(actionRows);
-  return { lead, conversation, status: await getBobRunStatus(db, lead.id, conversation.id) };
+  return { lead, conversation, status: await getBobRunStatus(db, tenantId, lead.id, conversation.id) };
 }
 
-async function skipBobAction(db: any, actionId: string) {
+async function skipBobAction(db: any, tenantId: string, actionId: string) {
   const { data } = await db.database.from('bob_actions').update({
     status: 'skipped',
     executed_at: nowIso(),
     updated_at: nowIso(),
     result: { skippedBy: 'insforge_function' },
-  }).eq('id', actionId).select();
+  }).eq('tenant_id', tenantId).eq('id', actionId).select();
   return data?.[0] || null;
 }
 
 async function updateCampaignExecution(db: any, body: JsonRecord, status: string) {
-  const tenantId = body.tenantId || body.tenant_id || DEFAULT_TENANT_ID;
+  const tenantId = requiredTenantId(body);
   const campaignId = body.campaignId || body.campaign_id;
   if (!campaignId) throw new Error('campaignId is required');
   const now = nowIso();
@@ -856,8 +863,9 @@ async function startQueuedCalls(db: any, body: JsonRecord) {
 }
 
 async function createFunctionTestLead(db: any, body: any) {
+  const tenantId = requiredTenantId(body);
   const { data } = await db.database.from('leads').insert([{
-    tenant_id: body.tenantId || body.tenant_id || DEFAULT_TENANT_ID,
+    tenant_id: tenantId,
     email: body.email || `test-${Date.now()}@example.com`,
     full_name: body.fullName || body.name || 'Test Lead',
     phone: body.phone || null,
@@ -886,9 +894,10 @@ export default async function(req: Request): Promise<Response> {
 
   try {
     if (action === 'skip') {
+      const tenantId = requiredTenantId(body);
       const id = body.actionId || url.searchParams.get('actionId');
       if (!id) return jsonResponse({ success: false, error: 'actionId is required' }, 400);
-      return jsonResponse({ success: true, action: await skipBobAction(db, id) });
+      return jsonResponse({ success: true, action: await skipBobAction(db, tenantId, id) });
     }
 
     if (action === 'campaign-pause') return jsonResponse({ success: true, campaign: await updateCampaignExecution(db, body, 'PAUSED') });
@@ -900,17 +909,19 @@ export default async function(req: Request): Promise<Response> {
     }
 
     if (action === 'live-status') {
+      const tenantId = requiredTenantId(body);
       const leadId = body.leadId || url.searchParams.get('leadId');
       if (!leadId) return jsonResponse({ success: false, error: 'leadId is required' }, 400);
       return jsonResponse({
         success: true,
-        status: await getBobRunStatus(db, leadId, body.conversationId || url.searchParams.get('conversationId') || undefined),
+        status: await getBobRunStatus(db, tenantId, leadId, body.conversationId || url.searchParams.get('conversationId') || undefined),
       });
     }
 
     if (action === 'tick' || action === 'start-calls') {
       const { voiceResults, smsResults } = await startQueuedCalls(db, body);
       if (body.leadId || body.lead_id) {
+        const tenantId = requiredTenantId(body);
         const leadId = body.leadId || body.lead_id;
         return jsonResponse({
           success: true,
@@ -920,7 +931,7 @@ export default async function(req: Request): Promise<Response> {
             voice: { started: voiceResults.filter((row) => row.success).length, results: voiceResults },
             sms: { sent: smsResults.filter((row) => row.success).length, results: smsResults },
           },
-          status: await getBobRunStatus(db, leadId, body.conversationId || body.conversation_id),
+          status: await getBobRunStatus(db, tenantId, leadId, body.conversationId || body.conversation_id),
         });
       }
       return jsonResponse({ success: true, queued: await inspectQueuedBobActions(db), voice: { results: voiceResults }, sms: { results: smsResults }, mode: 'function_tick' });

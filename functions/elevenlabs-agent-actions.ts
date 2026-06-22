@@ -329,7 +329,7 @@ function elevenLabsToolDefinitions() {
         timezone: literal('string', 'Optional IANA timezone or spoken timezone for the requested time.'),
       },
       [],
-      2
+      5
     ),
     webhookToolConfig(
       'create_booking',
@@ -377,7 +377,7 @@ function elevenLabsToolDefinitions() {
         nextContactAt: literal('string', 'Optional ISO date/time for the next follow-up.'),
       },
       [],
-      2
+      5
     ),
     webhookToolConfig(
       'record_call_outcome',

@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Head from 'next/head';
+import { useRouter } from 'next/router';
 import { AlertCircle, CheckCircle2, Mail, MessageSquare, Phone, Play, RefreshCw, ShieldCheck, SkipForward } from 'lucide-react';
 import { invokeFunction } from '../lib/insforge-functions';
+import { useAuth } from '../lib/auth';
+import { getTenantOnboardingRedirect } from '../lib/insforge-product';
 
 const CONFIRMATION = 'RUN LIVE TEST';
 
@@ -45,6 +48,8 @@ function statusTone(status) {
 }
 
 export default function LiveAutomationTest() {
+  const router = useRouter();
+  const { user, isAuthenticated, loading: authLoading } = useAuth();
   const [form, setForm] = useState(initialForm);
   const [loading, setLoading] = useState(false);
   const [ticking, setTicking] = useState(false);
@@ -73,6 +78,23 @@ export default function LiveAutomationTest() {
     setForm((current) => ({ ...current, [field]: value }));
     setError('');
   };
+
+  useEffect(() => {
+    let cancelled = false;
+    async function guardReadiness() {
+      if (authLoading) return;
+      if (!isAuthenticated) {
+        router.replace('/login');
+        return;
+      }
+      const redirect = await getTenantOnboardingRedirect(user);
+      if (!cancelled && redirect === '/onboarding') router.replace('/onboarding');
+    }
+    guardReadiness();
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, isAuthenticated, user, router]);
 
   const resetForm = () => {
     setForm({ ...initialForm, email: freshEmail() });

@@ -29,10 +29,15 @@ import {
   UploadCloud,
   FileText,
   ShieldOff,
-  Trash2
+  Trash2,
+  Briefcase,
+  Layers,
+  Library,
+  Sparkles,
+  RefreshCw
 } from 'lucide-react';
 import { format } from 'date-fns';
-import { useAuth } from '../lib/auth';
+import { signOut, useAuth } from '../lib/auth';
 import {
   assignLeadToTenantAgent,
   deleteAllLeads,
@@ -49,9 +54,24 @@ import {
   respondToFeedback,
   setFeedbackStatus,
   archiveTenantAgent,
+  createAssistedTenant,
+  createPlatformKnowledgeDocument,
+  getCurrentPlatformAdminProfile,
+  getTenantOnboardingRedirect,
+  listBusinessNiches,
+  listPlatformKnowledgeDocuments,
+  listSuperAdminSetupSessions,
+  listTenantKnowledgeAssignments,
+  listTenantsForAdmin,
   updateTenantAgentStatus,
+  updateTenantBusinessNiche,
+  updatePlatformKnowledgeDocument,
   updateLeadReview,
   updateLeadSuppression,
+  updateSuperAdminSetupSession,
+  updateTenantKnowledgeAssignment,
+  upsertBusinessNiche,
+  upsertTenantKnowledgeAssignment,
 } from '../lib/insforge-product';
 import { invokeFunction } from '../lib/insforge-functions';
 
@@ -106,6 +126,43 @@ export default function AdminDashboard() {
     paused: 0,
     totalSpend: 0,
     totalLeads: 0
+  });
+
+  // Phase 18 super-admin setup and layered knowledge state
+  const [platformTenants, setPlatformTenants] = useState([]);
+  const [businessNiches, setBusinessNiches] = useState([]);
+  const [platformKnowledgeDocuments, setPlatformKnowledgeDocuments] = useState([]);
+  const [tenantKnowledgeAssignments, setTenantKnowledgeAssignments] = useState([]);
+  const [setupSessions, setSetupSessions] = useState([]);
+  const [platformAdminProfile, setPlatformAdminProfile] = useState({ isPlatformAdmin: false });
+  const [platformLoading, setPlatformLoading] = useState(false);
+  const [platformMessage, setPlatformMessage] = useState('');
+  const [tenantSetupForm, setTenantSetupForm] = useState({
+    name: '',
+    ownerEmail: '',
+    industry: '',
+    businessNiche: '',
+    defaultTimezone: 'America/Toronto',
+  });
+  const [nicheForm, setNicheForm] = useState({
+    name: '',
+    key: '',
+    description: '',
+    defaultPlaybookNotes: '',
+  });
+  const [platformKnowledgeForm, setPlatformKnowledgeForm] = useState({
+    scope: 'global',
+    nicheKey: '',
+    title: '',
+    sourceType: 'text',
+    sourceUrl: '',
+    bodyText: '',
+  });
+  const [assignmentForm, setAssignmentForm] = useState({
+    tenantId: '',
+    platformKnowledgeDocumentId: '',
+    tenantAgentId: '',
+    assignmentSource: 'super_admin_override',
   });
 
   // Feedback Management State
@@ -168,13 +225,27 @@ export default function AdminDashboard() {
   const fetchDashboardData = async () => {
     try {
       setLoading(true);
+      const platformProfile = await getCurrentPlatformAdminProfile();
+      setPlatformAdminProfile(platformProfile);
+      if (platformProfile.isPlatformAdmin) {
+        router.replace('/overview');
+        return;
+      }
+      const onboardingRedirect = await getTenantOnboardingRedirect(user);
+      if (onboardingRedirect === '/onboarding') {
+        router.replace('/onboarding');
+        return;
+      }
       await Promise.all([
         fetchAiAgents(),
         fetchLeads(),
         fetchCampaigns(),
         fetchFeedback(),
-        fetchBobActivity()
+        fetchBobActivity(),
       ]);
+      if (activeTab === 'platform') {
+        setActiveTab('overview');
+      }
     } catch (err) {
       console.error('Error fetching dashboard data:', err);
       setError('Failed to load dashboard data');
@@ -194,6 +265,176 @@ export default function AdminDashboard() {
       setAiAgents(await listTenantAgents(user));
     } catch (err) {
       console.error('Error fetching AI agents:', err);
+    }
+  };
+
+  const fetchPlatformAdminData = async (profile = platformAdminProfile) => {
+    if (!profile.isPlatformAdmin) return;
+    try {
+      setPlatformLoading(true);
+      const [tenants, niches, documents, assignments, sessions] = await Promise.all([
+        listTenantsForAdmin(),
+        listBusinessNiches(),
+        listPlatformKnowledgeDocuments(),
+        listTenantKnowledgeAssignments(),
+        listSuperAdminSetupSessions(),
+      ]);
+      setPlatformTenants(tenants);
+      setBusinessNiches(niches);
+      setPlatformKnowledgeDocuments(documents);
+      setTenantKnowledgeAssignments(assignments);
+      setSetupSessions(sessions);
+    } catch (err) {
+      console.error('Error fetching platform setup data:', err);
+      setPlatformMessage(err.message || 'Platform setup data is not available yet.');
+    } finally {
+      setPlatformLoading(false);
+    }
+  };
+
+  const handleCreateAssistedTenant = async (event) => {
+    event.preventDefault();
+    try {
+      setPlatformLoading(true);
+      setPlatformMessage('');
+      const result = await createAssistedTenant(user, tenantSetupForm);
+      setPlatformMessage(`Assisted setup started for ${result.tenant.name}.`);
+      setTenantSetupForm({
+        name: '',
+        ownerEmail: '',
+        industry: '',
+        businessNiche: '',
+        defaultTimezone: 'America/Toronto',
+      });
+      await fetchPlatformAdminData();
+    } catch (err) {
+      console.error('Error creating assisted tenant:', err);
+      setPlatformMessage(err.message || 'Failed to create assisted tenant');
+    } finally {
+      setPlatformLoading(false);
+    }
+  };
+
+  const handleSaveBusinessNiche = async (event) => {
+    event.preventDefault();
+    try {
+      setPlatformLoading(true);
+      setPlatformMessage('');
+      const niche = await upsertBusinessNiche(user, nicheForm);
+      setPlatformMessage(`${niche.name} niche saved.`);
+      setNicheForm({ name: '', key: '', description: '', defaultPlaybookNotes: '' });
+      await fetchPlatformAdminData();
+    } catch (err) {
+      console.error('Error saving business niche:', err);
+      setPlatformMessage(err.message || 'Failed to save business niche');
+    } finally {
+      setPlatformLoading(false);
+    }
+  };
+
+  const handleCreatePlatformKnowledge = async (event) => {
+    event.preventDefault();
+    try {
+      setPlatformLoading(true);
+      setPlatformMessage('');
+      const document = await createPlatformKnowledgeDocument(user, platformKnowledgeForm);
+      setPlatformMessage(`${document.title} added to shared knowledge.`);
+      setPlatformKnowledgeForm({
+        scope: 'global',
+        nicheKey: '',
+        title: '',
+        sourceType: 'text',
+        sourceUrl: '',
+        bodyText: '',
+      });
+      await fetchPlatformAdminData();
+    } catch (err) {
+      console.error('Error creating platform knowledge:', err);
+      setPlatformMessage(err.message || 'Failed to create shared knowledge');
+    } finally {
+      setPlatformLoading(false);
+    }
+  };
+
+  const handleCreateKnowledgeAssignment = async (event) => {
+    event.preventDefault();
+    try {
+      setPlatformLoading(true);
+      setPlatformMessage('');
+      const assignment = await upsertTenantKnowledgeAssignment(user, assignmentForm);
+      setPlatformMessage(`Knowledge assignment ${assignment.status === 'active' ? 'enabled' : 'updated'}.`);
+      setAssignmentForm({
+        tenantId: '',
+        platformKnowledgeDocumentId: '',
+        tenantAgentId: '',
+        assignmentSource: 'super_admin_override',
+      });
+      await fetchPlatformAdminData();
+    } catch (err) {
+      console.error('Error assigning knowledge:', err);
+      setPlatformMessage(err.message || 'Failed to assign shared knowledge');
+    } finally {
+      setPlatformLoading(false);
+    }
+  };
+
+  const handleTenantNicheChange = async (tenantId, businessNiche) => {
+    try {
+      setPlatformLoading(true);
+      setPlatformMessage('');
+      await updateTenantBusinessNiche(tenantId, businessNiche);
+      setPlatformMessage('Tenant niche updated.');
+      await fetchPlatformAdminData();
+    } catch (err) {
+      console.error('Error updating tenant niche:', err);
+      setPlatformMessage(err.message || 'Failed to update tenant niche');
+    } finally {
+      setPlatformLoading(false);
+    }
+  };
+
+  const handleDocumentStatusChange = async (documentId, status) => {
+    try {
+      setPlatformLoading(true);
+      setPlatformMessage('');
+      await updatePlatformKnowledgeDocument(documentId, { status });
+      setPlatformMessage('Shared knowledge status updated.');
+      await fetchPlatformAdminData();
+    } catch (err) {
+      console.error('Error updating shared knowledge:', err);
+      setPlatformMessage(err.message || 'Failed to update shared knowledge');
+    } finally {
+      setPlatformLoading(false);
+    }
+  };
+
+  const handleAssignmentStatusChange = async (assignmentId, status) => {
+    try {
+      setPlatformLoading(true);
+      setPlatformMessage('');
+      await updateTenantKnowledgeAssignment(assignmentId, { status });
+      setPlatformMessage('Knowledge assignment updated.');
+      await fetchPlatformAdminData();
+    } catch (err) {
+      console.error('Error updating knowledge assignment:', err);
+      setPlatformMessage(err.message || 'Failed to update knowledge assignment');
+    } finally {
+      setPlatformLoading(false);
+    }
+  };
+
+  const handleSetupSessionStatusChange = async (sessionId, status) => {
+    try {
+      setPlatformLoading(true);
+      setPlatformMessage('');
+      await updateSuperAdminSetupSession(sessionId, { status });
+      setPlatformMessage('Setup session updated.');
+      await fetchPlatformAdminData();
+    } catch (err) {
+      console.error('Error updating setup session:', err);
+      setPlatformMessage(err.message || 'Failed to update setup session');
+    } finally {
+      setPlatformLoading(false);
     }
   };
 
@@ -547,10 +788,11 @@ export default function AdminDashboard() {
 
   const handleSignOut = async () => {
     try {
-      localStorage.removeItem('auth_token');
-      router.push('/login');
+      await signOut();
+      router.replace('/login');
     } catch (err) {
       console.error('Sign out error:', err);
+      setError('Failed to sign out. Please try again.');
     }
   };
 
@@ -588,6 +830,21 @@ export default function AdminDashboard() {
   });
 
   const unassignedLeads = filteredLeads.filter(lead => !lead.assignedTenantAgentId);
+  const activePlatformDocuments = platformKnowledgeDocuments.filter((document) => document.status !== 'archived');
+  const tenantsById = new Map(platformTenants.map((tenant) => [tenant.id, tenant]));
+  const documentsById = new Map(platformKnowledgeDocuments.map((document) => [document.id, document]));
+  const selectedAssignmentTenant = platformTenants.find((tenant) => tenant.id === assignmentForm.tenantId);
+  const selectedAssignmentTenantAgents = selectedAssignmentTenant?.id === user?.tenantId
+    ? aiAgents.filter((agent) => agent.status !== 'archived')
+    : [];
+  const dashboardTabs = [
+    { id: 'overview', label: 'Overview Dashboard', icon: BarChart3 },
+    { id: 'leads', label: 'Leads', icon: Target },
+    { id: 'campaigns', label: 'Appointments', icon: CalendarDays },
+    { id: 'bob', label: 'AI Agent', icon: Bot },
+    { id: 'platform', label: 'Platform Setup', icon: Layers },
+    { id: 'feedback', label: 'Feedback', icon: MessageSquare },
+  ].filter((tab) => tab.id !== 'platform' || platformAdminProfile.isPlatformAdmin);
 
   if (loading) {
     return (
@@ -606,75 +863,106 @@ export default function AdminDashboard() {
         <meta name="description" content="Admin Dashboard for Lead Management System" />
       </Head>
       
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-purple-50">
-        {/* Header */}
-        <header className="bg-gradient-to-r from-purple-600 via-pink-600 to-blue-600 shadow-lg">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex justify-between items-center h-16">
-              <div className="flex items-center">
-                <h1 className="text-xl font-bold text-white">Admin Dashboard</h1>
+      <div className="min-h-screen bg-background text-text-primary">
+        <div className="flex min-h-screen">
+          <aside className="hidden w-64 shrink-0 border-r border-border bg-surface px-4 py-5 lg:flex lg:flex-col">
+            <div className="mb-8 flex items-center gap-3 px-2">
+              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-accent-soft text-accent">
+                <CalendarDays className="h-5 w-5" />
               </div>
-              <div className="flex items-center space-x-4">
-                <span className="text-sm text-purple-100">Welcome, {user?.name || user?.email}</span>
-                <button
-                  onClick={() => router.push('/knowledge-base')}
-                  className="ops-button-secondary"
-                >
-                  <BookOpen className="w-4 h-4" />
-                  <span>Knowledge Base</span>
-                </button>
-                <button
-                  onClick={() => router.push('/settings/company')}
-                  className="ops-button-secondary"
-                >
-                  <Settings className="w-4 h-4" />
-                  <span>Settings</span>
-                </button>
-                <button
-                  onClick={handleSignOut}
-                  className="flex items-center space-x-2 text-purple-100 hover:text-white hover:bg-white hover:bg-opacity-20 px-3 py-2 rounded-lg transition-all duration-200"
-                >
-                  <LogOut className="w-4 h-4" />
-                  <span>Sign Out</span>
-                </button>
+              <div>
+                <p className="text-sm font-semibold text-text-primary">SetMyMeet</p>
+                <p className="text-xs text-text-muted">Operations</p>
               </div>
             </div>
-          </div>
-        </header>
 
-        {/* Navigation Tabs */}
-        <div className="bg-white shadow-sm border-b border-purple-100">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <nav className="flex space-x-8">
-              {[
-                { id: 'overview', label: 'Overview', icon: BarChart3, color: 'from-blue-500 to-cyan-500' },
-                { id: 'leads', label: 'Appointment Assignment', icon: Target, color: 'from-purple-500 to-pink-500' },
-                { id: 'bob', label: 'Bob Activity', icon: Bot, color: 'from-slate-600 to-cyan-600' },
-                { id: 'feedback', label: 'Agent Feedback', icon: MessageSquare, color: 'from-indigo-500 to-purple-500' },
-                { id: 'campaigns', label: 'Confirmed Meetings', icon: CalendarDays, color: 'from-orange-500 to-red-500' }
-              ].map((tab) => {
+            <nav className="space-y-1">
+              {dashboardTabs.map((tab) => {
                 const Icon = tab.icon;
+                const active = activeTab === tab.id;
                 return (
                   <button
                     key={tab.id}
+                    type="button"
                     onClick={() => setActiveTab(tab.id)}
-                    className={`flex items-center space-x-2 py-4 px-3 border-b-3 font-semibold text-sm transition-all duration-200 rounded-t-lg ${
-                      activeTab === tab.id
-                        ? `border-transparent bg-gradient-to-r ${tab.color} text-white shadow-lg transform -translate-y-1`
-                        : 'border-transparent text-gray-600 hover:text-gray-800 hover:bg-gray-50'
+                    className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                      active
+                        ? 'bg-accent text-accent-foreground'
+                        : 'text-text-secondary hover:bg-surface-secondary hover:text-text-primary'
                     }`}
                   >
-                    <Icon className="w-4 h-4" />
+                    <Icon className="h-4 w-4" />
                     <span>{tab.label}</span>
                   </button>
                 );
               })}
             </nav>
-          </div>
-        </div>
 
-        {/* Main Content */}
-        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+            <div className="mt-auto rounded-lg border border-border bg-surface-secondary p-3">
+              <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-text-primary">
+                <Sparkles className="h-4 w-4 text-accent" />
+                <span>Phase 18</span>
+              </div>
+              <p className="text-xs text-text-muted">Super-admin setup, layered knowledge, and niche assignment controls.</p>
+            </div>
+          </aside>
+
+          <div className="min-w-0 flex-1">
+            <header className="border-b border-border bg-surface">
+              <div className="flex min-h-20 flex-col gap-4 px-4 py-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
+                <div className="min-w-0">
+                  <h1 className="text-2xl font-semibold text-text-primary">Overview Dashboard</h1>
+                  <p className="mt-1 text-sm text-text-muted">Monitor leads, bookings, AI performance, and platform setup in one place.</p>
+                </div>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted" />
+                    <input
+                      type="search"
+                      value={searchTerm}
+                      onChange={(event) => setSearchTerm(event.target.value)}
+                      className="ops-input pl-9 sm:w-80"
+                      placeholder="Search leads, appointments, agents..."
+                    />
+                  </div>
+                  <button type="button" onClick={() => router.push('/knowledge-base')} className="ops-button-secondary">
+                    <BookOpen className="h-4 w-4" />
+                    <span>Knowledge Base</span>
+                  </button>
+                  <button type="button" onClick={() => router.push('/settings/company')} className="ops-button-secondary">
+                    <Settings className="h-4 w-4" />
+                    <span>Settings</span>
+                  </button>
+                  <button type="button" onClick={handleSignOut} className="ops-button-secondary">
+                    <LogOut className="h-4 w-4" />
+                    <span>Sign Out</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex gap-2 overflow-x-auto border-t border-border px-4 py-3 sm:px-6 lg:hidden">
+                {dashboardTabs.map((tab) => {
+                  const Icon = tab.icon;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setActiveTab(tab.id)}
+                      className={`inline-flex h-9 shrink-0 items-center gap-2 rounded-lg px-3 text-sm font-medium ${
+                        activeTab === tab.id
+                          ? 'bg-accent text-accent-foreground'
+                          : 'bg-surface-secondary text-text-secondary'
+                      }`}
+                    >
+                      <Icon className="h-4 w-4" />
+                      <span>{tab.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </header>
+
+            <main className="mx-auto max-w-[1440px] px-4 py-6 sm:px-6">
           {error && (
             <div className="mb-6 bg-red-50 border border-red-200 rounded-md p-4">
               <div className="flex">
@@ -1853,6 +2141,372 @@ export default function AdminDashboard() {
             </div>
           )}
 
+          {/* Phase 18 Platform Setup Tab */}
+          {activeTab === 'platform' && platformAdminProfile.isPlatformAdmin && (
+            <div className="space-y-6">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h2 className="text-2xl font-semibold text-text-primary">Platform Setup</h2>
+                  <p className="mt-1 text-sm text-text-muted">Create assisted tenants, manage shared knowledge, and assign global or niche playbooks.</p>
+                </div>
+                <button type="button" onClick={fetchPlatformAdminData} className="ops-button-secondary" disabled={platformLoading}>
+                  <RefreshCw className="h-4 w-4" />
+                  <span>Refresh</span>
+                </button>
+              </div>
+
+              {platformMessage && (
+                <div className="rounded-lg border border-border bg-surface px-4 py-3 text-sm text-text-secondary">
+                  {platformMessage}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+                {[
+                  { label: 'Tenants', value: platformTenants.length, icon: Building2, tone: 'bg-accent-soft text-accent' },
+                  { label: 'Business Niches', value: businessNiches.filter((niche) => niche.status === 'active').length, icon: Briefcase, tone: 'bg-success-soft text-success' },
+                  { label: 'Shared Docs', value: activePlatformDocuments.length, icon: Library, tone: 'bg-info-soft text-info' },
+                  { label: 'Assignments', value: tenantKnowledgeAssignments.filter((assignment) => assignment.status === 'active').length, icon: Layers, tone: 'bg-warning-soft text-warning' },
+                ].map((metric) => {
+                  const Icon = metric.icon;
+                  return (
+                    <div key={metric.label} className="ops-panel p-4">
+                      <div className="flex items-center gap-4">
+                        <div className={`flex h-12 w-12 items-center justify-center rounded-lg ${metric.tone}`}>
+                          <Icon className="h-5 w-5" />
+                        </div>
+                        <div>
+                          <p className="text-xs font-medium text-text-muted">{metric.label}</p>
+                          <p className="mt-1 text-2xl font-semibold text-text-primary">{metric.value}</p>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+                <form onSubmit={handleCreateAssistedTenant} className="ops-panel p-4">
+                  <div className="mb-4 flex items-center gap-2">
+                    <Building2 className="h-4 w-4 text-accent" />
+                    <h3 className="text-sm font-semibold text-text-primary">Create Assisted Tenant</h3>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Company name</span>
+                      <input className="ops-input" value={tenantSetupForm.name} onChange={(event) => setTenantSetupForm((current) => ({ ...current, name: event.target.value }))} />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Owner email</span>
+                      <input className="ops-input" value={tenantSetupForm.ownerEmail} onChange={(event) => setTenantSetupForm((current) => ({ ...current, ownerEmail: event.target.value }))} />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Industry</span>
+                      <input className="ops-input" value={tenantSetupForm.industry} onChange={(event) => setTenantSetupForm((current) => ({ ...current, industry: event.target.value }))} />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Business niche</span>
+                      <select className="ops-select" value={tenantSetupForm.businessNiche} onChange={(event) => setTenantSetupForm((current) => ({ ...current, businessNiche: event.target.value }))}>
+                        <option value="">No niche selected</option>
+                        {businessNiches.filter((niche) => niche.status === 'active').map((niche) => (
+                          <option key={niche.key} value={niche.key}>{niche.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="block sm:col-span-2">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Default timezone</span>
+                      <input className="ops-input" value={tenantSetupForm.defaultTimezone} onChange={(event) => setTenantSetupForm((current) => ({ ...current, defaultTimezone: event.target.value }))} />
+                    </label>
+                  </div>
+                  <div className="mt-4 flex justify-end">
+                    <button type="submit" className="ops-button-primary" disabled={platformLoading}>
+                      <Plus className="h-4 w-4" />
+                      <span>Start Setup</span>
+                    </button>
+                  </div>
+                </form>
+
+                <form onSubmit={handleSaveBusinessNiche} className="ops-panel p-4">
+                  <div className="mb-4 flex items-center gap-2">
+                    <Briefcase className="h-4 w-4 text-success" />
+                    <h3 className="text-sm font-semibold text-text-primary">Business Niche Catalog</h3>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Niche name</span>
+                      <input className="ops-input" value={nicheForm.name} onChange={(event) => setNicheForm((current) => ({ ...current, name: event.target.value }))} />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Niche key</span>
+                      <input className="ops-input" value={nicheForm.key} onChange={(event) => setNicheForm((current) => ({ ...current, key: event.target.value }))} placeholder="insurance" />
+                    </label>
+                    <label className="block sm:col-span-2">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Description</span>
+                      <input className="ops-input" value={nicheForm.description} onChange={(event) => setNicheForm((current) => ({ ...current, description: event.target.value }))} />
+                    </label>
+                    <label className="block sm:col-span-2">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Default playbook notes</span>
+                      <textarea className="ops-input h-20 py-2" value={nicheForm.defaultPlaybookNotes} onChange={(event) => setNicheForm((current) => ({ ...current, defaultPlaybookNotes: event.target.value }))} />
+                    </label>
+                  </div>
+                  <div className="mt-4 flex justify-end">
+                    <button type="submit" className="ops-button-primary" disabled={platformLoading}>
+                      <Check className="h-4 w-4" />
+                      <span>Save Niche</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+                <form onSubmit={handleCreatePlatformKnowledge} className="ops-panel p-4">
+                  <div className="mb-4 flex items-center gap-2">
+                    <Library className="h-4 w-4 text-info" />
+                    <h3 className="text-sm font-semibold text-text-primary">Shared Knowledge Document</h3>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Scope</span>
+                      <select className="ops-select" value={platformKnowledgeForm.scope} onChange={(event) => setPlatformKnowledgeForm((current) => ({ ...current, scope: event.target.value, nicheKey: event.target.value === 'global' ? '' : current.nicheKey }))}>
+                        <option value="global">Global</option>
+                        <option value="niche">Niche</option>
+                      </select>
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Niche</span>
+                      <select className="ops-select" value={platformKnowledgeForm.nicheKey} disabled={platformKnowledgeForm.scope === 'global'} onChange={(event) => setPlatformKnowledgeForm((current) => ({ ...current, nicheKey: event.target.value }))}>
+                        <option value="">Select niche</option>
+                        {businessNiches.filter((niche) => niche.status === 'active').map((niche) => (
+                          <option key={niche.key} value={niche.key}>{niche.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Title</span>
+                      <input className="ops-input" value={platformKnowledgeForm.title} onChange={(event) => setPlatformKnowledgeForm((current) => ({ ...current, title: event.target.value }))} />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Source type</span>
+                      <select className="ops-select" value={platformKnowledgeForm.sourceType} onChange={(event) => setPlatformKnowledgeForm((current) => ({ ...current, sourceType: event.target.value }))}>
+                        <option value="text">Text</option>
+                        <option value="url">URL</option>
+                      </select>
+                    </label>
+                    {platformKnowledgeForm.sourceType === 'url' ? (
+                      <label className="block sm:col-span-2">
+                        <span className="mb-1 block text-xs font-medium text-text-secondary">Source URL</span>
+                        <input className="ops-input" value={platformKnowledgeForm.sourceUrl} onChange={(event) => setPlatformKnowledgeForm((current) => ({ ...current, sourceUrl: event.target.value }))} />
+                      </label>
+                    ) : (
+                      <label className="block sm:col-span-2">
+                        <span className="mb-1 block text-xs font-medium text-text-secondary">Document text</span>
+                        <textarea className="ops-input h-24 py-2" value={platformKnowledgeForm.bodyText} onChange={(event) => setPlatformKnowledgeForm((current) => ({ ...current, bodyText: event.target.value }))} />
+                      </label>
+                    )}
+                  </div>
+                  <div className="mt-4 flex justify-end">
+                    <button type="submit" className="ops-button-primary" disabled={platformLoading}>
+                      <Plus className="h-4 w-4" />
+                      <span>Add Document</span>
+                    </button>
+                  </div>
+                </form>
+
+                <form onSubmit={handleCreateKnowledgeAssignment} className="ops-panel p-4">
+                  <div className="mb-4 flex items-center gap-2">
+                    <Layers className="h-4 w-4 text-warning" />
+                    <h3 className="text-sm font-semibold text-text-primary">Assign Shared Knowledge</h3>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Tenant</span>
+                      <select className="ops-select" value={assignmentForm.tenantId} onChange={(event) => setAssignmentForm((current) => ({ ...current, tenantId: event.target.value, tenantAgentId: '' }))}>
+                        <option value="">Select tenant</option>
+                        {platformTenants.map((tenant) => (
+                          <option key={tenant.id} value={tenant.id}>{tenant.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Shared document</span>
+                      <select className="ops-select" value={assignmentForm.platformKnowledgeDocumentId} onChange={(event) => setAssignmentForm((current) => ({ ...current, platformKnowledgeDocumentId: event.target.value }))}>
+                        <option value="">Select document</option>
+                        {activePlatformDocuments.map((document) => (
+                          <option key={document.id} value={document.id}>{document.title}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Agent scope</span>
+                      <select className="ops-select" value={assignmentForm.tenantAgentId} onChange={(event) => setAssignmentForm((current) => ({ ...current, tenantAgentId: event.target.value }))}>
+                        <option value="">All active tenant agents</option>
+                        {selectedAssignmentTenantAgents.map((agent) => (
+                          <option key={agent.id} value={agent.id}>{agent.displayName}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs font-medium text-text-secondary">Source</span>
+                      <select className="ops-select" value={assignmentForm.assignmentSource} onChange={(event) => setAssignmentForm((current) => ({ ...current, assignmentSource: event.target.value }))}>
+                        <option value="super_admin_override">Super admin override</option>
+                        <option value="global_default">Global default</option>
+                        <option value="niche_default">Niche default</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="mt-4 flex justify-end">
+                    <button type="submit" className="ops-button-primary" disabled={platformLoading}>
+                      <Check className="h-4 w-4" />
+                      <span>Assign Knowledge</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+                <div className="ops-panel overflow-hidden">
+                  <div className="border-b border-border px-4 py-3">
+                    <h3 className="text-sm font-semibold text-text-primary">Tenants and Assisted Setup</h3>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-border text-sm">
+                      <thead className="bg-surface-secondary text-xs text-text-muted">
+                        <tr>
+                          <th className="px-4 py-3 text-left font-medium">Tenant</th>
+                          <th className="px-4 py-3 text-left font-medium">Niche</th>
+                          <th className="px-4 py-3 text-left font-medium">Status</th>
+                          <th className="px-4 py-3 text-left font-medium">Setup</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border bg-surface">
+                        {platformTenants.map((tenant) => {
+                          const session = setupSessions.find((row) => row.tenantId === tenant.id);
+                          return (
+                            <tr key={tenant.id}>
+                              <td className="px-4 py-3">
+                                <div className="font-medium text-text-primary">{tenant.name}</div>
+                                <div className="text-xs text-text-muted">{tenant.slug}</div>
+                              </td>
+                              <td className="px-4 py-3">
+                                <select className="ops-select min-w-36" value={tenant.businessNiche || ''} onChange={(event) => handleTenantNicheChange(tenant.id, event.target.value)}>
+                                  <option value="">None</option>
+                                  {businessNiches.filter((niche) => niche.status === 'active').map((niche) => (
+                                    <option key={niche.key} value={niche.key}>{niche.name}</option>
+                                  ))}
+                                </select>
+                              </td>
+                              <td className="px-4 py-3">
+                                <span className="ops-badge bg-info-soft text-info">{tenant.status}</span>
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className="text-xs text-text-secondary">{session?.currentStep || 'Not started'}</div>
+                                {session && (
+                                  <button type="button" className="mt-2 text-xs font-medium text-accent" onClick={() => handleSetupSessionStatusChange(session.id, session.status === 'complete' ? 'in_progress' : 'complete')}>
+                                    {session.status === 'complete' ? 'Reopen' : 'Mark complete'}
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="ops-panel overflow-hidden">
+                  <div className="border-b border-border px-4 py-3">
+                    <h3 className="text-sm font-semibold text-text-primary">Shared Knowledge Assignments</h3>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-border text-sm">
+                      <thead className="bg-surface-secondary text-xs text-text-muted">
+                        <tr>
+                          <th className="px-4 py-3 text-left font-medium">Document</th>
+                          <th className="px-4 py-3 text-left font-medium">Tenant</th>
+                          <th className="px-4 py-3 text-left font-medium">Source</th>
+                          <th className="px-4 py-3 text-left font-medium">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border bg-surface">
+                        {tenantKnowledgeAssignments.map((assignment) => (
+                          <tr key={assignment.id}>
+                            <td className="px-4 py-3">
+                              <div className="font-medium text-text-primary">{documentsById.get(assignment.platformKnowledgeDocumentId)?.title || 'Shared document'}</div>
+                              <div className="text-xs text-text-muted">{documentsById.get(assignment.platformKnowledgeDocumentId)?.scope || 'scope'}</div>
+                            </td>
+                            <td className="px-4 py-3 text-text-secondary">{tenantsById.get(assignment.tenantId)?.name || 'Tenant'}</td>
+                            <td className="px-4 py-3 text-text-secondary">{assignment.assignmentSource?.replace(/_/g, ' ')}</td>
+                            <td className="px-4 py-3">
+                              <button type="button" className={`ops-badge ${assignment.status === 'active' ? 'bg-success-soft text-success' : 'bg-surface-secondary text-text-secondary'}`} onClick={() => handleAssignmentStatusChange(assignment.id, assignment.status === 'active' ? 'disabled' : 'active')}>
+                                {assignment.status}
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                        {!tenantKnowledgeAssignments.length && (
+                          <tr>
+                            <td className="px-4 py-6 text-center text-sm text-text-muted" colSpan={4}>No shared knowledge has been assigned yet.</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              <div className="ops-panel overflow-hidden">
+                <div className="border-b border-border px-4 py-3">
+                  <h3 className="text-sm font-semibold text-text-primary">Platform and Niche Knowledge Library</h3>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-border text-sm">
+                    <thead className="bg-surface-secondary text-xs text-text-muted">
+                      <tr>
+                        <th className="px-4 py-3 text-left font-medium">Document</th>
+                        <th className="px-4 py-3 text-left font-medium">Scope</th>
+                        <th className="px-4 py-3 text-left font-medium">Source</th>
+                        <th className="px-4 py-3 text-left font-medium">Version</th>
+                        <th className="px-4 py-3 text-left font-medium">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border bg-surface">
+                      {platformKnowledgeDocuments.map((document) => (
+                        <tr key={document.id}>
+                          <td className="px-4 py-3">
+                            <div className="font-medium text-text-primary">{document.title}</div>
+                            <div className="text-xs text-text-muted">{document.nicheKey || 'all niches'}</div>
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className={`ops-badge ${document.scope === 'global' ? 'bg-accent-soft text-accent' : 'bg-warning-soft text-warning'}`}>
+                              {document.scope === 'global' ? 'Global' : 'Niche'}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-text-secondary">{document.sourceType}</td>
+                          <td className="px-4 py-3 text-text-secondary">v{document.version || 1}</td>
+                          <td className="px-4 py-3">
+                            <select className="ops-select min-w-32" value={document.status || 'uploaded'} onChange={(event) => handleDocumentStatusChange(document.id, event.target.value)}>
+                              <option value="uploaded">uploaded</option>
+                              <option value="processing">processing</option>
+                              <option value="ready">ready</option>
+                              <option value="failed">failed</option>
+                              <option value="archived">archived</option>
+                            </select>
+                          </td>
+                        </tr>
+                      ))}
+                      {!platformKnowledgeDocuments.length && (
+                        <tr>
+                          <td className="px-4 py-6 text-center text-sm text-text-muted" colSpan={5}>No platform knowledge documents yet.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Feedback Management Tab */}
           {activeTab === 'feedback' && (
             <div className="space-y-6">
@@ -2027,7 +2681,9 @@ export default function AdminDashboard() {
               </div>
             </div>
           )}
-        </main>
+            </main>
+          </div>
+        </div>
       </div>
 
       {showDeleteAllLeadsModal && (

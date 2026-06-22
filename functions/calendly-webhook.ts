@@ -1,8 +1,5 @@
 import { createClient } from 'npm:@insforge/sdk';
 
-
-const DEFAULT_TENANT_ID = '00000000-0000-4000-8000-000000000001';
-
 function createInsForgeClient() {
   return createClient({
     baseUrl: Deno.env.get('INSFORGE_BASE_URL'),
@@ -53,6 +50,10 @@ function extractCalendlyPayload(raw: any) {
   return { payload, event, invitee };
 }
 
+function firstValue(...values: unknown[]) {
+  return values.find((value) => value !== undefined && value !== null && value !== '');
+}
+
 async function processCalendlyWebhook(db: any, raw: any) {
   const { payload, event, invitee } = extractCalendlyPayload(raw);
   const email = invitee?.email;
@@ -60,11 +61,16 @@ async function processCalendlyWebhook(db: any, raw: any) {
     return { success: false, error: 'missing_invitee_email', status: 400 };
   }
 
-  const { data: leads } = await db.database
+  const tenantId = firstValue(raw?.tenantId, raw?.tenant_id, payload?.tenantId, payload?.tenant_id, payload?.metadata?.tenantId, payload?.metadata?.tenant_id);
+  let leadQuery = db.database
     .from('leads')
     .select('*')
-    .eq('email', String(email).toLowerCase())
-    .limit(1);
+    .eq('email', String(email).toLowerCase());
+  if (tenantId) leadQuery = leadQuery.eq('tenant_id', tenantId);
+  const { data: leads } = await leadQuery.limit(2);
+  if (!tenantId && (leads?.length || 0) > 1) {
+    return { success: true, event, leadUpdated: false, ignored: true, reason: 'ambiguous_tenant', status: 200 };
+  }
   const lead = leads?.[0] || null;
 
   if (lead) {

@@ -1,6 +1,5 @@
 import { createClient } from 'npm:@insforge/sdk';
 
-const DEFAULT_TENANT_ID = '00000000-0000-4000-8000-000000000001';
 const EMAIL_ACTIONS = ['send-email', 'queue-email', 'send-template-email', 'send-booking-confirmation', 'send-reminder'];
 
 const corsHeaders = {
@@ -43,6 +42,12 @@ function assertDeliveryAuthorized(req: Request) {
 
 function firstValue(...values: unknown[]) {
   return values.find((value) => value !== undefined && value !== null && value !== '');
+}
+
+function requiredTenantId(input: any) {
+  const tenantId = firstValue(input?.tenantId, input?.tenant_id);
+  if (!tenantId) throw new Error('tenantId is required');
+  return String(tenantId);
 }
 
 function escapeHtml(value: unknown) {
@@ -286,7 +291,7 @@ async function recordDelivery(client: any, tenantId: string, input: any, sender:
 }
 
 async function sendAutomatedEmail(client: any, action: string, input: any) {
-  const tenantId = firstValue(input.tenantId, input.tenant_id, DEFAULT_TENANT_ID);
+  const tenantId = requiredTenantId(input);
   const context = await loadEmailContext(client, tenantId, input);
   await assertEmailAllowed(context.lead);
   const sender = await resolveSender(client, tenantId);
@@ -297,7 +302,7 @@ async function sendAutomatedEmail(client: any, action: string, input: any) {
 }
 
 async function queueEmailIntent(client: any, input: any) {
-  const tenantId = firstValue(input.tenantId, input.tenant_id, DEFAULT_TENANT_ID);
+  const tenantId = requiredTenantId(input);
   const context = await loadEmailContext(client, tenantId, input);
   await assertEmailAllowed(context.lead);
   const sender = await resolveSender(client, tenantId);

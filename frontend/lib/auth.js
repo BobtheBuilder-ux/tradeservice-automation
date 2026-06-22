@@ -56,6 +56,8 @@ function buildFallbackPortalUser(insforgeUser) {
 }
 
 function normalizePortalUser(portalUser, insforgeUser) {
+  const redirectTo = portalUser?.redirectTo || portalUser?.redirect_to || '/admin-dashboard';
+
   return {
     ...buildFallbackPortalUser(insforgeUser),
     ...(portalUser || {}),
@@ -64,7 +66,7 @@ function normalizePortalUser(portalUser, insforgeUser) {
     authUserId: portalUser?.authUserId || portalUser?.auth_user_id || insforgeUser.id,
     tenantId: portalUser?.tenantId || portalUser?.tenant_id || null,
     tenantUserId: portalUser?.tenantUserId || portalUser?.tenant_user_id || null,
-    redirectTo: '/admin-dashboard',
+    redirectTo,
   };
 }
 

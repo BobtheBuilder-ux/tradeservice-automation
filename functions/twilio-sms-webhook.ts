@@ -1,7 +1,6 @@
 import { createClient } from 'npm:@insforge/sdk';
 import twilio from 'npm:twilio';
 
-const DEFAULT_TENANT_ID = '00000000-0000-4000-8000-000000000001';
 const FAILURE_STATUSES = new Set(['failed', 'undelivered']);
 const STOP_PATTERNS = [/\bstop\b/i, /unsubscribe/i, /do not contact/i, /don't text/i, /don't call/i, /not interested/i];
 
@@ -33,6 +32,12 @@ async function readRequestBody(req: Request) {
 
 function firstValue(...values: unknown[]) {
   return values.find((value) => value !== undefined && value !== null && value !== '');
+}
+
+function requiredTenantId(input: any) {
+  const tenantId = firstValue(input?.tenantId, input?.tenant_id);
+  if (!tenantId) throw new Error('tenantId is required');
+  return String(tenantId);
 }
 
 function normalizePhone(value: unknown) {
@@ -81,10 +86,10 @@ function requireTwilioSignature(req: Request, params: Record<string, string>) {
 
 async function resolveTenantIdByPhone(db: any, phone: unknown) {
   const normalized = normalizePhone(phone);
-  if (!normalized) return DEFAULT_TENANT_ID;
+  if (!normalized) return null;
   const { data, error } = await db.database.rpc('resolve_tenant_by_phone_number', { p_phone_number: normalized });
   if (error) throw new Error(error.message || 'Failed to resolve tenant phone number');
-  return data || DEFAULT_TENANT_ID;
+  return data || null;
 }
 
 async function getTenantPrimaryPhoneNumber(db: any, tenantId: string) {
@@ -343,7 +348,7 @@ export default async function(req: Request): Promise<Response> {
     if (mode === 'send') {
       requireMessageActionsSecret(req);
       const input = await req.json().catch(() => ({}));
-      const tenantId = String(firstValue(input.tenantId, input.tenant_id, DEFAULT_TENANT_ID));
+      const tenantId = requiredTenantId(input);
       const channel = String(firstValue(input.channel, 'sms')).toLowerCase();
       if (channel !== 'sms' && channel !== 'whatsapp') throw new Error('Unsupported message channel');
       const leadId = String(firstValue(input.leadId, input.lead_id, ''));
@@ -359,6 +364,7 @@ export default async function(req: Request): Promise<Response> {
     const isWhatsapp = /^whatsapp:/i.test(String(isStatus ? data.From : data.To || '')) || /^whatsapp:/i.test(String(isStatus ? data.To : data.From || ''));
     const channel: 'sms' | 'whatsapp' = isWhatsapp ? 'whatsapp' : 'sms';
     const tenantId = await resolveTenantIdByPhone(db, isStatus ? data.From : data.To);
+    if (!tenantId) return isStatus ? jsonResponse({ success: true, ignored: true, reason: 'tenant_not_resolved' }) : emptyTwilioXmlResponse();
     const lead = await findLeadByPhone(db, tenantId, isStatus ? data.To : data.From);
     if (!lead) return isStatus ? jsonResponse({ success: true, ignored: true }) : emptyTwilioXmlResponse();
     if (isStatus) await handleStatus(db, tenantId, lead, data);

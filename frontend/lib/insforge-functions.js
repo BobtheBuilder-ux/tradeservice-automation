@@ -73,8 +73,13 @@ export async function listElevenLabsVoices(user) {
   });
 }
 
-export async function getCalendlyConnectUrl() {
-  return invokeFunction('calendly-oauth', { action: 'connect-url', body: {} });
+export async function getCalendlyConnectUrl(options = {}) {
+  return invokeFunction('calendly-oauth', {
+    action: 'connect-url',
+    body: {
+      returnTo: options.returnTo || undefined,
+    },
+  });
 }
 
 export async function listCalendlyEventTypes() {

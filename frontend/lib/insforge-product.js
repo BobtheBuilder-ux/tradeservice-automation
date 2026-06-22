@@ -6,7 +6,6 @@ import {
   summarizeContactPolicy,
 } from './lead-import';
 
-const DEFAULT_TENANT_ID = '00000000-0000-4000-8000-000000000001';
 export const CALL_OUTCOMES = [
   'booked',
   'no_answer',
@@ -51,6 +50,7 @@ const CAMEL_TO_SNAKE = {
   encryptedTokens: 'encrypted_tokens',
   defaultMeetingType: 'default_meeting_type',
   defaultTimezone: 'default_timezone',
+  businessNiche: 'business_niche',
   assignedAgentId: 'assigned_agent_id',
   assignedTenantAgentId: 'assigned_tenant_agent_id',
   leadImportBatchId: 'lead_import_batch_id',
@@ -132,12 +132,37 @@ const CAMEL_TO_SNAKE = {
   elevenlabsDocumentId: 'elevenlabs_document_id',
   campaignNumber: 'campaign_number',
   currentStep: 'current_step',
+  completedSteps: 'completed_steps',
+  actorMode: 'actor_mode',
+  actorUserId: 'actor_user_id',
+  isComplete: 'is_complete',
+  nicheKey: 'niche_key',
+  sourceUrl: 'source_url',
+  defaultPlaybookNotes: 'default_playbook_notes',
+  platformKnowledgeDocumentId: 'platform_knowledge_document_id',
+  assignmentSource: 'assignment_source',
+  syncedAt: 'synced_at',
+  superAdminUserId: 'super_admin_user_id',
+  onboardingProgressId: 'onboarding_progress_id',
+  auditSummary: 'audit_summary',
+  completedAt: 'completed_at',
   attemptCount: 'attempt_count',
   nextActionAt: 'next_action_at',
   stopReason: 'stop_reason',
   followUpAt: 'follow_up_at',
   followUpStatus: 'follow_up_status',
 };
+
+export const ONBOARDING_STEPS = [
+  'company',
+  'agent',
+  'phone',
+  'email',
+  'booking',
+  'knowledge',
+  'leads',
+  'review',
+];
 
 const SNAKE_TO_CAMEL = Object.fromEntries(
   Object.entries(CAMEL_TO_SNAKE).map(([camel, snake]) => [snake, camel])
@@ -171,12 +196,16 @@ function fromDbRows(rows = []) {
 }
 
 function tenantIdFromUser(user) {
-  return user?.tenantId || DEFAULT_TENANT_ID;
+  const tenantId = user?.tenantId || user?.tenant?.id || null;
+  if (!tenantId) {
+    throw new Error('Tenant context is required. Please sign out and sign back in.');
+  }
+  return tenantId;
 }
 
-async function unwrap(result, fallbackMessage) {
+async function unwrap(result, defaultMessage) {
   if (result.error) {
-    throw new Error(result.error.message || fallbackMessage);
+    throw new Error(result.error.message || defaultMessage);
   }
   return result.data;
 }
@@ -250,6 +279,46 @@ async function deleteTenantRow(table, user, id) {
   return fromDbRecord(data?.[0]);
 }
 
+async function selectRows(table, options = {}) {
+  let query = insforge.database.from(table).select(options.select || '*');
+  if (options.order) {
+    query = query.order(options.order.column, { ascending: options.order.ascending ?? false });
+  }
+  if (options.limit) {
+    query = query.limit(options.limit);
+  }
+  return fromDbRows(await unwrap(await query, `Failed to load ${table}`) || []);
+}
+
+async function safeSelectRows(table, options = {}) {
+  try {
+    return await selectRows(table, options);
+  } catch (error) {
+    console.warn(`Platform data skipped ${table}:`, error?.message || error);
+    return [];
+  }
+}
+
+async function insertRow(table, values) {
+  const data = await unwrap(
+    await insforge.database.from(table).insert([toDbRecord(values)]).select(),
+    `Failed to create ${table}`
+  );
+  return fromDbRecord(data?.[0]);
+}
+
+async function updateRow(table, id, patch) {
+  const data = await unwrap(
+    await insforge.database
+      .from(table)
+      .update(toDbRecord({ ...patch, updatedAt: new Date().toISOString() }))
+      .eq('id', id)
+      .select(),
+    `Failed to update ${table}`
+  );
+  return fromDbRecord(data?.[0]);
+}
+
 function primaryActive(rows = []) {
   return rows.find((row) => row.isPrimary && row.status === 'active')
     || rows.find((row) => row.status === 'active' || row.status === 'connected')
@@ -264,6 +333,25 @@ function normalizePhoneNumber(phoneNumber) {
   return trimmed.startsWith('+') ? `+${digits}` : `+${digits}`;
 }
 
+function slugifyTenantName(name = '') {
+  const slug = String(name)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  return slug || `tenant-${Date.now()}`;
+}
+
+function nicheKeyFromName(name = '') {
+  return String(name)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 120);
+}
+
 function assertValidPhoneNumber(phoneNumber) {
   const normalized = normalizePhoneNumber(phoneNumber);
   if (!/^\+[1-9]\d{7,14}$/.test(normalized)) {
@@ -273,13 +361,13 @@ function assertValidPhoneNumber(phoneNumber) {
 }
 
 function sanitizeStorageName(name = 'knowledge-document') {
-  const fallback = 'knowledge-document';
-  const trimmed = String(name || fallback).trim() || fallback;
+  const defaultName = 'knowledge-document';
+  const trimmed = String(name || defaultName).trim() || defaultName;
   return trimmed
     .replace(/[^a-zA-Z0-9._-]+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
-    .slice(0, 120) || fallback;
+    .slice(0, 120) || defaultName;
 }
 
 function assertKnowledgeTitle(title) {
@@ -394,6 +482,447 @@ export async function deleteTenantKnowledgeDocument(user, document) {
   return deleteTenantRow('tenant_knowledge_documents', user, document.id);
 }
 
+export async function listTenantsForAdmin() {
+  return selectRows('tenants', {
+    order: { column: 'created_at', ascending: false },
+    limit: 500,
+  });
+}
+
+export async function getCurrentPlatformAdminProfile() {
+  const data = await unwrap(
+    await insforge.database.rpc('current_platform_admin_profile'),
+    'Failed to load platform admin profile'
+  );
+  return fromDbRecord(data || { isPlatformAdmin: false });
+}
+
+export async function createAssistedTenant(user, input = {}) {
+  const name = String(input.name || '').trim();
+  if (!name) throw new Error('Company name is required');
+  const slugBase = slugifyTenantName(input.slug || name);
+  const slug = `${slugBase}-${Date.now().toString(36)}`.slice(0, 118);
+  const tenant = await insertRow('tenants', {
+    name,
+    slug,
+    industry: String(input.industry || '').trim() || null,
+    businessNiche: input.businessNiche || null,
+    defaultTimezone: String(input.defaultTimezone || '').trim() || 'America/Toronto',
+    status: 'onboarding',
+    metadata: {
+      source: 'super_admin_assisted',
+      ownerEmail: String(input.ownerEmail || '').trim() || null,
+      createdByUserId: user?.authUserId || user?.id || null,
+    },
+  });
+
+  const progress = await insertRow('tenant_onboarding_progress', {
+    tenantId: tenant.id,
+    currentStep: 'company',
+    completedSteps: [],
+    answers: {
+      company: {
+        name,
+        industry: String(input.industry || '').trim() || null,
+        businessNiche: input.businessNiche || null,
+        defaultTimezone: String(input.defaultTimezone || '').trim() || 'America/Toronto',
+      },
+    },
+    actorMode: 'super_admin_assisted',
+    actorUserId: user?.authUserId || user?.id || null,
+    isComplete: false,
+    metadata: {
+      source: 'super_admin_assisted',
+      targetTenantName: name,
+    },
+  });
+
+  const session = await insertRow('super_admin_tenant_setup_sessions', {
+    tenantId: tenant.id,
+    superAdminUserId: user?.authUserId || user?.id || null,
+    onboardingProgressId: progress.id,
+    currentStep: 'company',
+    status: 'in_progress',
+    auditSummary: `Assisted setup started for ${name}`,
+    metadata: {
+      actorMode: 'super_admin_assisted',
+      targetTenantName: name,
+      ownerEmail: String(input.ownerEmail || '').trim() || null,
+    },
+  });
+
+  return { tenant, progress, session };
+}
+
+export async function updateTenantBusinessNiche(tenantId, businessNiche) {
+  const data = await unwrap(
+    await insforge.database
+      .from('tenants')
+      .update(toDbRecord({ businessNiche: businessNiche || null, updatedAt: new Date().toISOString() }))
+      .eq('id', tenantId)
+      .select(),
+    'Failed to update tenant niche'
+  );
+  return fromDbRecord(data?.[0]);
+}
+
+export async function listSuperAdminSetupSessions() {
+  return selectRows('super_admin_tenant_setup_sessions', {
+    order: { column: 'updated_at', ascending: false },
+    limit: 200,
+  });
+}
+
+export async function updateSuperAdminSetupSession(sessionId, input = {}) {
+  const patch = {};
+  if (input.currentStep) patch.currentStep = input.currentStep;
+  if (input.status) patch.status = input.status;
+  if (input.auditSummary !== undefined) patch.auditSummary = String(input.auditSummary || '').trim() || null;
+  if (input.metadata !== undefined) patch.metadata = input.metadata || {};
+  if (input.status === 'complete') patch.completedAt = new Date().toISOString();
+  return updateRow('super_admin_tenant_setup_sessions', sessionId, patch);
+}
+
+export async function listBusinessNiches() {
+  return selectRows('business_niches', {
+    order: { column: 'name', ascending: true },
+    limit: 500,
+  });
+}
+
+export async function upsertBusinessNiche(user, input = {}) {
+  const name = String(input.name || '').trim();
+  if (!name) throw new Error('Niche name is required');
+  const key = nicheKeyFromName(input.key || name);
+  if (!key || key.length < 3) throw new Error('Use a longer niche key');
+  const payload = {
+    key,
+    name,
+    description: String(input.description || '').trim() || null,
+    defaultPlaybookNotes: String(input.defaultPlaybookNotes || '').trim() || null,
+    status: input.status || 'active',
+    metadata: input.metadata || {},
+    createdByUserId: user?.authUserId || user?.id || null,
+  };
+  const existing = await unwrap(
+    await insforge.database.from('business_niches').select('*').eq('key', key).limit(1),
+    'Failed to check business niche'
+  );
+
+  if (existing?.[0]) {
+    const data = await unwrap(
+      await insforge.database
+        .from('business_niches')
+        .update(toDbRecord({ ...payload, updatedAt: new Date().toISOString() }))
+        .eq('key', key)
+        .select(),
+      'Failed to update business niche'
+    );
+    return fromDbRecord(data?.[0]);
+  }
+
+  return insertRow('business_niches', payload);
+}
+
+export async function listPlatformKnowledgeDocuments() {
+  return selectRows('platform_knowledge_documents', {
+    order: { column: 'updated_at', ascending: false },
+    limit: 500,
+  });
+}
+
+export async function createPlatformKnowledgeDocument(user, input = {}) {
+  const title = assertKnowledgeTitle(input.title);
+  const scope = input.scope === 'niche' ? 'niche' : 'global';
+  const sourceType = input.sourceType || 'text';
+  if (!['text', 'url', 'file'].includes(sourceType)) throw new Error('Unsupported knowledge source type');
+  if (scope === 'niche' && !input.nicheKey) throw new Error('Choose a niche for niche knowledge');
+  if (scope === 'global' && input.nicheKey) throw new Error('Global knowledge cannot have a niche key');
+  if (sourceType === 'url' && !/^https?:\/\/\S+$/i.test(String(input.sourceUrl || '').trim())) {
+    throw new Error('Use a valid source URL');
+  }
+  if (sourceType === 'text' && !String(input.bodyText || '').trim()) {
+    throw new Error('Add document text before saving');
+  }
+
+  return insertRow('platform_knowledge_documents', {
+    scope,
+    nicheKey: scope === 'niche' ? input.nicheKey : null,
+    title,
+    sourceType,
+    sourceUrl: sourceType === 'url' ? String(input.sourceUrl || '').trim() : null,
+    bodyText: sourceType === 'text' ? String(input.bodyText || '').trim() : null,
+    storageUrl: input.storageUrl || null,
+    storageKey: input.storageKey || null,
+    status: input.status || 'uploaded',
+    version: Number(input.version) || 1,
+    metadata: input.metadata || { source: 'phase18_admin_dashboard' },
+    createdByUserId: user?.authUserId || user?.id || null,
+  });
+}
+
+export async function updatePlatformKnowledgeDocument(documentId, input = {}) {
+  const patch = {};
+  if (input.title !== undefined) patch.title = assertKnowledgeTitle(input.title);
+  if (input.status) patch.status = input.status;
+  if (input.sourceUrl !== undefined) patch.sourceUrl = String(input.sourceUrl || '').trim() || null;
+  if (input.bodyText !== undefined) patch.bodyText = String(input.bodyText || '').trim() || null;
+  if (input.elevenlabsDocumentId !== undefined) patch.elevenlabsDocumentId = String(input.elevenlabsDocumentId || '').trim() || null;
+  if (input.version !== undefined) patch.version = Number(input.version) || 1;
+  if (input.metadata !== undefined) patch.metadata = input.metadata || {};
+  return updateRow('platform_knowledge_documents', documentId, patch);
+}
+
+export async function listTenantKnowledgeAssignments() {
+  return selectRows('tenant_knowledge_assignments', {
+    order: { column: 'updated_at', ascending: false },
+    limit: 1000,
+  });
+}
+
+export async function upsertTenantKnowledgeAssignment(user, input = {}) {
+  if (!input.tenantId) throw new Error('Choose a tenant');
+  if (!input.platformKnowledgeDocumentId) throw new Error('Choose a shared knowledge document');
+  const payload = {
+    tenantId: input.tenantId,
+    tenantAgentId: input.tenantAgentId || null,
+    platformKnowledgeDocumentId: input.platformKnowledgeDocumentId,
+    assignmentSource: input.assignmentSource || 'super_admin_override',
+    status: input.status || 'active',
+    metadata: input.metadata || {},
+    createdByUserId: user?.authUserId || user?.id || null,
+  };
+  let query = insforge.database
+    .from('tenant_knowledge_assignments')
+    .select('*')
+    .eq('tenant_id', payload.tenantId)
+    .eq('platform_knowledge_document_id', payload.platformKnowledgeDocumentId);
+  query = payload.tenantAgentId
+    ? query.eq('tenant_agent_id', payload.tenantAgentId)
+    : query.is('tenant_agent_id', null);
+  const existing = await unwrap(await query.limit(1), 'Failed to check knowledge assignment');
+
+  if (existing?.[0]) {
+    return updateRow('tenant_knowledge_assignments', existing[0].id, {
+      assignmentSource: payload.assignmentSource,
+      status: payload.status,
+      metadata: payload.metadata,
+    });
+  }
+
+  return insertRow('tenant_knowledge_assignments', payload);
+}
+
+export async function updateTenantKnowledgeAssignment(assignmentId, input = {}) {
+  const patch = {};
+  if (input.status) patch.status = input.status;
+  if (input.assignmentSource) patch.assignmentSource = input.assignmentSource;
+  if (input.syncedAt !== undefined) patch.syncedAt = input.syncedAt || null;
+  if (input.metadata !== undefined) patch.metadata = input.metadata || {};
+  return updateRow('tenant_knowledge_assignments', assignmentId, patch);
+}
+
+function countBy(rows = [], keyFn) {
+  return rows.reduce((counts, row) => {
+    const key = keyFn(row) || 'unknown';
+    counts[key] = (counts[key] || 0) + 1;
+    return counts;
+  }, {});
+}
+
+function percent(value, total) {
+  return total ? Math.round((value / total) * 100) : 0;
+}
+
+export async function getSuperAdminDashboardData() {
+  const [
+    tenants,
+    tenantAgents,
+    campaigns,
+    campaignLeads,
+    bobActions,
+    meetings,
+    messages,
+    emails,
+    phoneNumbers,
+    billingProfiles,
+    usageEvents,
+    operationalAlerts,
+    platformKnowledgeDocuments,
+    businessNiches,
+    knowledgeAssignments,
+    setupSessions,
+    platformAdmins,
+    auditLogs,
+    voiceSessions,
+    bookingIntegrations,
+    emailIdentities,
+  ] = await Promise.all([
+    safeSelectRows('tenants', { order: { column: 'created_at', ascending: false }, limit: 1000 }),
+    safeSelectRows('tenant_agents', { order: { column: 'created_at', ascending: false }, limit: 5000 }),
+    safeSelectRows('campaigns', { order: { column: 'created_at', ascending: false }, limit: 5000 }),
+    safeSelectRows('campaign_leads', { order: { column: 'created_at', ascending: false }, limit: 10000 }),
+    safeSelectRows('bob_actions', { order: { column: 'created_at', ascending: false }, limit: 10000 }),
+    safeSelectRows('meetings', { order: { column: 'created_at', ascending: false }, limit: 10000 }),
+    safeSelectRows('lead_conversation_messages', { order: { column: 'created_at', ascending: false }, limit: 10000 }),
+    safeSelectRows('email_queue', { order: { column: 'created_at', ascending: false }, limit: 10000 }),
+    safeSelectRows('tenant_phone_numbers', { order: { column: 'created_at', ascending: false }, limit: 5000 }),
+    safeSelectRows('tenant_billing_profiles', { order: { column: 'created_at', ascending: false }, limit: 1000 }),
+    safeSelectRows('tenant_usage_events', { order: { column: 'created_at', ascending: false }, limit: 10000 }),
+    safeSelectRows('tenant_operational_alerts', { order: { column: 'created_at', ascending: false }, limit: 1000 }),
+    listPlatformKnowledgeDocuments(),
+    listBusinessNiches(),
+    listTenantKnowledgeAssignments(),
+    listSuperAdminSetupSessions(),
+    safeSelectRows('platform_admin_users', { order: { column: 'created_at', ascending: false }, limit: 200 }),
+    safeSelectRows('platform_admin_audit_logs', { order: { column: 'created_at', ascending: false }, limit: 1000 }),
+    safeSelectRows('voice_call_sessions', { order: { column: 'created_at', ascending: false }, limit: 10000 }),
+    safeSelectRows('tenant_booking_integrations', { order: { column: 'created_at', ascending: false }, limit: 5000 }),
+    safeSelectRows('tenant_email_identities', { order: { column: 'created_at', ascending: false }, limit: 5000 }),
+  ]);
+
+  const tenantById = new Map(tenants.map((tenant) => [tenant.id, tenant]));
+  const agentUsageCounts = bobActions.reduce((counts, action) => {
+    const agentId = action.tenantAgentId || action.payload?.tenantAgentId || action.result?.tenantAgentId;
+    if (!agentId) return counts;
+    counts[agentId] = (counts[agentId] || 0) + 1;
+    return counts;
+  }, {});
+  const agentsWithUsage = tenantAgents.map((agent) => ({
+    ...agent,
+    tenantName: tenantById.get(agent.tenantId)?.name || 'Unknown tenant',
+    usageCount: agentUsageCounts[agent.id] || 0,
+    meetingCount: meetings.filter((meeting) => meeting.tenantAgentId === agent.id).length,
+  })).sort((a, b) => b.usageCount - a.usageCount);
+
+  const usageByTenant = tenants.map((tenant) => {
+    const tenantUsage = usageEvents.filter((event) => event.tenantId === tenant.id);
+    const tenantMessages = messages.filter((message) => message.tenantId === tenant.id);
+    const tenantEmails = emails.filter((email) => email.tenantId === tenant.id);
+    const tenantCalls = voiceSessions.filter((session) => session.tenantId === tenant.id);
+    const tenantMeetings = meetings.filter((meeting) => meeting.tenantId === tenant.id);
+    return {
+      tenantId: tenant.id,
+      tenantName: tenant.name,
+      status: tenant.status,
+      businessNiche: tenant.businessNiche,
+      usageEvents: tenantUsage.length,
+      calls: tenantCalls.length,
+      messages: tenantMessages.length,
+      emails: tenantEmails.length,
+      meetings: tenantMeetings.length,
+      agents: tenantAgents.filter((agent) => agent.tenantId === tenant.id && agent.status !== 'archived').length,
+      openAlerts: operationalAlerts.filter((alert) => alert.tenantId === tenant.id && alert.status !== 'resolved').length,
+    };
+  }).sort((a, b) => (b.usageEvents + b.calls + b.messages + b.emails) - (a.usageEvents + a.calls + a.messages + a.emails));
+
+  const tenantReadiness = tenants.map((tenant) => {
+    const hasAgent = tenantAgents.some((agent) => agent.tenantId === tenant.id && ['live', 'testing'].includes(agent.status));
+    const hasPhone = phoneNumbers.some((phone) => phone.tenantId === tenant.id && phone.status === 'active');
+    const hasEmail = emailIdentities.some((identity) => identity.tenantId === tenant.id && identity.status === 'active');
+    const hasBooking = bookingIntegrations.some((booking) => booking.tenantId === tenant.id && booking.status === 'connected');
+    const activeSetup = setupSessions.find((session) => session.tenantId === tenant.id && session.status !== 'complete');
+    const completed = [hasAgent, hasPhone, hasEmail, hasBooking].filter(Boolean).length;
+    return {
+      ...tenant,
+      hasAgent,
+      hasPhone,
+      hasEmail,
+      hasBooking,
+      readinessScore: percent(completed, 4),
+      setupStep: activeSetup?.currentStep || (completed === 4 ? 'review' : 'company'),
+      setupStatus: activeSetup?.status || (completed === 4 ? 'complete' : 'not_started'),
+    };
+  });
+
+  const providerHealth = [
+    {
+      provider: 'Twilio Voice',
+      status: phoneNumbers.some((phone) => phone.voiceEnabled && phone.status === 'active') ? 'active' : 'needs_setup',
+      healthy: phoneNumbers.filter((phone) => phone.voiceEnabled && phone.status === 'active').length,
+      attention: voiceSessions.filter((session) => ['failed', 'interrupted'].includes(session.status) || ['failed', 'interrupted'].includes(session.outcome)).length,
+    },
+    {
+      provider: 'Twilio SMS',
+      status: phoneNumbers.some((phone) => phone.smsEnabled && phone.status === 'active') ? 'active' : 'needs_setup',
+      healthy: messages.filter((message) => message.channel === 'sms' && ['sent', 'delivered'].includes(message.status)).length,
+      attention: messages.filter((message) => message.channel === 'sms' && message.status === 'failed').length,
+    },
+    {
+      provider: 'Twilio WhatsApp',
+      status: phoneNumbers.some((phone) => phone.whatsappStatus === 'active') ? 'active' : 'needs_setup',
+      healthy: messages.filter((message) => message.channel === 'whatsapp' && ['sent', 'delivered'].includes(message.status)).length,
+      attention: messages.filter((message) => message.channel === 'whatsapp' && message.status === 'failed').length,
+    },
+    {
+      provider: 'ElevenLabs',
+      status: tenantAgents.some((agent) => agent.elevenlabsAgentId) ? 'active' : 'needs_setup',
+      healthy: tenantAgents.filter((agent) => agent.elevenlabsAgentId && ['live', 'testing'].includes(agent.status)).length,
+      attention: tenantAgents.filter((agent) => !agent.elevenlabsAgentId && agent.status !== 'archived').length,
+    },
+    {
+      provider: 'Calendly / Booking',
+      status: bookingIntegrations.some((booking) => booking.status === 'connected') ? 'active' : 'needs_setup',
+      healthy: bookingIntegrations.filter((booking) => booking.status === 'connected').length,
+      attention: bookingIntegrations.filter((booking) => booking.status === 'needs_attention').length,
+    },
+    {
+      provider: 'Email',
+      status: emailIdentities.some((identity) => identity.status === 'active') ? 'active' : 'needs_setup',
+      healthy: emails.filter((email) => ['sent', 'delivered'].includes(email.status)).length,
+      attention: emails.filter((email) => ['failed', 'bounced'].includes(email.status)).length,
+    },
+  ];
+
+  return {
+    tenants,
+    tenantAgents,
+    campaigns,
+    campaignLeads,
+    bobActions,
+    meetings,
+    messages,
+    emails,
+    phoneNumbers,
+    billingProfiles,
+    usageEvents,
+    operationalAlerts,
+    platformKnowledgeDocuments,
+    businessNiches,
+    knowledgeAssignments,
+    setupSessions,
+    platformAdmins,
+    auditLogs,
+    voiceSessions,
+    bookingIntegrations,
+    emailIdentities,
+    tenantReadiness,
+    agentsWithUsage,
+    usageByTenant,
+    providerHealth,
+    counts: {
+      tenants: tenants.length,
+      activeTenants: tenants.filter((tenant) => tenant.status === 'active').length,
+      onboardingTenants: tenants.filter((tenant) => tenant.status === 'onboarding').length,
+      aiAgents: tenantAgents.filter((agent) => agent.status !== 'archived').length,
+      liveAgents: tenantAgents.filter((agent) => agent.status === 'live').length,
+      meetings: meetings.length,
+      campaigns: campaigns.length,
+      activeCampaigns: campaigns.filter((campaign) => ['ACTIVE', 'running'].includes(campaign.status)).length,
+      openAlerts: operationalAlerts.filter((alert) => alert.status !== 'resolved').length,
+      sharedKnowledge: platformKnowledgeDocuments.filter((document) => document.status !== 'archived').length,
+      platformAdmins: platformAdmins.filter((admin) => admin.status === 'active').length,
+    },
+    breakdowns: {
+      tenantsByStatus: countBy(tenants, (tenant) => tenant.status),
+      agentsByStatus: countBy(tenantAgents, (agent) => agent.status),
+      actionsByStatus: countBy(bobActions, (action) => action.status),
+      usageByType: countBy(usageEvents, (event) => event.eventType || event.usageType || event.metricKey),
+      alertsBySeverity: countBy(operationalAlerts, (alert) => alert.severity || alert.level || 'info'),
+    },
+  };
+}
+
 export async function getTenantSettingsSummary(user) {
   const tenantId = tenantIdFromUser(user);
   const [tenantData, agents, phoneNumbers, emailIdentities, bookingIntegrations] = await Promise.all([
@@ -417,6 +946,239 @@ export async function getTenantSettingsSummary(user) {
   };
 }
 
+function normalizeCompletedSteps(value) {
+  if (Array.isArray(value)) return value.filter((step) => ONBOARDING_STEPS.includes(step));
+  return [];
+}
+
+function buildOnboardingReadiness({ summary, knowledgeDocuments = [], leads = [] }) {
+  const tenant = summary?.tenant || {};
+  const agents = summary?.agents || [];
+  const primaryPhoneNumber = summary?.primaryPhoneNumber || null;
+  const emailIdentity = summary?.emailIdentity || null;
+  const bookingIntegration = summary?.bookingIntegration || null;
+  const callableAgent = agents.find((agent) => agent.status === 'live' && agent.elevenlabsAgentId)
+    || agents.find((agent) => agent.status === 'live');
+  const reachableLeads = leads.filter((lead) => {
+    if (lead.doNotContact) return false;
+    if (!lead.phone && !lead.email) return false;
+    return Boolean(lead.callConsent || lead.smsConsent || lead.whatsappConsent || lead.emailConsent);
+  });
+
+  const checks = [
+    {
+      key: 'company',
+      label: 'Company profile',
+      complete: Boolean(tenant.name && tenant.defaultTimezone),
+      required: true,
+      detail: tenant.name ? tenant.name : 'Company name and timezone are required.',
+    },
+    {
+      key: 'agent',
+      label: 'AI agent',
+      complete: Boolean(callableAgent),
+      required: true,
+      detail: callableAgent ? callableAgent.displayName : 'Create a live AI agent.',
+    },
+    {
+      key: 'phone',
+      label: 'Phone identity',
+      complete: Boolean(primaryPhoneNumber?.phoneNumber),
+      required: false,
+      detail: primaryPhoneNumber?.phoneNumber || 'Optional. A dedicated tenant number can be added later.',
+    },
+    {
+      key: 'email',
+      label: 'Sender identity',
+      complete: Boolean(emailIdentity?.fromEmail && emailIdentity?.fromName),
+      required: false,
+      detail: emailIdentity?.fromEmail || 'Optional, but recommended for confirmations and follow-up.',
+    },
+    {
+      key: 'booking',
+      label: 'Booking path',
+      complete: Boolean(
+        bookingIntegration?.status === 'connected'
+        && bookingIntegration.provider === 'calendly'
+        && (bookingIntegration.bookingUrl || bookingIntegration.eventTypeId)
+      ),
+      required: true,
+      detail: bookingIntegration?.bookingUrl || bookingIntegration?.eventTypeId || 'Connect Calendly or add a Calendly event URL.',
+    },
+    {
+      key: 'knowledge',
+      label: 'Knowledge base',
+      complete: knowledgeDocuments.length > 0,
+      required: false,
+      detail: knowledgeDocuments.length ? `${knowledgeDocuments.length} source${knowledgeDocuments.length === 1 ? '' : 's'} saved` : 'Optional, but recommended before live outreach.',
+    },
+    {
+      key: 'leads',
+      label: 'Leads with consent',
+      complete: reachableLeads.length > 0,
+      required: true,
+      detail: reachableLeads.length ? `${reachableLeads.length} reachable lead${reachableLeads.length === 1 ? '' : 's'}` : 'Import at least one lead with channel consent.',
+    },
+  ];
+
+  const blockers = checks.filter((check) => check.required && !check.complete);
+  const warnings = checks.filter((check) => !check.required && !check.complete);
+  return {
+    checks,
+    blockers,
+    warnings,
+    isReady: blockers.length === 0,
+    score: Math.round((checks.filter((check) => check.complete).length / checks.length) * 100),
+  };
+}
+
+async function getExistingOnboardingProgress(user) {
+  const rows = await selectTenantRows('tenant_onboarding_progress', user, {
+    order: { column: 'created_at', ascending: false },
+    limit: 1,
+  });
+  return rows[0] || null;
+}
+
+async function ensureTenantOnboardingProgress(user) {
+  const existing = await getExistingOnboardingProgress(user);
+  if (existing) {
+    return {
+      ...existing,
+      completedSteps: normalizeCompletedSteps(existing.completedSteps),
+      answers: existing.answers || {},
+    };
+  }
+
+  const created = await insertTenantRow('tenant_onboarding_progress', user, {
+    currentStep: 'company',
+    completedSteps: [],
+    answers: {},
+    actorMode: 'tenant_self_service',
+    actorUserId: user?.authUserId || user?.id || null,
+    isComplete: false,
+    metadata: { source: 'frontend_onboarding' },
+  });
+  return {
+    ...created,
+    completedSteps: normalizeCompletedSteps(created.completedSteps),
+    answers: created.answers || {},
+  };
+}
+
+export async function getTenantOnboardingState(user) {
+  const [summary, knowledgeDocuments, leads, progress] = await Promise.all([
+    getTenantSettingsSummary(user),
+    listTenantKnowledgeDocuments(user).catch(() => []),
+    listLeads(user, 500).catch(() => []),
+    ensureTenantOnboardingProgress(user),
+  ]);
+  const readiness = buildOnboardingReadiness({ summary, knowledgeDocuments, leads });
+  return {
+    progress,
+    summary,
+    knowledgeDocuments,
+    leads,
+    readiness,
+  };
+}
+
+export async function saveTenantOnboardingStep(user, step, input = {}) {
+  if (!ONBOARDING_STEPS.includes(step)) throw new Error('Unsupported onboarding step');
+  const progress = await ensureTenantOnboardingProgress(user);
+  const completedSteps = new Set(normalizeCompletedSteps(progress.completedSteps));
+  if (input.completed !== false) completedSteps.add(step);
+  const answers = {
+    ...(progress.answers || {}),
+    [step]: {
+      ...((progress.answers || {})[step] || {}),
+      ...(input.answers || {}),
+      updatedAt: new Date().toISOString(),
+    },
+  };
+  const nextStep = input.nextStep && ONBOARDING_STEPS.includes(input.nextStep)
+    ? input.nextStep
+    : step;
+
+  return updateTenantRow('tenant_onboarding_progress', user, progress.id, {
+    currentStep: nextStep,
+    completedSteps: Array.from(completedSteps),
+    answers,
+    actorUserId: user?.authUserId || user?.id || null,
+    isComplete: Boolean(input.isComplete),
+    completedAt: input.isComplete ? new Date().toISOString() : null,
+    metadata: {
+      ...(progress.metadata || {}),
+      lastSavedStep: step,
+    },
+  });
+}
+
+export async function completeTenantOnboarding(user) {
+  const state = await getTenantOnboardingState(user);
+  if (!state.readiness.isReady) {
+    throw new Error('Complete required setup before starting live outreach.');
+  }
+
+  const progress = await saveTenantOnboardingStep(user, 'review', {
+    completed: true,
+    nextStep: 'review',
+    isComplete: true,
+    answers: {
+      readinessScore: state.readiness.score,
+      completedAt: new Date().toISOString(),
+    },
+  });
+
+  await unwrap(
+    await insforge.database
+      .from('tenants')
+      .update({ status: 'active', updated_at: new Date().toISOString() })
+      .eq('id', tenantIdFromUser(user))
+      .select('id'),
+    'Failed to mark tenant onboarding complete'
+  );
+
+  return progress;
+}
+
+export async function getTenantOnboardingRedirect(user) {
+  if (!user?.tenantId && !user?.tenant?.id) return '/onboarding';
+  try {
+    const { progress } = await getTenantOnboardingState(user);
+    return progress?.isComplete ? '/admin-dashboard' : '/onboarding';
+  } catch (error) {
+    console.warn('Onboarding redirect check skipped:', error?.message || error);
+    return '/admin-dashboard';
+  }
+}
+
+export async function updateTenantCompanyProfile(user, input = {}) {
+  const name = input.name?.trim();
+  if (!name) throw new Error('Company name is required');
+  const defaultTimezone = input.defaultTimezone?.trim() || 'America/Toronto';
+  const industry = input.industry?.trim() || null;
+  const businessNiche = input.businessNiche?.trim() || null;
+  const tenantId = tenantIdFromUser(user);
+
+  const data = await unwrap(
+    await insforge.database
+      .from('tenants')
+      .update(toDbRecord({
+        name,
+        industry,
+        businessNiche,
+        defaultTimezone,
+        status: 'onboarding',
+        updatedAt: new Date().toISOString(),
+      }))
+      .eq('id', tenantId)
+      .select(),
+    'Failed to update company profile'
+  );
+  return fromDbRecord(data?.[0]);
+}
+
 export async function createTenantAgent(user, input = {}) {
   const displayName = input.displayName?.trim();
   if (!displayName) throw new Error('Agent name is required');
@@ -433,9 +1195,40 @@ export async function createTenantAgent(user, input = {}) {
     templateKey: input.templateKey || 'custom-agent',
     voiceId: input.voiceId?.trim() || null,
     promptVersion: input.promptVersion?.trim() || 'agent-template-v2',
-    status: input.status || 'testing',
+    status: input.status || 'live',
     metadata,
   });
+}
+
+export async function updateTenantAgent(user, agentId, input = {}) {
+  if (!agentId) throw new Error('AI agent is required');
+  const patch = {};
+  if (input.displayName !== undefined) {
+    const displayName = input.displayName?.trim();
+    if (!displayName) throw new Error('Agent name is required');
+    patch.displayName = displayName;
+  }
+  if (input.voiceId !== undefined) patch.voiceId = input.voiceId?.trim() || null;
+  if (input.status !== undefined) {
+    const allowed = ['testing', 'live', 'paused', 'archived'];
+    if (!allowed.includes(input.status)) throw new Error('Unsupported AI agent status');
+    patch.status = input.status;
+  }
+  if (
+    input.voiceProfile !== undefined
+    || input.personality !== undefined
+    || input.customPersonalityNotes !== undefined
+    || input.metadata !== undefined
+  ) {
+    patch.metadata = {
+      ...(input.existingMetadata || {}),
+      ...(input.metadata || {}),
+      voiceProfile: input.voiceProfile || input.metadata?.voiceProfile || null,
+      personality: input.personality || input.metadata?.personality || null,
+      customPersonalityNotes: input.customPersonalityNotes?.trim() || input.metadata?.customPersonalityNotes || null,
+    };
+  }
+  return updateTenantRow('tenant_agents', user, agentId, patch);
 }
 
 export async function archiveTenantAgent(user, agentId) {
@@ -462,7 +1255,7 @@ export async function createTenantPhoneNumber(user, input = {}) {
     providerPhoneNumberId: input.providerPhoneNumberId?.trim() || null,
     voiceEnabled: Boolean(input.voiceEnabled),
     smsEnabled: Boolean(input.smsEnabled),
-    whatsappStatus: input.whatsappStatus || 'not_configured',
+    whatsappStatus: input.whatsappStatus || 'active',
     isPrimary: Boolean(input.isPrimary),
     status: input.status || 'pending',
     metadata: input.metadata || {},
@@ -532,7 +1325,7 @@ export async function upsertTenantEmailIdentity(user, input = {}) {
 }
 
 export async function upsertTenantBookingIntegration(user, input = {}) {
-  const provider = input.provider || 'manual';
+  const provider = input.provider || 'calendly';
   const bookingUrl = input.bookingUrl?.trim() || null;
   const meetingLink = input.meetingLink?.trim() || null;
   const eventTypeId = input.eventTypeId?.trim() || null;
@@ -658,7 +1451,7 @@ export async function importLeadsFromCsv(user, { csvText, fileName } = {}) {
           actionType: canCall ? 'queue_call_attempt' : 'send_sms',
           channel: canCall ? 'phone' : 'sms',
           status: canCall ? 'awaiting_call' : (canSms ? 'pending' : 'awaiting_human'),
-          reason: canCall ? 'Campaign first step: call' : (canSms ? 'Campaign fallback: SMS' : 'Campaign requires call or SMS consent with a phone number'),
+          reason: canCall ? 'Campaign first step: call' : (canSms ? 'Campaign next step: SMS' : 'Campaign requires call or SMS consent with a phone number'),
           scheduledFor: new Date().toISOString(),
           payload: { source: 'campaign_import', campaignNumber: campaign.campaignNumber, campaignLeadId: campaignLead.id, tenantAgentId: campaignLead.agentId || lead?.assignedTenantAgentId || defaultAgent?.id || null },
         };

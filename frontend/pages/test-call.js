@@ -1,7 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Head from 'next/head';
+import { useRouter } from 'next/router';
 import { AlertCircle, CheckCircle2, PhoneCall, Send, ShieldCheck } from 'lucide-react';
 import { invokeFunction } from '../lib/insforge-functions';
+import { useAuth } from '../lib/auth';
+import { getTenantOnboardingRedirect } from '../lib/insforge-product';
 
 const initialForm = {
   to: '+14384838093',
@@ -11,6 +14,8 @@ const initialForm = {
 };
 
 export default function TestCall() {
+  const router = useRouter();
+  const { user, isAuthenticated, loading: authLoading } = useAuth();
   const [form, setForm] = useState(initialForm);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
@@ -21,6 +26,23 @@ export default function TestCall() {
     setError('');
     setResult(null);
   };
+
+  useEffect(() => {
+    let cancelled = false;
+    async function guardReadiness() {
+      if (authLoading) return;
+      if (!isAuthenticated) {
+        router.replace('/login');
+        return;
+      }
+      const redirect = await getTenantOnboardingRedirect(user);
+      if (!cancelled && redirect === '/onboarding') router.replace('/onboarding');
+    }
+    guardReadiness();
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, isAuthenticated, user, router]);
 
   const submitTestCall = async (event) => {
     event.preventDefault();

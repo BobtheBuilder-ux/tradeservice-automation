@@ -1,8 +1,5 @@
 import { createClient } from 'npm:@insforge/sdk';
 
-
-const DEFAULT_TENANT_ID = '00000000-0000-4000-8000-000000000001';
-
 function createInsForgeClient() {
   return createClient({
     baseUrl: Deno.env.get('INSFORGE_BASE_URL'),
@@ -53,7 +50,9 @@ export default async function(req: Request): Promise<Response> {
 
   const db = createInsForgeClient();
   const data = await req.json().catch(() => ({}));
+  const tenantId = data.tenantId || data.tenant_id;
   const leadId = data.leadId || data.lead_id;
+  if (!tenantId) return jsonResponse({ success: false, error: 'tenantId is required' }, 400);
   if (!leadId) return jsonResponse({ success: false, error: 'leadId is required' }, 400);
 
   const patch = {
@@ -63,6 +62,6 @@ export default async function(req: Request): Promise<Response> {
     meeting_location: data.meetingUrl || data.meeting_url || data.location || null,
     updated_at: new Date().toISOString(),
   };
-  const { data: leads } = await db.database.from('leads').update(patch).eq('id', leadId).select();
+  const { data: leads } = await db.database.from('leads').update(patch).eq('tenant_id', tenantId).eq('id', leadId).select();
   return jsonResponse({ success: true, lead: leads?.[0] || null });
 }

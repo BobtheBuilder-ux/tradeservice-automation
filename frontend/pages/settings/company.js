@@ -13,7 +13,6 @@ import {
   Save,
   Settings,
   RefreshCw,
-  TestTube2,
 } from 'lucide-react';
 import { useAuth } from '../../lib/auth';
 import {
@@ -28,7 +27,6 @@ import {
 } from '../../lib/insforge-product';
 import {
   provisionElevenLabsAgent,
-  testElevenLabsAgent,
   listElevenLabsVoices,
   getCalendlyConnectUrl,
   listCalendlyEventTypes,
@@ -40,7 +38,7 @@ const emptyAgentForm = {
   voiceProfile: 'any',
   personality: 'professional',
   customPersonalityNotes: '',
-  status: 'testing',
+  status: 'live',
 };
 
 const voiceProfiles = [
@@ -77,13 +75,13 @@ const emptyPhoneForm = {
   providerPhoneNumberId: '',
   voiceEnabled: true,
   smsEnabled: true,
-  whatsappStatus: 'not_configured',
+  whatsappStatus: 'active',
   status: 'active',
   isPrimary: true,
 };
 
 const emptyBookingForm = {
-  provider: 'manual',
+  provider: 'calendly',
   bookingUrl: '',
   meetingLink: '',
   eventTypeId: '',
@@ -172,6 +170,44 @@ export default function CompanySettingsPage() {
     fetchSettings();
   }, [authLoading, isAuthenticated, user, router]);
 
+  useEffect(() => {
+    if (!user || typeof window === 'undefined') return undefined;
+
+    async function handleCalendlyCompleted(payload = {}) {
+      if (payload.provider !== 'calendly' || payload.target !== 'settings') return;
+      if (payload.status === 'error') {
+        setError(payload.error || 'Calendly connection was not completed');
+        return;
+      }
+      setError(null);
+      setNotice('Calendly connected');
+      await fetchSettings();
+      const result = await listCalendlyEventTypes().catch(() => ({ eventTypes: [] }));
+      setCalendlyEventTypes(result.eventTypes || []);
+    }
+
+    function handleStorage(event) {
+      if (event.key !== 'bob:integration-connected' || !event.newValue) return;
+      try {
+        handleCalendlyCompleted(JSON.parse(event.newValue));
+      } catch {
+        setError('Calendly connection status could not be read');
+      }
+    }
+
+    let channel = null;
+    if ('BroadcastChannel' in window) {
+      channel = new BroadcastChannel('bob-integrations');
+      channel.onmessage = (event) => handleCalendlyCompleted(event.data || {});
+    }
+    window.addEventListener('storage', handleStorage);
+
+    return () => {
+      window.removeEventListener('storage', handleStorage);
+      if (channel) channel.close();
+    };
+  }, [user]);
+
   async function fetchSettings() {
     try {
       setLoading(true);
@@ -232,7 +268,7 @@ export default function CompanySettingsPage() {
       const selectedVoice = voiceOptions.find((voice) => voice.voiceId === agentForm.voiceId);
       const selectedVoiceProfile = voiceProfiles.find((profile) => profile.key === agentForm.voiceProfile) || voiceProfiles[0];
       const selectedPersonality = personalityPresets.find((preset) => preset.key === agentForm.personality) || personalityPresets[0];
-      await createTenantAgent(user, {
+      const savedAgent = await createTenantAgent(user, {
         ...agentForm,
         voiceProfile: {
           key: selectedVoiceProfile.key,
@@ -246,8 +282,12 @@ export default function CompanySettingsPage() {
           prompt: selectedPersonality.prompt,
         },
       });
+      const result = await provisionElevenLabsAgent(user, savedAgent?.id);
+      if (!result?.elevenlabsAgentId) {
+        throw new Error('AI agent sync did not return an agent ID. Please try again.');
+      }
       setAgentForm(emptyAgentForm);
-      setNotice('AI agent saved');
+      setNotice('AI agent synced and ready');
       await fetchSettings();
     } catch (err) {
       setError(err.message || 'Failed to save AI agent');
@@ -279,26 +319,11 @@ export default function CompanySettingsPage() {
       setAgentSetupResult(null);
       const result = await provisionElevenLabsAgent(user, agentId);
       setNotice(result.failedKnowledge?.length
-        ? `AI agent synced with ${result.failedKnowledge.length} knowledge source warning(s)`
-        : 'AI agent synced to ElevenLabs');
+        ? `AI agent prepared with ${result.failedKnowledge.length} knowledge source warning(s)`
+        : 'AI agent prepared');
       await fetchSettings();
     } catch (err) {
-      setError(err.message || 'Failed to sync AI agent to ElevenLabs');
-    } finally {
-      setAgentProviderBusy(null);
-    }
-  }
-
-  async function handleTestAgentSetup(agentId) {
-    try {
-      setAgentProviderBusy(agentId);
-      setError(null);
-      setNotice(null);
-      const result = await testElevenLabsAgent(user, agentId);
-      setAgentSetupResult(result.setup || null);
-      setNotice('AI agent setup checked');
-    } catch (err) {
-      setError(err.message || 'Failed to test AI agent setup');
+      setError(err.message || 'Failed to prepare AI agent');
     } finally {
       setAgentProviderBusy(null);
     }
@@ -310,7 +335,12 @@ export default function CompanySettingsPage() {
       setSaving('phone');
       setError(null);
       setNotice(null);
-      await createTenantPhoneNumber(user, phoneForm);
+      await createTenantPhoneNumber(user, {
+        ...phoneForm,
+        voiceEnabled: true,
+        smsEnabled: true,
+        whatsappStatus: 'active',
+      });
       setPhoneForm(emptyPhoneForm);
       setNotice('Phone number assigned');
       await fetchSettings();
@@ -387,8 +417,15 @@ export default function CompanySettingsPage() {
     try {
       setSaving('calendly-connect');
       setError(null);
-      const result = await getCalendlyConnectUrl();
-      window.location.assign(result.authorizeUrl);
+      const popup = window.open('/integration-callback?platform=calendly&target=settings&status=processing', '_blank', 'width=720,height=780');
+      if (!popup) throw new Error('Allow pop-ups to connect Calendly in a separate page');
+      const result = await getCalendlyConnectUrl({
+        returnTo: '/integration-callback?platform=calendly&target=settings',
+      });
+      try { popup.opener = null; } catch {}
+      popup.location.href = result.authorizeUrl;
+      popup.focus();
+      setNotice('Calendly opened in a separate page. Return here after approving the connection.');
     } catch (err) {
       setError(err.message || 'Unable to start Calendly connection');
     } finally {
@@ -596,7 +633,7 @@ export default function CompanySettingsPage() {
                         <th className="px-3 py-2 text-left text-xs font-medium text-text-muted">Name</th>
                         <th className="px-3 py-2 text-left text-xs font-medium text-text-muted">Voice</th>
                         <th className="px-3 py-2 text-left text-xs font-medium text-text-muted">Status</th>
-                        <th className="px-3 py-2 text-left text-xs font-medium text-text-muted">ElevenLabs</th>
+                        <th className="px-3 py-2 text-left text-xs font-medium text-text-muted">Agent Setup</th>
                         <th className="px-3 py-2 text-right text-xs font-medium text-text-muted">Actions</th>
                       </tr>
                     </thead>
@@ -617,36 +654,28 @@ export default function CompanySettingsPage() {
                           <td className="px-3 py-3">
                             {agent.elevenlabsAgentId ? (
                               <div>
-                                <span className="ops-badge bg-success-soft text-success">Synced</span>
+                                <span className="ops-badge bg-success-soft text-success">Ready</span>
                                 <p className="mt-1 max-w-40 truncate text-xs text-text-muted">{agent.elevenlabsAgentId}</p>
                               </div>
                             ) : (
-                              <span className="ops-badge bg-warning-soft text-warning">Needs sync</span>
+                              <span className="ops-badge bg-warning-soft text-warning">Preparing</span>
                             )}
                           </td>
                           <td className="px-3 py-3 text-right">
                             {agent.status !== 'archived' ? (
                               <div className="flex justify-end gap-2">
-                                <button
-                                  type="button"
-                                  className="ops-button-secondary h-8 px-2"
-                                  onClick={() => handleTestAgentSetup(agent.id)}
-                                  disabled={agentProviderBusy === agent.id}
-                                  title="Test AI agent setup"
-                                >
-                                  <TestTube2 className="h-4 w-4" aria-hidden="true" />
-                                  Test
-                                </button>
-                                <button
-                                  type="button"
-                                  className="ops-button-secondary h-8 px-2"
-                                  onClick={() => handleProvisionAgent(agent.id)}
-                                  disabled={agentProviderBusy === agent.id}
-                                  title="Sync AI agent to ElevenLabs"
-                                >
-                                  <RefreshCw className={`h-4 w-4 ${agentProviderBusy === agent.id ? 'animate-spin' : ''}`} aria-hidden="true" />
-                                  Sync
-                                </button>
+                                {agent.elevenlabsAgentId ? (
+                                  <button
+                                    type="button"
+                                    className="ops-button-secondary h-8 px-2"
+                                    onClick={() => handleProvisionAgent(agent.id)}
+                                    disabled={agentProviderBusy === agent.id}
+                                    title="Refresh AI agent setup"
+                                  >
+                                    <RefreshCw className={`h-4 w-4 ${agentProviderBusy === agent.id ? 'animate-spin' : ''}`} aria-hidden="true" />
+                                    Refresh
+                                  </button>
+                                ) : null}
                               <button
                                 type="button"
                                 className="ops-button-secondary h-8 px-2"
@@ -670,60 +699,21 @@ export default function CompanySettingsPage() {
             <div className="space-y-6">
               <Panel icon={Phone} title="Assign Phone Number">
                 <form className="space-y-3" onSubmit={handleCreatePhoneNumber}>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="flex h-9 items-center rounded-lg border border-border bg-surface-secondary px-3 text-sm font-medium text-text-secondary">
-                      Twilio
-                    </div>
-                    <select
-                      className="ops-select"
-                      value={phoneForm.status}
-                      onChange={(event) => setPhoneForm({ ...phoneForm, status: event.target.value })}
-                    >
-                      <option value="active">Active</option>
-                      <option value="pending">Pending</option>
-                      <option value="suspended">Suspended</option>
-                    </select>
-                  </div>
                   <input
                     className="ops-input"
-                    placeholder="+15551234567"
+                    placeholder="Phone number, e.g. +15551234567"
                     value={phoneForm.phoneNumber}
                     onChange={(event) => setPhoneForm({ ...phoneForm, phoneNumber: event.target.value })}
                   />
                   <input
                     className="ops-input"
-                    placeholder="Twilio phone number SID"
+                    placeholder="Provider phone ID"
                     value={phoneForm.providerPhoneNumberId}
                     onChange={(event) => setPhoneForm({ ...phoneForm, providerPhoneNumberId: event.target.value })}
                   />
-                  <div className="grid grid-cols-2 gap-3">
-                    <label className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-text-secondary">
-                      <input
-                        type="checkbox"
-                        checked={phoneForm.voiceEnabled}
-                        onChange={(event) => setPhoneForm({ ...phoneForm, voiceEnabled: event.target.checked })}
-                      />
-                      Voice
-                    </label>
-                    <label className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-text-secondary">
-                      <input
-                        type="checkbox"
-                        checked={phoneForm.smsEnabled}
-                        onChange={(event) => setPhoneForm({ ...phoneForm, smsEnabled: event.target.checked })}
-                      />
-                      SMS
-                    </label>
+                  <div className="rounded-lg border border-border bg-surface-secondary px-3 py-2 text-xs text-text-secondary">
+                    Voice, SMS, and WhatsApp are enabled automatically for saved numbers.
                   </div>
-                  <select
-                    className="ops-select"
-                    value={phoneForm.whatsappStatus}
-                    onChange={(event) => setPhoneForm({ ...phoneForm, whatsappStatus: event.target.value })}
-                  >
-                    <option value="not_configured">WhatsApp not configured</option>
-                    <option value="pending">WhatsApp pending</option>
-                    <option value="active">WhatsApp active</option>
-                    <option value="suspended">WhatsApp suspended</option>
-                  </select>
                   <label className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-text-secondary">
                     <input
                       type="checkbox"
@@ -793,7 +783,6 @@ export default function CompanySettingsPage() {
                       value={agentForm.status}
                       onChange={(event) => setAgentForm({ ...agentForm, status: event.target.value })}
                     >
-                      <option value="testing">Testing</option>
                       <option value="live">Live</option>
                     </select>
                   </div>
@@ -851,7 +840,6 @@ export default function CompanySettingsPage() {
                     value={bookingForm.provider}
                     onChange={(event) => setBookingForm({ ...bookingForm, provider: event.target.value })}
                   >
-                    <option value="manual">Manual</option>
                     <option value="calendly">Calendly</option>
                     <option value="google_calendar">Google Calendar</option>
                     <option value="zoom">Zoom</option>

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
 import { authManager, useAuth } from '../lib/auth';
+import { getCurrentPlatformAdminProfile, getTenantOnboardingRedirect } from '../lib/insforge-product';
 
 export default function Login() {
   const router = useRouter();
@@ -10,11 +11,31 @@ export default function Login() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    if (authLoading) return;
+    let cancelled = false;
 
-    if (isAuthenticated && user) {
-      router.push(user.redirectTo || '/admin-dashboard');
+    async function routeAuthenticatedUser() {
+      if (authLoading) return;
+
+      if (!isAuthenticated || !user) return;
+
+      try {
+        const profile = await getCurrentPlatformAdminProfile();
+        if (cancelled) return;
+        if (profile?.isPlatformAdmin) {
+          router.push('/overview');
+          return;
+        }
+        router.push(await getTenantOnboardingRedirect(user));
+      } catch (profileError) {
+        console.error('Platform admin redirect check failed:', profileError);
+        if (!cancelled) router.push(await getTenantOnboardingRedirect(user));
+      }
     }
+
+    routeAuthenticatedUser();
+    return () => {
+      cancelled = true;
+    };
   }, [authLoading, isAuthenticated, user, router]);
 
   useEffect(() => {
