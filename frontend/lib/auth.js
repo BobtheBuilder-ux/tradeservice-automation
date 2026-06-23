@@ -4,6 +4,11 @@ import { insforge } from './insforge';
 const AUTH_TOKEN_STORAGE_KEY = 'auth_token';
 const AUTH_PENDING_STORAGE_KEY = 'insforge_google_auth_pending';
 
+function isRefreshAuthError(error) {
+  const message = `${error?.message || ''} ${error?.code || ''}`.toLowerCase();
+  return message.includes('csrf') || message.includes('refresh') || error?.statusCode === 403;
+}
+
 export function getInsForgeAccessToken() {
   if (typeof window === 'undefined') return null;
 
@@ -106,6 +111,9 @@ class AuthManager {
     try {
       const { data, error } = await insforge.auth.getCurrentUser();
       if (error || !data?.user) {
+        if (error && isRefreshAuthError(error)) {
+          await this.clearInsForgeSession();
+        }
         if (this.hasPendingGoogleAuth()) {
           this.lastError = error?.message ||
             'Google sign-in did not complete. Please try again with the same browser window.';
@@ -116,6 +124,7 @@ class AuthManager {
 
       const token = syncLegacyAuthTokenWithInsForge();
       if (!token) {
+        await this.clearInsForgeSession();
         this.clearLocalState();
         return;
       }
@@ -140,6 +149,7 @@ class AuthManager {
       this.clearPendingGoogleAuth();
       this.notifyListeners();
     } catch {
+      await this.clearInsForgeSession();
       this.clearLocalState();
       this.notifyListeners();
     }
@@ -151,6 +161,7 @@ class AuthManager {
       : '/login';
 
     this.lastError = null;
+    await this.clearInsForgeSession();
     this.clearLocalState();
     this.markPendingGoogleAuth();
 
@@ -195,6 +206,14 @@ class AuthManager {
     this.user = null;
     this.isAuthenticated = false;
     this.initialized = true;
+  }
+
+  async clearInsForgeSession() {
+    try {
+      await insforge.auth.signOut();
+    } catch {
+      // The SDK clears local session and CSRF state even if backend logout fails.
+    }
   }
 
   markPendingGoogleAuth() {
