@@ -267,6 +267,16 @@ function friendlyValue(value: any) {
     .trim();
 }
 
+function leadInterestPhrase(lead: JsonRecord) {
+  const interest = friendlyValue(serviceInterest(lead));
+  return interest || 'insurance coverage';
+}
+
+function insuranceFormOpening(rows: JsonRecord) {
+  const agentName = rows.agent?.display_name || 'the AI assistant';
+  return `Hi ${leadDisplayName(rows.lead)}, I’m ${agentName}. You filled our form on insurance, and I see you’re interested in ${leadInterestPhrase(rows.lead)}. Would you like to book a consultation with one of our experts?`;
+}
+
 function leadOpeningSummary(lead: JsonRecord) {
   const formData = leadFormData(lead);
   const skipKeys = new Set([
@@ -355,7 +365,6 @@ function contactPreferenceInstruction(lead: JsonRecord) {
 
 function buildCallFirstMessage(rows: JsonRecord) {
   const agentName = rows.agent?.display_name || 'the AI assistant';
-  const tenantName = rows.tenant?.name || 'the company';
   const service = serviceInterest(rows.lead);
   const reason = service ? `your recent request about ${friendlyValue(service)}` : 'your recent request';
   const preferredLanguage = rows.lead?.preferred_language;
@@ -366,26 +375,22 @@ function buildCallFirstMessage(rows: JsonRecord) {
   if (actionPayload.reboundCall || actionPayload.rebound_call || sessionMetadata.reboundCall || sessionMetadata.rebound_call) {
     const summary = leadOpeningSummary(rows.lead);
     const summarySentence = summary ? ` I still have your details: ${summary}.` : '';
-    return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. Sorry for the interruption — our call dropped. I’m calling back about ${reason}.${summarySentence} Can we book a quick consultation now?`;
+    return `Hi ${leadDisplayName(rows.lead)}, I’m ${agentName}. Sorry for the interruption — our call dropped. You filled our form on insurance, and I see you’re interested in ${leadInterestPhrase(rows.lead)}.${summarySentence} Would you like to book a consultation with one of our experts?`;
   }
   if (prefilled) {
-    const summary = leadOpeningSummary(rows.lead);
-    const summarySentence = summary
-      ? `I can see this from your request: ${summary}.`
-      : 'I have the details you already shared.';
     const languageNote = preferredLanguage ? ` I’ll continue in ${preferredLanguage}.` : '';
     if (preferredContactChannel === 'email') {
-      return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling briefly about ${reason}. ${summarySentence}${languageNote} Can we book a quick consultation now, or would you prefer I send the details by email?`;
+      return `${insuranceFormOpening(rows)}${languageNote} If you prefer email, I can also send the details by email.`;
     }
-    return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}. ${summarySentence}${languageNote} Can we book a quick consultation now?`;
+    return `${insuranceFormOpening(rows)}${languageNote}`;
   }
   if (preferredLanguage) {
-    return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}, and I’ll continue in ${preferredLanguage}. Can we book a quick consultation now?`;
+    return `Hi ${leadDisplayName(rows.lead)}, I’m ${agentName}. You filled our form on insurance, and I see you’re interested in ${leadInterestPhrase(rows.lead)}. I’ll continue in ${preferredLanguage}. Would you like to book a consultation with one of our experts?`;
   }
   if (preferredContactChannel === 'email') {
-    return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling briefly about ${reason}. I see email may be your preferred contact method, so I can keep this quick and help book the next step or send the details by email.`;
+    return `Hi ${leadDisplayName(rows.lead)}, I’m ${agentName}. You filled our form on insurance, and I see you’re interested in ${leadInterestPhrase(rows.lead)}. Would you like to book a consultation with one of our experts, or should I send the details by email?`;
   }
-  return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}, and I can help book the next step. Can we book a quick consultation now?`;
+  return `Hi ${leadDisplayName(rows.lead)}, I’m ${agentName}. You filled our form on insurance, and I see you’re interested in ${leadInterestPhrase(rows.lead)}. Would you like to book a consultation with one of our experts?`;
 }
 
 function buildCallPrompt(rows: JsonRecord) {
@@ -405,7 +410,7 @@ function buildCallPrompt(rows: JsonRecord) {
     rows.bobAction?.payload?.reboundCall || rows.bobAction?.payload?.rebound_call || rows.session?.metadata?.reboundCall || rows.session?.metadata?.rebound_call
       ? 'This is a rebound call after an interrupted/drop event. Start by apologizing briefly for the interruption, then continue the same purpose without restarting awkwardly.'
       : '',
-    'Open with your identity, company, and reason for calling. Never begin with "is now a good time" or a similar permission-only line.',
+    'Opening script for insurance/form leads: "Hi [lead name], I’m [agent name]. You filled our form on insurance, and I see you’re interested in [service_interest or coverage_type_needed]. Would you like to book a consultation with one of our experts?" Do not mention the company name in the opening.',
     'Use expressive speech naturally. Match your tone to the lead: calm and reassuring when they sound worried, warm when they are positive, and clear and measured when explaining details. Keep delivery professional and never overact.',
     'Default to English. Do not ask the lead to choose a language. If lead preferred_language is already set, use that language from the start. If the lead asks to switch language mid-call, never end the call and never restart the introduction. Respond within one short sentence in the requested language, then continue all subsequent responses in that language from the current point in the conversation. Save preferredLanguage with update_lead_status after the spoken acknowledgement, but do not let the save delay the language switch.',
     'Never end the call because of background noise, cross-talk, multiple interruptions, silence, or a language change. Treat interruptions as normal conversation. If the lead is silent, patiently prompt again instead of ending.',
@@ -417,13 +422,13 @@ function buildCallPrompt(rows: JsonRecord) {
     `Booking provider: ${bookingProvider}. Booking path: ${bookingPath}.`,
     formSummary ? `Lead already provided this form/context data. Use it as answered information and do not ask it again: ${formSummary}.` : '',
     mode === 'form_prequalified_ask_only_missing_then_book'
-      ? `This lead appears pre-qualified or form-qualified. Do not run the long question-and-answer flow. The required flow is: introduce yourself, give one short summary of the known lead information, then ask "Can we book a quick consultation now?" If the lead says yes, okay, sure, sounds good, or otherwise agrees but does not give a time, do not go silent and do not call a tool yet. Immediately ask one scheduling question only: "Great — what day and time works best for you?" or offer ${suggestedDate} as a suggested date and ask what time works. When the lead gives a date and time, call create_booking immediately.`
+      ? `This lead appears pre-qualified or form-qualified. Do not run the long question-and-answer flow. The required flow is: introduce yourself with the insurance form script, mention the known interest/coverage, then ask whether they want to book a consultation with one of our experts. If the lead says yes, okay, sure, sounds good, or otherwise agrees but does not give a time, do not go silent and do not call a tool yet. Immediately ask one scheduling question only: "Great — what day and time will you be available?" or offer ${suggestedDate} as a suggested date and ask what time works. When the lead gives a date and time, call create_booking immediately. Do not call check_availability first during a live call.`
       : 'This lead does not have enough pre-filled qualification context. Use a short dynamic qualification flow before booking.',
     'The core purpose of this outbound call is booking. Treat service_interest, imported coverage_type_needed, imported service/interest, lead_form_summary, and location as enough reason/context to proceed. Do not ask why the lead is interested when those fields exist. Only ask a service-interest clarifier when all lead/form interest fields are missing.',
     'Before booking, qualify the lead with a short dynamic question set based on their service interest and tenant knowledge only when the form/context does not already answer the needed questions. Ask only relevant missing questions, one at a time. For pre-filled leads, skip repeated questions completely unless one must-have detail is truly missing; the main objective is immediate booking.',
     'After collecting qualification answers, call update_lead_status with qualificationQuestions, qualificationAnswers, qualificationSummary, qualificationStatus, qualificationScore when useful, and leadStage or schedulingState.',
     'During this active call, treat every booking date the lead mentions as a near-future date by default, not next year. Use current_date, current_time, and current_timezone to resolve relative dates like today, tomorrow, Monday, next week, or later today to the next near-future occurrence. If the lead gives a weekday or day number without a clear month, ask one short confirmation question for the exact month, day, year, and time before calling create_booking. Never use old example dates, training-data dates, or a far-future year to fill missing date parts.',
-    'After the introduction for a form-filled lead, move immediately to confirming a booking. If they say yes, okay, sure, sounds good, or otherwise agrees but does not give a time, ask one scheduling question only: "Great — what day and time works best for you?" or whether the suggested date works and what time. If the lead gives both date and time, call create_booking immediately.',
+    'After the introduction for a form-filled lead, move immediately to confirming a booking. If they say yes, okay, sure, sounds good, or otherwise agrees but does not give a time, ask one scheduling question only: "Great — what day and time will you be available?" If the lead gives both date and time, call create_booking immediately. Do not call check_availability first during a live call.',
     'If a booking is created, the tool handles SMS confirmation and reminders when SMS consent exists.',
     'Do not read, pronounce, or spell long URLs by default. Say that the meeting link will be sent by SMS/email. If the lead explicitly asks you to read a link aloud, read it slowly in short chunks.',
     'Use send_sms for requested texts, recaps, booking links, or follow-ups only when SMS consent exists. Respect opt-outs immediately.',

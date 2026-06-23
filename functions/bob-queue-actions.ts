@@ -451,16 +451,16 @@ function defaultCampaignSmsBody(input: { tenant?: any; agent?: any; lead: any })
 }
 
 function defaultCampaignEmailMessage(input: { tenant?: any; agent?: any; lead: any }) {
-  const tenantName = input.tenant?.name || 'our team';
   const agentName = input.agent?.display_name || 'the AI assistant';
-  const service = input.lead?.service_interest ? ` about ${input.lead.service_interest}` : '';
+  const service = spokenField(leadServiceInterest(input.lead) || 'insurance coverage');
   return [
-    `Write a concise follow-up email from ${agentName} at ${tenantName}.`,
+    `Write a concise first outreach email from ${agentName}.`,
     `The lead preferred email, so do not mention that we tried to call first.`,
-    `Purpose: follow up${service} and help them book the next best appointment time.`,
+    `Use this opening format: "I’m ${agentName}. You filled our form on insurance, and I see you’re interested in ${service}. Would you like to book a consultation with one of our experts?"`,
+    `If the lead replies yes, the next email should ask what day and time they will be available.`,
     input.lead?.qualification_notes ? `Lead notes: ${input.lead.qualification_notes}.` : '',
     input.lead?.preferred_meeting_window ? `Preferred meeting window: ${input.lead.preferred_meeting_window}.` : '',
-    'Use available tenant/agent/lead context. Keep it warm, specific, and action-oriented.',
+    'Do not ask long qualification questions. Keep it warm, specific, and action-oriented.',
   ].filter(Boolean).join(' ');
 }
 
@@ -531,13 +531,14 @@ function extractOutputText(response: any) {
 
 async function draftQueuedEmail(input: { tenant?: any; agent?: any; lead: any; message: string }) {
   const apiKey = Deno.env.get('OPENAI_API_KEY');
-  const fallbackSubject = input.lead?.service_interest ? `Following up about ${input.lead.service_interest}` : 'Following up';
+  const service = spokenField(leadServiceInterest(input.lead) || 'insurance coverage');
+  const fallbackSubject = `Consultation about ${service}`;
   const fallbackText = [
     `Hi ${leadName(input.lead)},`,
-    `${input.agent?.display_name || 'I'} from ${input.tenant?.name || 'our team'} here. I’m following up to help you book the best time for a quick call${input.lead?.service_interest ? ` about ${input.lead.service_interest}` : ''}.`,
+    `I’m ${input.agent?.display_name || 'the AI assistant'}. You filled our form on insurance, and I see you’re interested in ${service}. Would you like to book a consultation with one of our experts?`,
     input.lead?.preferred_meeting_window
       ? `I saw your preferred time is ${input.lead.preferred_meeting_window}. Does that still work for you?`
-      : 'What day and time works best for you?',
+      : 'If yes, what day and time will you be available?',
     'Thank you.',
   ].join('\n\n');
   const fallback = {
@@ -561,7 +562,8 @@ async function draftQueuedEmail(input: { tenant?: any; agent?: any; lead: any; m
         'You write concise, accurate automated business emails.',
         'Return only valid JSON with keys subject, text, and html.',
         'This is the AI agent starting the conversation by email first, so do not imply the lead emailed first.',
-        'Primary goal: help the lead book a quick call as soon as possible.',
+        'Primary goal: use this intro format: "I’m [agent name]. You filled our form on insurance, and I see you’re interested in [service_interest or coverage_type_needed]. Would you like to book a consultation with one of our experts?"',
+        'If the lead replies yes later, ask what day and time they will be available.',
         'Do not ask long qualification questions when the lead already provided context.',
         'Never invent prices, promises, availability, policies, discounts, or booking links.',
         'Use only simple safe HTML tags: p, strong, em, ul, li, a, br.',
@@ -572,7 +574,8 @@ async function draftQueuedEmail(input: { tenant?: any; agent?: any; lead: any; m
         lead: {
           name: leadName(input.lead),
           email: input.lead?.email || null,
-          serviceInterest: input.lead?.service_interest || null,
+          serviceInterest: leadServiceInterest(input.lead) || null,
+          importedLeadData: input.lead?.custom_fields?.importedLeadData || null,
           preferredMeetingWindow: input.lead?.preferred_meeting_window || null,
           qualificationNotes: input.lead?.qualification_notes || null,
           preferredContactChannel: input.lead?.preferred_contact_channel || null,

@@ -44,6 +44,23 @@ function firstValue(...values: unknown[]) {
   return values.find((value) => value !== undefined && value !== null && value !== '');
 }
 
+function leadServiceInterest(lead: any, input: any = {}) {
+  const imported = lead?.custom_fields?.importedLeadData || {};
+  return firstValue(
+    lead?.service_interest,
+    lead?.service,
+    lead?.interest,
+    imported.service_interest,
+    imported.service,
+    imported.interest,
+    imported.coverage_type_needed,
+    input.serviceInterest,
+    input.service_interest,
+    input.coverage_type_needed,
+    'insurance coverage'
+  );
+}
+
 function requiredTenantId(input: any) {
   const tenantId = firstValue(input?.tenantId, input?.tenant_id);
   if (!tenantId) throw new Error('tenantId is required');
@@ -154,9 +171,10 @@ function emailIntent(action: string, input: any) {
 
 function buildDraftInstructions(action: string, context: any, input: any) {
   const intent = emailIntent(action, input);
+  const interest = leadServiceInterest(context.lead, input);
   return {
     role: 'system',
-    content: `You write concise, accurate automated business emails. Return only valid JSON with keys subject, text, and html. Never invent booking details, pricing, promises, or links. Keep the tone warm and professional. If this is a first outreach/follow-up email, behave as the assigned AI agent starting the conversation by email and move quickly toward booking a call; do not imply the lead emailed first. The HTML must use only simple safe tags: p, strong, em, ul, li, a, br.`,
+    content: `You write concise, accurate automated business emails. Return only valid JSON with keys subject, text, and html. Never invent booking details, pricing, promises, or links. Keep the tone warm and professional. If this is a first outreach/follow-up email, behave as the assigned AI agent starting the conversation by email and move quickly toward booking a call; do not imply the lead emailed first. Use this first-outreach intro format: "I’m [agent name]. You filled our form on insurance, and I see you’re interested in [service_interest or coverage_type_needed]. Would you like to book a consultation with one of our experts?" If the lead replies yes later, ask what day and time they will be available. The HTML must use only simple safe tags: p, strong, em, ul, li, a, br.`,
     input: {
       intent,
       tenant: { name: context.tenant?.name || null, industry: context.tenant?.industry || null },
@@ -164,7 +182,8 @@ function buildDraftInstructions(action: string, context: any, input: any) {
       recipient: {
         name: context.lead?.full_name || [context.lead?.first_name, context.lead?.last_name].filter(Boolean).join(' ') || input.leadName || input.name || null,
         email: context.lead?.email || firstValue(input.to, input.toEmail, input.to_email) || null,
-        serviceInterest: context.lead?.service_interest || input.serviceInterest || input.service_interest || null,
+        serviceInterest: interest || null,
+        importedLeadData: context.lead?.custom_fields?.importedLeadData || null,
         preferredLanguage: context.lead?.preferred_language || input.preferredLanguage || input.preferred_language || null,
       },
       booking: {

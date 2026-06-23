@@ -761,6 +761,13 @@ async function checkAvailability(db: any, context: JsonRecord, input: JsonRecord
   };
 }
 
+function shouldQueueBookingConfirmation(lead: JsonRecord, method: 'email' | 'sms') {
+  if (!lead || lead.do_not_contact) return false;
+  if (lead.opted_out_at && (!lead.opt_out_channel || lead.opt_out_channel === 'all' || lead.opt_out_channel === method)) return false;
+  if (method === 'email') return Boolean(lead.email && lead.email_consent);
+  return Boolean(lead.phone && lead.sms_consent);
+}
+
 async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
   const readiness = await loadTenantReadiness(db, context.tenantId, context.agentId);
   const booking = readiness.bookingIntegration;
@@ -941,19 +948,21 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
   const formattedTime = start.toLocaleString('en-US', { timeZone: context.tenant.default_timezone || 'UTC', dateStyle: 'medium', timeStyle: 'short' });
   const reminderRows: JsonRecord[] = [];
   const reminderDefinitions = [
+    { hours: 0, method: 'email', type: 'confirmation' },
+    { hours: 0, method: 'sms', type: 'confirmation' },
     { hours: 24, method: 'email' },
     { hours: 24, method: 'sms' },
     { hours: 1, method: 'sms' },
   ];
   for (const reminder of reminderDefinitions) {
     const scheduledFor = new Date(start.getTime() - reminder.hours * 60 * 60 * 1000);
-    const hasConsent = reminder.method === 'email'
-      ? Boolean(context.lead.email && context.lead.email_consent && !context.lead.do_not_contact)
-      : Boolean(context.lead.phone && context.lead.sms_consent && !context.lead.do_not_contact);
+    const immediate = reminder.hours === 0;
+    if (immediate) scheduledFor.setTime(Date.now());
+    const hasConsent = shouldQueueBookingConfirmation(context.lead, reminder.method as 'email' | 'sms');
     reminderRows.push({
       tenant_id: context.tenantId,
       meeting_id: meeting?.id,
-      reminder_type: `${reminder.hours}h`,
+      reminder_type: reminder.type || `${reminder.hours}h`,
       delivery_method: reminder.method,
       scheduled_for: scheduledFor.toISOString(),
       status: scheduledFor.getTime() > Date.now() && hasConsent ? 'pending' : 'skipped',
@@ -965,50 +974,19 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
     'Failed to schedule booking reminders'
   );
 
-  const [smsResult, emailResult] = await Promise.all([
-    (async () => {
-      try {
-        assertLeadAllowsChannel(context.lead, 'sms');
-        await sendSms(db, context, { message: `Your appointment is confirmed for ${formattedTime}.${meetingUrl ? ` Meeting link: ${meetingUrl}` : ''}` });
-        return { sent: true, error: null };
-      } catch (error) {
-        return { sent: false, error: safeError(error, 'Booking SMS confirmation was not sent') };
-      }
-    })(),
-    (async () => {
-      try {
-        await sendBookingEmail(db, context, {
-          ...input,
-          emailType: 'booking_confirmation',
-          startTime: start.toISOString(),
-          endTime,
-          meetingUrl,
-          title,
-          message: firstValue(
-            input.emailMessage,
-            input.email_message,
-            `Your ${title} is confirmed.${meetingUrl ? ` Meeting link: ${meetingUrl}` : ''}`
-          ),
-        });
-        return { sent: true, error: null };
-      } catch (error) {
-        return { sent: false, error: safeError(error, 'Booking email confirmation was not sent') };
-      }
-    })(),
-  ]);
-
-  const smsConfirmationSent = smsResult.sent;
-  const smsError = smsResult.error;
-  const emailConfirmationSent = emailResult.sent;
-  const emailError = emailResult.error;
+  const smsConfirmationQueued = reminderRows.some((row) => row.reminder_type === 'confirmation' && row.delivery_method === 'sms' && row.status === 'pending');
+  const emailConfirmationQueued = reminderRows.some((row) => row.reminder_type === 'confirmation' && row.delivery_method === 'email' && row.status === 'pending');
 
   return {
     success: true,
     booking: meeting,
-    smsConfirmationSent,
-    smsError,
-    emailConfirmationSent,
-    emailError,
+    speakNow: `Booked. The consultation is confirmed for ${formattedTime}.`,
+    smsConfirmationSent: false,
+    emailConfirmationSent: false,
+    smsConfirmationQueued,
+    emailConfirmationQueued,
+    smsError: smsConfirmationQueued ? null : 'SMS confirmation was not queued because consent or phone details are missing.',
+    emailError: emailConfirmationQueued ? null : 'Email confirmation was not queued because consent or email details are missing.',
     remindersScheduled: reminderRows.filter((row) => row.status === 'pending').length,
   };
 }

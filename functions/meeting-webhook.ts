@@ -150,7 +150,11 @@ function agentName(context: any) {
 
 function reminderSmsBody(context: any) {
   const timeText = formatReminderTime(context.meeting, context.tenant, context.reminder.reminder_type);
-  return `Hi, this is ${agentName(context)}. Just a reminder about your appointment ${timeText}. See you then!`;
+  const meetingUrl = context.meeting?.meeting_url || context.meeting?.location || '';
+  if (context.reminder?.reminder_type === 'confirmation') {
+    return `Hi, this is ${agentName(context)}. Your appointment is confirmed for ${timeText}.${meetingUrl ? ` Meeting link: ${meetingUrl}` : ''}`;
+  }
+  return `Hi, this is ${agentName(context)}. Just a reminder about your appointment ${timeText}.${meetingUrl ? ` Meeting link: ${meetingUrl}` : ''} See you then!`;
 }
 
 function fallbackReminderEmailDraft(context: any) {
@@ -189,9 +193,11 @@ async function draftReminderEmailWithOpenAI(context: any) {
   const model = Deno.env.get('OPENAI_EMAIL_MODEL') || 'gpt-5.5';
   const preferredLanguage = context.lead?.preferred_language || null;
   const payload = {
-    intent: '24_hour_booking_reminder',
+    intent: context.reminder?.reminder_type === 'confirmation' ? 'booking_confirmation' : '24_hour_booking_reminder',
     requiredTone: 'friendly, warm, concise',
-    requiredOpening: `Hello again, it's ${agentName(context)}. Just checking on you and also reminding you about the upcoming appointment.`,
+    requiredOpening: context.reminder?.reminder_type === 'confirmation'
+      ? `Hello, it's ${agentName(context)}. Your appointment is confirmed.`
+      : `Hello again, it's ${agentName(context)}. Just checking on you and also reminding you about the upcoming appointment.`,
     tenant: { name: context.tenant?.name || null, industry: context.tenant?.industry || null },
     agent: { name: agentName(context) },
     recipient: {
@@ -213,7 +219,7 @@ async function draftReminderEmailWithOpenAI(context: any) {
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model,
-      instructions: `Write an automated 24-hour appointment reminder email. Return only valid JSON with keys subject, text, and html. Keep it friendly and ready to send without human approval. Use the agent name. Do not invent details. HTML may only use p, strong, em, a, br.${preferredLanguage ? ` Write the email in ${preferredLanguage}.` : ''}`,
+      instructions: `${context.reminder?.reminder_type === 'confirmation' ? 'Write an automated booking confirmation email.' : 'Write an automated 24-hour appointment reminder email.'} Return only valid JSON with keys subject, text, and html. Keep it friendly and ready to send without human approval. Use the agent name. Include the meeting link if provided. Do not invent details. HTML may only use p, strong, em, a, br.${preferredLanguage ? ` Write the email in ${preferredLanguage}.` : ''}`,
       input: JSON.stringify(payload),
       text: {
         format: {
@@ -313,7 +319,7 @@ async function sendReminderEmail(db: any, context: any) {
       subject: draft.subject,
       html_content: draft.html,
       text_content: draft.text,
-      email_type: 'booking_reminder',
+      email_type: context.reminder?.reminder_type === 'confirmation' ? 'booking_confirmation' : 'booking_reminder',
       status: 'sent',
       sent_at: nowIso(),
       generated_by: draft.generatedBy || 'openai',
