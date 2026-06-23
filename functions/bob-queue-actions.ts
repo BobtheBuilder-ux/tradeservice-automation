@@ -241,15 +241,31 @@ function leadAllowsChannel(lead: any, channel: string) {
 
 function normalizePreferredContactChannel(value: any) {
   const normalized = String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, '_');
-  if (['phone', 'voice', 'call', 'calls', 'phone_call'].includes(normalized)) return 'call';
-  if (['email', 'e_mail'].includes(normalized)) return 'email';
+  if (['phone', 'voice', 'call', 'calls', 'phone_call', 'phonecall', 'telephone'].includes(normalized)) return 'call';
+  if (['email', 'e_mail', 'mail'].includes(normalized)) return 'email';
   if (['sms', 'text', 'text_message'].includes(normalized)) return 'sms';
   if (['whatsapp', 'wa'].includes(normalized)) return 'whatsapp';
   return normalized || '';
 }
 
+function leadPreferredContactChannel(lead: any) {
+  const explicit = normalizePreferredContactChannel(lead?.preferred_contact_channel);
+  const imported = lead?.custom_fields?.importedLeadData || {};
+  const importedPreference = normalizePreferredContactChannel(
+    imported.preferred_contact_method
+      || imported.preferred_contact_channel
+      || imported.preferred_method
+      || imported.contact_method
+      || ''
+  );
+  if (importedPreference && importedPreference !== explicit) {
+    if (!explicit || explicit === 'email') return importedPreference;
+  }
+  return explicit;
+}
+
 function leadPrefersEmail(lead: any) {
-  return normalizePreferredContactChannel(lead?.preferred_contact_channel) === 'email';
+  return leadPreferredContactChannel(lead) === 'email';
 }
 
 function getTwilioClient() {
@@ -400,12 +416,31 @@ function leadName(lead: any) {
   return lead?.full_name || [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || 'there';
 }
 
+function leadServiceInterest(lead: any) {
+  const imported = lead?.custom_fields?.importedLeadData || {};
+  return lead?.service_interest
+    || lead?.service
+    || lead?.interest
+    || imported.service_interest
+    || imported.service
+    || imported.interest
+    || imported.coverage_type_needed
+    || '';
+}
+
+function spokenField(value: any) {
+  return String(value || '').trim().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
+}
+
 function reboundOpening(input: JsonRecord, lead: any, tenantAgent: any) {
   const agentName = tenantAgent?.display_name || 'the AI assistant';
-  const generated = `Hi ${leadName(lead)}, this is ${agentName}. Sorry for the interruption, I am calling back to continue helping with your request.`;
+  const service = spokenField(leadServiceInterest(lead));
+  const reason = service ? ` about ${service}` : '';
+  const generated = `Hi ${leadName(lead)}, this is ${agentName}. Sorry for the interruption, I am calling back${reason}. Can we book a quick consultation now?`;
   const requested = String(input.reboundOpening || input.rebound_opening || '').trim();
   if (!requested) return generated;
-  return requested.replace(/\b(Bob|James)\b/g, agentName);
+  const cleaned = requested.replace(/\b(Bob|James)\b/g, agentName);
+  return /book/i.test(cleaned) ? cleaned : `${cleaned.replace(/\s+$/, '')} Can we book a quick consultation now?`;
 }
 
 function defaultCampaignSmsBody(input: { tenant?: any; agent?: any; lead: any }) {
@@ -868,7 +903,7 @@ async function launchVoiceCall(db: any, input: JsonRecord) {
       direction: 'outbound',
       channel: 'voice',
       message_type: 'voice_call_started',
-      body_text: 'Twilio voice call started and connected to the AI voice bridge.',
+      body_text: 'Twilio voice call started and connected to the AI voice runtime.',
       provider_message_id: call.sid || null,
       status: 'sent',
       sent_at: nowIso(),
@@ -1051,7 +1086,7 @@ async function ensureCampaignCallActions(db: any, body: JsonRecord) {
         campaignLeadId: campaignLead.id,
         tenantAgentId: campaignLead.agent_id || lead.assigned_tenant_agent_id || null,
         contactPolicy: selectedPolicy,
-        preferredContactChannel: normalizePreferredContactChannel(lead.preferred_contact_channel),
+        preferredContactChannel: leadPreferredContactChannel(lead),
       },
     });
   }
@@ -1171,7 +1206,7 @@ async function sendQueuedEmailActions(db: any, body: JsonRecord) {
           bobActionId: action.id,
           campaignId: action.campaign_id || null,
           campaignLeadId: action.campaign_lead_id || null,
-          preferredContactChannel: normalizePreferredContactChannel(lead.preferred_contact_channel),
+          preferredContactChannel: leadPreferredContactChannel(lead),
         },
       });
 

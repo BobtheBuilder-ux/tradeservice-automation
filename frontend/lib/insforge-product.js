@@ -1513,7 +1513,16 @@ export async function importLeadsFromCsv(user, { csvText, fileName } = {}) {
       })));
       await insertTenantRows('bob_actions', user, campaignLeads.map((campaignLead) => {
         const lead = eligible.find((row) => row.id === campaignLead.leadId);
-        const preferredChannel = String(lead?.preferredContactChannel || '').toLowerCase().replace(/[\s_-]+/g, '_');
+        const rawPreferredChannel = String(lead?.preferredContactChannel || '').toLowerCase().replace(/[\s_-]+/g, '_');
+        const preferredChannel = ['phone', 'voice', 'call', 'calls', 'phone_call', 'phonecall', 'telephone'].includes(rawPreferredChannel)
+          ? 'call'
+          : ['sms', 'text', 'text_message'].includes(rawPreferredChannel)
+            ? 'sms'
+            : ['whatsapp', 'wa'].includes(rawPreferredChannel)
+              ? 'whatsapp'
+              : ['email', 'e_mail', 'mail'].includes(rawPreferredChannel)
+                ? 'email'
+                : rawPreferredChannel;
         const prefersEmail = preferredChannel === 'email';
         const canEmail = Boolean(lead?.emailConsent && lead?.email);
         const canCall = Boolean(lead?.callConsent && lead?.phone);

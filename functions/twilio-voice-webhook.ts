@@ -201,13 +201,21 @@ function leadDisplayName(lead: JsonRecord) {
 }
 
 function serviceInterest(lead: JsonRecord) {
-  return lead?.service_interest || lead?.service || lead?.interest || '';
+  const imported = lead?.custom_fields?.importedLeadData || {};
+  return lead?.service_interest
+    || lead?.service
+    || lead?.interest
+    || imported.service_interest
+    || imported.service
+    || imported.interest
+    || imported.coverage_type_needed
+    || '';
 }
 
 function normalizePreferredContactChannel(value: any) {
   const normalized = String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, '_');
-  if (['phone', 'voice', 'call', 'calls', 'phone_call'].includes(normalized)) return 'call';
-  if (['email', 'e_mail'].includes(normalized)) return 'email';
+  if (['phone', 'voice', 'call', 'calls', 'phone_call', 'phonecall', 'telephone'].includes(normalized)) return 'call';
+  if (['email', 'e_mail', 'mail'].includes(normalized)) return 'email';
   if (['sms', 'text', 'text_message'].includes(normalized)) return 'sms';
   if (['whatsapp', 'wa'].includes(normalized)) return 'whatsapp';
   return normalized || '';
@@ -242,6 +250,73 @@ function leadFormSummary(lead: JsonRecord) {
     ...entries.map(([key, value]) => `${key}: ${value}`),
   ].filter(Boolean);
   return summaryParts.join(' | ').slice(0, 1200);
+}
+
+function friendlyLabel(value: string) {
+  return String(value || '')
+    .replace(/[?_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function friendlyValue(value: any) {
+  return compactValue(value)
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function leadOpeningSummary(lead: JsonRecord) {
+  const formData = leadFormData(lead);
+  const skipKeys = new Set([
+    'platform',
+    'lead_status',
+    'preferred_contact_channel',
+    'preferred_contact_method',
+    'preferred_method',
+    'contact_method',
+    'email',
+    'phone',
+    'phone_number',
+  ]);
+  const preferredKeys = [
+    'coverage_type_needed',
+    'service_interest',
+    'occupation',
+    'do_you_have_existing_coverage?',
+    'existing_coverage',
+    'budget_range',
+  ];
+  const parts: string[] = [];
+
+  if (lead?.location_summary) parts.push(`location: ${friendlyValue(lead.location_summary)}`);
+  if (lead?.service_interest) parts.push(`interest: ${friendlyValue(lead.service_interest)}`);
+  if (lead?.budget_range) parts.push(`budget: ${friendlyValue(lead.budget_range)}`);
+
+  for (const key of preferredKeys) {
+    if (parts.length >= 3) break;
+    if (skipKeys.has(key)) continue;
+    const value = formData[key];
+    const text = friendlyValue(value);
+    if (text) parts.push(`${friendlyLabel(key)}: ${text}`);
+  }
+
+  for (const [key, value] of Object.entries(formData)) {
+    if (parts.length >= 3) break;
+    if (skipKeys.has(key)) continue;
+    if (preferredKeys.includes(key)) continue;
+    const text = friendlyValue(value);
+    if (text && text.length <= 80) parts.push(`${friendlyLabel(key)}: ${text}`);
+  }
+
+  return parts.slice(0, 3).join('; ');
+}
+
+function dateAfterDays(days: number) {
+  const date = new Date();
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 function hasUsefulPreFilledLeadContext(lead: JsonRecord) {
@@ -282,25 +357,35 @@ function buildCallFirstMessage(rows: JsonRecord) {
   const agentName = rows.agent?.display_name || 'the AI assistant';
   const tenantName = rows.tenant?.name || 'the company';
   const service = serviceInterest(rows.lead);
-  const reason = service ? `your recent request about ${service}` : 'your recent request';
+  const reason = service ? `your recent request about ${friendlyValue(service)}` : 'your recent request';
   const preferredLanguage = rows.lead?.preferred_language;
   const preferredContactChannel = normalizePreferredContactChannel(rows.lead?.preferred_contact_channel);
   const prefilled = hasUsefulPreFilledLeadContext(rows.lead);
   const actionPayload = rows.bobAction?.payload || {};
   const sessionMetadata = rows.session?.metadata || {};
   if (actionPayload.reboundCall || actionPayload.rebound_call || sessionMetadata.reboundCall || sessionMetadata.rebound_call) {
-    return actionPayload.reboundOpening || sessionMetadata.reboundOpening || `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. Sorry for the interruption — our call dropped. I’m calling back to continue helping with ${reason}.`;
+    const summary = leadOpeningSummary(rows.lead);
+    const summarySentence = summary ? ` I still have your details: ${summary}.` : '';
+    return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. Sorry for the interruption — our call dropped. I’m calling back about ${reason}.${summarySentence} Can we book a quick consultation now?`;
+  }
+  if (prefilled) {
+    const summary = leadOpeningSummary(rows.lead);
+    const summarySentence = summary
+      ? `I can see this from your request: ${summary}.`
+      : 'I have the details you already shared.';
+    const languageNote = preferredLanguage ? ` I’ll continue in ${preferredLanguage}.` : '';
+    if (preferredContactChannel === 'email') {
+      return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling briefly about ${reason}. ${summarySentence}${languageNote} Can we book a quick consultation now, or would you prefer I send the details by email?`;
+    }
+    return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}. ${summarySentence}${languageNote} Can we book a quick consultation now?`;
   }
   if (preferredLanguage) {
-    return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}, and I’ll continue in ${preferredLanguage} as your preferred language.`;
+    return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}, and I’ll continue in ${preferredLanguage}. Can we book a quick consultation now?`;
   }
   if (preferredContactChannel === 'email') {
     return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling briefly about ${reason}. I see email may be your preferred contact method, so I can keep this quick and help book the next step or send the details by email.`;
   }
-  if (prefilled) {
-    return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}. I have the details you already shared, so I’ll keep this quick and help book the next step. Before we continue, what language would you prefer we speak in?`;
-  }
-  return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}, and I can help with the next step. Before we continue, what language would you prefer we speak in?`;
+  return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}, and I can help book the next step. Can we book a quick consultation now?`;
 }
 
 function buildCallPrompt(rows: JsonRecord) {
@@ -312,6 +397,7 @@ function buildCallPrompt(rows: JsonRecord) {
   const bookingPath = booking.booking_url || booking.event_type_id || 'not configured';
   const formSummary = leadFormSummary(rows.lead);
   const mode = qualificationMode(rows.lead);
+  const suggestedDate = dateAfterDays(2);
 
   return [
     `You are ${agentName}, an AI outreach and booking assistant for ${tenantName}.`,
@@ -321,10 +407,9 @@ function buildCallPrompt(rows: JsonRecord) {
       : '',
     'Open with your identity, company, and reason for calling. Never begin with "is now a good time" or a similar permission-only line.',
     'Use expressive speech naturally. Match your tone to the lead: calm and reassuring when they sound worried, warm when they are positive, and clear and measured when explaining details. Keep delivery professional and never overact.',
-    'In the introduction, ask what language the lead would prefer to communicate in unless preferred_language is already set. When the lead answers, switch immediately in your next spoken response. Do not wait for a tool result before speaking. Then call update_lead_status with preferredLanguage as a fast state save. Do not repeat the introduction or ask the language question again after the language is selected.',
-    'If the lead asks to switch language mid-call, never end the call and never restart the introduction. Respond within one short sentence in the requested language, then continue all subsequent responses in that language from the current point in the conversation. Save preferredLanguage with update_lead_status after the spoken acknowledgement, but do not let the save delay the language switch.',
+    'Default to English. Do not ask the lead to choose a language. If lead preferred_language is already set, use that language from the start. If the lead asks to switch language mid-call, never end the call and never restart the introduction. Respond within one short sentence in the requested language, then continue all subsequent responses in that language from the current point in the conversation. Save preferredLanguage with update_lead_status after the spoken acknowledgement, but do not let the save delay the language switch.',
     'Never end the call because of background noise, cross-talk, multiple interruptions, silence, or a language change. Treat interruptions as normal conversation. If the lead is silent, patiently prompt again instead of ending.',
-    rows.lead?.preferred_language ? `Lead preferred language: ${rows.lead.preferred_language}. Continue in this language unless the lead changes it.` : 'Lead preferred language is not set yet.',
+    rows.lead?.preferred_language ? `Lead preferred language: ${rows.lead.preferred_language}. Continue in this language unless the lead changes it.` : 'Lead preferred language is not set. Use English by default and do not ask for language selection.',
     contactPreferenceInstruction(rows.lead),
     'After the lead responds, keep the conversation warm, concise, and useful. If they are busy, offer to send an SMS follow-up or schedule a better time.',
     'Use the tenant knowledge base for company-specific services, process, pricing guidance, objections, and policies. If knowledge is missing, do not invent details; offer to have the team follow up.',
@@ -332,13 +417,13 @@ function buildCallPrompt(rows: JsonRecord) {
     `Booking provider: ${bookingProvider}. Booking path: ${bookingPath}.`,
     formSummary ? `Lead already provided this form/context data. Use it as answered information and do not ask it again: ${formSummary}.` : '',
     mode === 'form_prequalified_ask_only_missing_then_book'
-      ? 'This lead appears pre-qualified or form-qualified. Do not run the long question-and-answer flow. Briefly confirm the main known details if needed, ask only one missing must-have question, then ask for a preferred appointment time and book as quickly as possible.'
+      ? `This lead appears pre-qualified or form-qualified. Do not run the long question-and-answer flow. The required flow is: introduce yourself, give one short summary of the known lead information, then ask "Can we book a quick consultation now?" If the lead says yes, okay, sure, sounds good, or otherwise agrees but does not give a time, do not go silent and do not call a tool yet. Immediately ask one scheduling question only: "Great — what day and time works best for you?" or offer ${suggestedDate} as a suggested date and ask what time works. When the lead gives a date and time, call create_booking immediately.`
       : 'This lead does not have enough pre-filled qualification context. Use a short dynamic qualification flow before booking.',
-    'The core purpose of this outbound call is to understand the lead’s service interest and move that interest toward qualification and booking. If service_interest is missing, generic, unclear, or the lead has not clearly expressed interest yet, do not abandon the workflow and do not mark them not_interested. Ask one concise clarifying question such as which service they wanted help with, what prompted the request, or what outcome they want. If tenant knowledge lists services, offer 2 to 4 likely service options. Once the interest is clear, save it with update_lead_status and continue qualification.',
-    'Before booking, qualify the lead with a short dynamic question set based on their service interest and tenant knowledge only when the form/context does not already answer the needed questions. Ask only relevant missing questions, one at a time. For pre-filled leads, skip repeated questions and move to booking quickly.',
+    'The core purpose of this outbound call is booking. Treat service_interest, imported coverage_type_needed, imported service/interest, lead_form_summary, and location as enough reason/context to proceed. Do not ask why the lead is interested when those fields exist. Only ask a service-interest clarifier when all lead/form interest fields are missing.',
+    'Before booking, qualify the lead with a short dynamic question set based on their service interest and tenant knowledge only when the form/context does not already answer the needed questions. Ask only relevant missing questions, one at a time. For pre-filled leads, skip repeated questions completely unless one must-have detail is truly missing; the main objective is immediate booking.',
     'After collecting qualification answers, call update_lead_status with qualificationQuestions, qualificationAnswers, qualificationSummary, qualificationStatus, qualificationScore when useful, and leadStage or schedulingState.',
     'During this active call, treat every booking date the lead mentions as a near-future date by default, not next year. Use current_date, current_time, and current_timezone to resolve relative dates like today, tomorrow, Monday, next week, or later today to the next near-future occurrence. If the lead gives a weekday or day number without a clear month, ask one short confirmation question for the exact month, day, year, and time before calling create_booking. Never use old example dates, training-data dates, or a far-future year to fill missing date parts.',
-    'When the lead is qualified, interested, or clearly ready to book, your first attempt must be to book directly on the phone by asking for a preferred date/time and calling create_booking. Sending a booking link by SMS/email is only a fallback when the lead explicitly asks to choose a time later, asks for the link, refuses to pick a time on the call, or cannot decide.',
+    'After the introduction for a form-filled lead, move immediately to confirming a booking. If they say yes, okay, sure, sounds good, or otherwise agrees but does not give a time, ask one scheduling question only: "Great — what day and time works best for you?" or whether the suggested date works and what time. If the lead gives both date and time, call create_booking immediately.',
     'If a booking is created, the tool handles SMS confirmation and reminders when SMS consent exists.',
     'Do not read, pronounce, or spell long URLs by default. Say that the meeting link will be sent by SMS/email. If the lead explicitly asks you to read a link aloud, read it slowly in short chunks.',
     'Use send_sms for requested texts, recaps, booking links, or follow-ups only when SMS consent exists. Respect opt-outs immediately.',
@@ -358,6 +443,9 @@ function knowledgeRefs(documents: JsonRecord[]) {
 
 function buildConversationConfigOverride(rows: JsonRecord) {
   const mode = String(Deno.env.get('ELEVENLABS_CONVERSATION_OVERRIDE_MODE') || 'first_message').toLowerCase();
+  const toolIds = Array.isArray(rows.agent?.metadata?.elevenlabs?.toolIds)
+    ? rows.agent.metadata.elevenlabs.toolIds.filter(Boolean)
+    : [];
   if (mode !== 'full') {
     return {
       agent: {
@@ -371,6 +459,7 @@ function buildConversationConfigOverride(rows: JsonRecord) {
       prompt: {
         prompt: buildCallPrompt(rows),
         knowledge_base: knowledgeRefs(rows.knowledgeDocuments),
+        ...(toolIds.length ? { tool_ids: toolIds } : {}),
       },
     },
   };
@@ -390,7 +479,7 @@ function buildCallDynamicVariables(session: JsonRecord, rows: JsonRecord) {
     lead_name: dynamicString(leadDisplayName(rows.lead)),
     service_interest: dynamicString(service),
     service_interest_status: dynamicString(service ? 'known' : 'missing_or_unclear'),
-    preferred_language: dynamicString(rows.lead?.preferred_language),
+    preferred_language: dynamicString(rows.lead?.preferred_language || 'English'),
     preferred_contact_channel: dynamicString(preferredContactChannel),
     qualification_mode: dynamicString(qualificationMode(rows.lead)),
     lead_form_summary: dynamicString(formSummary),
@@ -398,6 +487,7 @@ function buildCallDynamicVariables(session: JsonRecord, rows: JsonRecord) {
     language_switch_mode: 'instant_spoken_ack_then_fast_save',
     booking_date_default: 'near_future_confirm_unclear_month_year',
     booking_context: dynamicString(rows.lead?.preferred_meeting_window),
+    suggested_booking_date: dynamicString(dateAfterDays(2)),
     booking_provider: dynamicString(rows.bookingIntegration?.provider),
     booking_url: dynamicString(rows.bookingIntegration?.booking_url),
     call_reason: dynamicString(service ? 'Follow up about ' + service : 'Follow up on recent request'),
@@ -462,7 +552,8 @@ function streamTwiml(reqUrl: URL, session: JsonRecord, token: string, preConnect
 
 async function reboundPreConnectSay(db: any, session: JsonRecord) {
   if (session.metadata?.reboundCall || session.metadata?.rebound_call) {
-    return session.metadata?.reboundOpening || 'Sorry for the interruption — our call dropped. I am calling back so we can continue from where we left off.';
+    const message = session.metadata?.reboundOpening || 'Sorry for the interruption — our call dropped. I am calling back now.';
+    return /book/i.test(String(message)) ? message : `${String(message).replace(/\s+$/, '')} Can we book a quick consultation now?`;
   }
   if (!session.bob_action_id) return '';
   const rows = await unwrap(
@@ -471,7 +562,8 @@ async function reboundPreConnectSay(db: any, session: JsonRecord) {
   );
   const payload = rows?.[0]?.payload || {};
   if (!payload.reboundCall && !payload.rebound_call) return '';
-  return payload.reboundOpening || 'Sorry for the interruption — our call dropped. I am calling back so we can continue from where we left off.';
+  const message = payload.reboundOpening || 'Sorry for the interruption — our call dropped. I am calling back now.';
+  return /book/i.test(String(message)) ? message : `${String(message).replace(/\s+$/, '')} Can we book a quick consultation now?`;
 }
 
 async function callPreConnectSay(db: any, session: JsonRecord) {
@@ -953,6 +1045,9 @@ export default async function(req: Request): Promise<Response> {
       bridgeContextProtected: Boolean(Deno.env.get('VOICE_BRIDGE_CONTEXT_SECRET')),
       elevenlabsConfigured: Boolean(Deno.env.get('ELEVENLABS_API_KEY')),
       elevenlabsRegisterCallEnabled: Deno.env.get('ELEVENLABS_TWILIO_REGISTER_CALL_ENABLED') === 'true',
+      activeVoicePath: Deno.env.get('ELEVENLABS_TWILIO_REGISTER_CALL_ENABLED') === 'true' ? 'elevenlabs_twilio_register_call' : 'voice_media_bridge',
+      conversationOverrideEnabled: Deno.env.get('ENABLE_ELEVENLABS_CONVERSATION_OVERRIDE') === 'true',
+      conversationOverrideMode: Deno.env.get('ELEVENLABS_CONVERSATION_OVERRIDE_MODE') || 'first_message',
     });
   }
 

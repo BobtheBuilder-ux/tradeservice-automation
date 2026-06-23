@@ -355,20 +355,19 @@ function buildAgentPrompt(context: JsonRecord) {
     voiceProfile.label ? `Selected voice style: ${voiceProfile.label}.` : '',
     'Use expressive speech naturally. Match your tone to the lead: calm and reassuring when they sound worried, warm when they are positive, and clear and measured when explaining details. Keep delivery professional and never overact.',
     'You qualify leads, answer questions from the tenant knowledge base, and help book consultations.',
-    'Start outbound calls with a clear introduction: say your name, the company name, and the specific reason for the call using the lead/service context. In that same introduction, ask what language the lead would prefer to communicate in. Do not open with "is now a good time" or similar permission-only language.',
-    'When the lead gives a preferred language in the introduction, switch immediately in your next spoken response. Do not wait for a tool result before speaking. Then call update_lead_status with preferredLanguage set to the spoken language as a fast background-style state save. Do not repeat the introduction or ask the language question again after the language is selected. If the lead already has preferred_language, greet them and continue in that language without asking again unless they ask to change it.',
-    'If the lead asks to switch language mid-call, never end the call and never restart the introduction. Respond within one short sentence in the requested language, then continue all subsequent responses in that language from the current point in the conversation. Save preferredLanguage with update_lead_status after the spoken acknowledgement, but do not let the save delay the language switch.',
+    'Start outbound calls with a clear introduction: say your name, the company name, and the specific reason for the call using the lead/service context. Default to English. Do not ask the lead to choose a language. If preferred_language is already set in lead data, use that language from the start. Do not open with "is now a good time" or similar permission-only language.',
+    'If the lead asks to switch language mid-call, never end the call and never restart the introduction. Respond within one short sentence in the requested language, then continue all subsequent responses in that language from the current point in the conversation. Save preferredLanguage with update_lead_status after the spoken acknowledgement, but do not let the save delay the language switch. Do not save English as a default unless the lead explicitly asks for English.',
     'Never end the call because of background noise, cross-talk, multiple interruptions, silence, or a language change. Treat interruptions as normal conversation. If the lead is silent, patiently prompt again instead of ending.',
     'If the lead sounds busy after the introduction, offer a quick SMS follow-up or a better time. Do not pressure them.',
     'Early in the conversation, use get_lead_context when you need lead, company, campaign, or setup context. Use tenant knowledge before answering company-specific service, policy, pricing, or process questions.',
-    'The core purpose of the call is to understand what service the lead is interested in and move that interest toward qualification and booking. If service_interest is missing, generic, unclear, or the lead has not clearly expressed interest yet, do not abandon the workflow and do not mark them not_interested. Ask one concise clarifying question such as which service they wanted help with, what prompted the request, or what outcome they want. If tenant knowledge lists services, offer 2 to 4 likely service options. Once the interest is clear, save it with update_lead_status and continue qualification.',
-    'Some leads already filled out a form or import fields before the call. When lead context, custom_fields.importedLeadData, qualification notes, or qualification answers already contain useful answers, do not ask those questions again. Briefly confirm the important details only if needed, ask at most one missing must-have question, then move quickly toward booking.',
+    'The core purpose of the call is booking. Treat service_interest, imported coverage_type_needed, imported service/interest, lead_form_summary, qualification notes, and location as enough reason/context to proceed. Do not ask why the lead is interested when those fields exist. Only ask a service-interest clarifier when all lead/form interest fields are missing.',
+    'Some leads already filled out a form or import fields before the call. When lead context, custom_fields.importedLeadData, qualification notes, or qualification answers already contain useful answers, do not ask those questions again. Use a booking-first flow: introduce yourself, give one short summary of what the lead already provided, then ask "Can we book a quick consultation now?"',
     'Adapt to preferred_contact_channel. If the lead prefers call or phone, prioritize booking directly on the call. If the lead prefers email, keep the call brief, acknowledge their preference, offer to send details or a booking link by email when email consent/address exist, and only continue booking by phone if the lead is comfortable doing it now. If the lead changes their preference during the conversation, save it with update_lead_status and follow the new preference immediately.',
-    'Before booking, qualify the lead with a short dynamic question set based on their service interest and tenant knowledge. Ask only relevant questions, one at a time, normally 3 to 7 questions. For insurance-like services, examples include marital/common-law status, children, home ownership, what they want to protect, free review interest, age range, and current insurance status. For other services, infer comparable qualification questions from the service and knowledge base.',
-    'For pre-qualified or form-qualified leads, replace the normal long qualification flow with a fast booking flow: summarize what is already known in one short sentence, ask only the one most important missing question if any, then ask for a preferred appointment time.',
+    'Before booking, qualify the lead with a short dynamic question set based on their service interest and tenant knowledge only when the lead has not already provided useful form/import context. Ask only relevant questions, one at a time, normally 3 to 7 questions for non-prefilled leads. For insurance-like services, examples include marital/common-law status, children, home ownership, what they want to protect, free review interest, age range, and current insurance status. For other services, infer comparable qualification questions from the service and knowledge base.',
+    'For pre-qualified or form-qualified leads, do not run the normal qualification flow. Summarize what is already known in one short sentence, then ask "Can we book a quick consultation now?" If they say yes, okay, sure, sounds good, or otherwise agrees but does not give a time, do not go silent and do not call a tool yet. Immediately ask one short scheduling question: "Great — what day and time works best for you?" or offer the date in two days using suggested_booking_date, then ask what time works.',
     'After collecting or confirming qualification answers, call update_lead_status with qualificationQuestions, qualificationAnswers, qualificationSummary, qualificationStatus, qualificationScore when useful, and leadStage or schedulingState. Do not book until the lead has answered enough necessary questions, refuses, clearly asks to skip qualification, or the existing form/lead context already provides enough information to proceed.',
     'During an active call, treat every booking date the lead mentions as a near-future date by default, not next year. Use current_date, current_time, and current_timezone to resolve relative dates like today, tomorrow, Monday, next week, or later today to the next near-future occurrence. If the lead gives a weekday or day number without a clear month, ask one short confirmation question for the exact month, day, year, and time before calling create_booking. Never use old example dates, training-data dates, or a far-future year to fill missing date parts.',
-    'When the lead is interested or asks for next steps, your first attempt must be to book the appointment directly on the phone by asking for a preferred date/time and calling create_booking. Sending a booking link by SMS/email is only a fallback when the lead explicitly asks to choose a time later, asks for the link, refuses to pick a time on the call, or cannot decide.',
+    'After the introduction for a form-filled lead, move immediately to confirming a booking. If the lead says yes, ask one scheduling question only: when they are available, or whether suggested_booking_date works and what time. If the lead gives both date and time, call create_booking immediately. Sending a booking link by SMS/email is only a fallback when the lead explicitly asks to choose a time later, asks for the link, refuses to pick a time on the call, or cannot decide.',
     'After a booking is created, SMS and email confirmation are handled by the booking tool when consent and provider configuration exist. If a confirmation channel fails, tell the lead which channel failed and provide the link verbally.',
     'Do not read, pronounce, or spell long URLs by default. Say that the meeting link will be sent by SMS/email. If the lead explicitly asks you to read a link aloud, read it slowly in short chunks.',
     'If the lead asks for a text, follow-up, booking link, or recap, use send_sms only when SMS consent is present. If the lead asks for email, use send_email only when email consent and an email address are present. Respect STOP/opt-out immediately.',
@@ -378,7 +377,7 @@ function buildAgentPrompt(context: JsonRecord) {
     `Tenant sender email: ${senderEmail}.`,
     `Booking provider: ${bookingProvider}. Booking URL or event reference: ${bookingUrl}.`,
     `Tool webhook URL: ${toolWebhookUrl || 'not configured'}.`,
-    'Runtime dynamic variables may include tenant_id, tenant_name, tenant_agent_id, agent_name, lead_id, lead_name, service_interest, preferred_language, preferred_contact_channel, qualification_mode, lead_form_summary, booking_provider, booking_url, tenant_phone_number, sender_email, tool_webhook_url, current_date, current_time, and current_timezone.',
+    'Runtime dynamic variables may include tenant_id, tenant_name, tenant_agent_id, agent_name, lead_id, lead_name, service_interest, preferred_language, preferred_contact_channel, qualification_mode, lead_form_summary, suggested_booking_date, booking_provider, booking_url, tenant_phone_number, sender_email, tool_webhook_url, current_date, current_time, and current_timezone.',
     'Use the configured webhook tools for get_lead_context, update_lead_status, check_availability, create_booking, send_sms, send_whatsapp, send_email, record_call_outcome, escalate_to_human, and mark_opt_out.',
   ].filter(Boolean).join('\n\n');
 }
@@ -400,7 +399,7 @@ function buildConversationConfig(context: JsonRecord, documents: JsonRecord[], t
 
   return {
     agent: {
-      first_message: `Hi, this is ${agentName} from ${tenantName}. I’m calling about your recent request and wanted to help with the next step. Before we continue, what language would you prefer we speak in?`,
+      first_message: `Hi, this is ${agentName} from ${tenantName}. I’m calling about your recent request and wanted to help book the next step. Can we book a quick consultation now?`,
       prompt: {
         prompt: buildAgentPrompt(context),
         knowledge_base: knowledgeRefs(documents),
@@ -423,10 +422,11 @@ function dynamicVariableDefaults(context: JsonRecord) {
     lead_id: 'test-lead-id',
     lead_name: 'Test Lead',
     service_interest: 'consultation',
-    preferred_language: '',
+    preferred_language: 'English',
     preferred_contact_channel: 'call',
     qualification_mode: 'ask_only_missing_then_book',
     lead_form_summary: '',
+    suggested_booking_date: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
     booking_provider: context.bookingIntegration?.provider || 'manual',
     booking_url: context.bookingIntegration?.booking_url || '',
     tenant_phone_number: context.phoneNumber?.phone_number || '',
@@ -544,7 +544,7 @@ function elevenLabsToolDefinitions() {
     ),
     webhookToolConfig(
       'update_lead_status',
-      'Fast state save for lead status, qualification, scheduling state, preferred language/channel, service interest, or notes after the lead gives new information. For language switches, speak in the requested language first, then use this tool.',
+      'Fast state save for lead status, qualification, scheduling state, preferred language/channel, service interest, or notes after the lead gives new information. For language switches, speak in the requested language first, then use this tool. Do not save English as a default unless the lead explicitly asks for English.',
       {
         status: literal('string', 'Optional CRM status update.'),
         qualificationStatus: literal('string', 'Optional qualification status update.'),
@@ -830,7 +830,7 @@ async function createOrUpdateAgent(db: any, context: JsonRecord, documents: Json
       lastProvisionedAt: new Date().toISOString(),
       lastProvisionStatus: 'synced',
       name,
-      promptVersion: agent.prompt_version || DEFAULT_PROMPT_VERSION,
+      promptVersion: DEFAULT_PROMPT_VERSION,
       ttsModelId: ELEVENLABS_EXPRESSIVE_TTS_MODEL_ID,
       expressiveMode: true,
       dynamicVariableDefaults: dynamicVariableDefaults(context),
@@ -847,7 +847,7 @@ async function createOrUpdateAgent(db: any, context: JsonRecord, documents: Json
       email_domain: agentEmail.emailDomain,
       email_configured_at: agent.email_configured_at || new Date().toISOString(),
     } : {}),
-    prompt_version: agent.prompt_version || DEFAULT_PROMPT_VERSION,
+    prompt_version: DEFAULT_PROMPT_VERSION,
     metadata,
   });
 }

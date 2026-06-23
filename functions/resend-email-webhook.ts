@@ -53,6 +53,28 @@ function compactText(value: unknown, maxLength = 5000) {
   return String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength);
 }
 
+function freshReplyText(value: unknown) {
+  const text = String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const quoteMarkers = [
+    /\n\s*On\s.+?\swrote:\s*$/im,
+    /\n\s*On\s.+?\s<[^>]+>\s+wrote:\s*$/im,
+    /\n\s*-{2,}\s*Original Message\s*-{2,}/im,
+    /\n\s*From:\s.+/im,
+  ];
+  let cut = text.length;
+  for (const marker of quoteMarkers) {
+    const match = marker.exec(text);
+    if (match?.index !== undefined && match.index >= 0) cut = Math.min(cut, match.index);
+  }
+  return text
+    .slice(0, cut)
+    .split('\n')
+    .filter((line) => !line.trim().startsWith('>'))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function normalizeEmail(value: unknown) {
   const text = typeof value === 'object' && value !== null
     ? String((value as JsonRecord).email || (value as JsonRecord).address || '')
@@ -381,11 +403,13 @@ function leadName(lead: any) {
 async function loadBookingIntegration(db: any, tenantId: string) {
   try {
     const rows = await unwrap(
-      await db.database.from('tenant_booking_integrations').select('provider,status,booking_url,default_meeting_type,metadata')
+      await db.database.from('tenant_booking_integrations').select('provider,status,booking_url,event_type_id,default_meeting_type,metadata')
         .eq('tenant_id', tenantId).order('created_at', { ascending: false }).limit(10),
       'Failed to load booking integration'
     );
-    return (rows || []).find((row: any) => row.status === 'connected' && row.booking_url) || (rows || []).find((row: any) => row.booking_url) || null;
+    return (rows || []).find((row: any) => row.status === 'connected' && (row.booking_url || row.event_type_id || bookingMeetingLink(row)))
+      || (rows || []).find((row: any) => row.booking_url || row.event_type_id || bookingMeetingLink(row))
+      || null;
   } catch {
     return null;
   }
@@ -468,6 +492,148 @@ function localDateYmd(timezone: string) {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
+function ymdToUtcDate(value: string) {
+  const [year, month, day] = String(value).split('-').map(Number);
+  if (![year, month, day].every(Number.isFinite)) return null;
+  return new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+}
+
+function dateToYmd(date: Date) {
+  return [
+    date.getUTCFullYear(),
+    String(date.getUTCMonth() + 1).padStart(2, '0'),
+    String(date.getUTCDate()).padStart(2, '0'),
+  ].join('-');
+}
+
+function addDaysYmd(value: string, days: number) {
+  const date = ymdToUtcDate(value);
+  if (!date) return null;
+  date.setUTCDate(date.getUTCDate() + days);
+  return dateToYmd(date);
+}
+
+function deterministicTimeFromText(text: string) {
+  const normalized = String(text || '').toLowerCase();
+  const meridiem = normalized.match(/\b(?:at|by|around|about|for)?\s*(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*(a\.?m\.?|p\.?m\.?)\b/i);
+  if (meridiem) {
+    let hour = Number(meridiem[1]);
+    const minute = Number(meridiem[2] || 0);
+    const suffix = meridiem[3].toLowerCase();
+    if (suffix.startsWith('p') && hour !== 12) hour += 12;
+    if (suffix.startsWith('a') && hour === 12) hour = 0;
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  }
+  const twentyFourHour = normalized.match(/\b(?:at|by|around|about|for)?\s*([01]?\d|2[0-3]):([0-5]\d)\b/);
+  if (twentyFourHour) {
+    return `${String(Number(twentyFourHour[1])).padStart(2, '0')}:${twentyFourHour[2]}`;
+  }
+  return null;
+}
+
+function deterministicDateFromText(text: string, timezone: string) {
+  const normalized = String(text || '')
+    .toLowerCase()
+    .replace(/\bthurdays\b/g, 'thursday')
+    .replace(/\bthursdays\b/g, 'thursday')
+    .replace(/\bmondays\b/g, 'monday')
+    .replace(/\btuesdays\b/g, 'tuesday')
+    .replace(/\bwednesdays\b/g, 'wednesday')
+    .replace(/\bfridays\b/g, 'friday')
+    .replace(/\bsaturdays\b/g, 'saturday')
+    .replace(/\bsundays\b/g, 'sunday');
+  const today = localDateYmd(timezone);
+  if (/\btoday\b/.test(normalized)) return today;
+  if (/\btomorrow\b/.test(normalized)) return addDaysYmd(today, 1);
+
+  const iso = normalized.match(/\b(20\d{2})[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12]\d|3[01])\b/);
+  if (iso) return `${iso[1]}-${String(Number(iso[2])).padStart(2, '0')}-${String(Number(iso[3])).padStart(2, '0')}`;
+
+  const monthNames: Record<string, number> = {
+    jan: 1, january: 1,
+    feb: 2, february: 2,
+    mar: 3, march: 3,
+    apr: 4, april: 4,
+    may: 5,
+    jun: 6, june: 6,
+    jul: 7, july: 7,
+    aug: 8, august: 8,
+    sep: 9, sept: 9, september: 9,
+    oct: 10, october: 10,
+    nov: 11, november: 11,
+    dec: 12, december: 12,
+  };
+  const monthPattern = normalized.match(/\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\s+([0-3]?\d)(?:st|nd|rd|th)?(?:,\s*(20\d{2}))?\b/);
+  if (monthPattern) {
+    const month = monthNames[monthPattern[1]];
+    const day = Number(monthPattern[2]);
+    const todayDate = ymdToUtcDate(today);
+    let year = Number(monthPattern[3] || todayDate?.getUTCFullYear());
+    let candidate = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    if (!monthPattern[3] && todayDate && candidate.getTime() < todayDate.getTime()) {
+      year += 1;
+      candidate = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    }
+    return dateToYmd(candidate);
+  }
+
+  const weekdayIndex: Record<string, number> = {
+    sunday: 0, sun: 0,
+    monday: 1, mon: 1,
+    tuesday: 2, tue: 2, tues: 2,
+    wednesday: 3, wed: 3,
+    thursday: 4, thu: 4, thurs: 4,
+    friday: 5, fri: 5,
+    saturday: 6, sat: 6,
+  };
+  const weekday = normalized.match(/\b(next\s+)?(sunday|sun|monday|mon|tuesday|tue|tues|wednesday|wed|thursday|thu|thurs|friday|fri|saturday|sat)\b/);
+  if (weekday) {
+    const target = weekdayIndex[weekday[2]];
+    const todayDate = ymdToUtcDate(today);
+    if (!todayDate) return null;
+    const current = todayDate.getUTCDay();
+    let diff = (target - current + 7) % 7;
+    if (diff === 0 || weekday[1]) diff += 7;
+    return addDaysYmd(today, diff);
+  }
+
+  return null;
+}
+
+function deterministicBookingAnalysis(input: {
+  tenant: any;
+  lead: any;
+  inbound: ReturnType<typeof inboundFields>;
+  timezone: string;
+}) {
+  const text = `${input.inbound.subject || ''}\n${freshReplyText(input.inbound.text) || input.inbound.text || ''}`;
+  const dateLocal = deterministicDateFromText(text, input.timezone);
+  const timeLocal = deterministicTimeFromText(text);
+  if (dateLocal && timeLocal) {
+    return {
+      intent: 'confirm_booking',
+      confidence: 0.99,
+      dateLocal,
+      timeLocal,
+      durationMinutes: 30,
+      missing: [],
+      reason: 'Deterministic parser found a date and time in the lead reply',
+    };
+  }
+  if (dateLocal || timeLocal) {
+    return {
+      intent: 'needs_more_info',
+      confidence: 0.9,
+      dateLocal: dateLocal || null,
+      timeLocal: timeLocal || null,
+      durationMinutes: 30,
+      missing: [dateLocal ? null : 'date', timeLocal ? null : 'time'].filter(Boolean),
+      reason: 'Lead reply contains only part of a booking time',
+    };
+  }
+  return null;
+}
+
 function bookingMeetingLink(booking: any) {
   return firstValue(
     booking?.metadata?.meetingLink,
@@ -484,8 +650,11 @@ async function analyzeInboundBookingReply(input: {
   inbound: ReturnType<typeof inboundFields>;
   timezone: string;
 }) {
+  const deterministic = deterministicBookingAnalysis(input);
+  if (deterministic?.intent === 'confirm_booking') return deterministic;
+
   const apiKey = Deno.env.get('OPENAI_API_KEY');
-  if (!apiKey) return { intent: 'other', confidence: 0, missing: ['date_time'], reason: 'OPENAI_API_KEY is not configured' };
+  if (!apiKey) return deterministic || { intent: 'other', confidence: 0, dateLocal: null, timeLocal: null, durationMinutes: null, missing: [], reason: 'OPENAI_API_KEY is not configured' };
   const model = Deno.env.get('OPENAI_EMAIL_MODEL') || 'gpt-5.5';
   const response = await fetch('https://api.openai.com/v1/responses', {
     method: 'POST',
@@ -509,7 +678,7 @@ async function analyzeInboundBookingReply(input: {
           preferredMeetingWindow: input.lead?.preferred_meeting_window || null,
         },
         tenant: { name: input.tenant?.name || null, defaultTimezone: input.tenant?.default_timezone || null },
-        inboundEmail: { subject: input.inbound.subject || null, body: compactText(input.inbound.text, 4000) },
+        inboundEmail: { subject: input.inbound.subject || null, body: compactText(freshReplyText(input.inbound.text) || input.inbound.text, 4000) },
       }),
       text: {
         format: {
@@ -535,11 +704,11 @@ async function analyzeInboundBookingReply(input: {
     }),
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) return { intent: 'other', confidence: 0, missing: ['date_time'], reason: data?.error?.message || `OpenAI analysis failed with ${response.status}` };
+  if (!response.ok) return deterministic || { intent: 'other', confidence: 0, dateLocal: null, timeLocal: null, durationMinutes: null, missing: [], reason: data?.error?.message || `OpenAI analysis failed with ${response.status}` };
   try {
     return JSON.parse(extractOutputText(data) || '{}');
   } catch {
-    return { intent: 'other', confidence: 0, missing: ['date_time'], reason: 'OpenAI returned invalid booking analysis' };
+    return deterministic || { intent: 'other', confidence: 0, dateLocal: null, timeLocal: null, durationMinutes: null, missing: [], reason: 'OpenAI returned invalid booking analysis' };
   }
 }
 

@@ -15,7 +15,17 @@ const HEADER_ALIASES = {
   notes: ['notes', 'note'],
   tags: ['tags'],
   priority: ['priority'],
-  preferredContactChannel: ['preferred_contact_channel', 'preferred contact channel', 'preferred channel'],
+  preferredContactChannel: [
+    'preferred_contact_channel',
+    'preferred contact channel',
+    'preferred channel',
+    'preferred_contact_method',
+    'preferred contact method',
+    'preferred_method',
+    'preferred method',
+    'contact_method',
+    'contact method',
+  ],
   callConsent: ['call_consent', 'call consent', 'voice_consent', 'voice consent', 'can_call', 'can call'],
   smsConsent: ['sms_consent', 'sms consent', 'text_consent', 'text consent', 'can_sms', 'can sms'],
   whatsappConsent: ['whatsapp_consent', 'whatsapp consent', 'can_whatsapp', 'can whatsapp'],
@@ -164,9 +174,12 @@ function normalizePriority(value) {
 }
 
 function normalizePreferredChannel(value) {
-  const channel = String(value || '').trim().toLowerCase();
-  if (channel === 'voice') return 'phone';
-  return ['email', 'sms', 'phone', 'whatsapp'].includes(channel) ? channel : 'email';
+  const channel = String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, '_');
+  if (['email', 'e_mail', 'mail'].includes(channel)) return 'email';
+  if (['phone', 'voice', 'call', 'calls', 'phone_call', 'phonecall', 'telephone'].includes(channel)) return 'call';
+  if (['sms', 'text', 'text_message'].includes(channel)) return 'sms';
+  if (['whatsapp', 'wa'].includes(channel)) return 'whatsapp';
+  return 'email';
 }
 
 function leadName(firstName, lastName, fullName) {
