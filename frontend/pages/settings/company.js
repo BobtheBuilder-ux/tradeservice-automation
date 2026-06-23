@@ -539,6 +539,14 @@ export default function CompanySettingsPage() {
                     <p className="text-xs font-medium text-text-muted">Timezone</p>
                     <p className="mt-1 text-sm text-text-primary">{summary.tenant?.defaultTimezone || 'Not set'}</p>
                   </div>
+                  <div>
+                    <p className="text-xs font-medium text-text-muted">Location</p>
+                    <p className="mt-1 text-sm text-text-primary">{[summary.tenant?.city, summary.tenant?.country].filter(Boolean).join(', ') || 'Not set'}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium text-text-muted">Calling hours</p>
+                    <p className="mt-1 text-sm text-text-primary">10:00 AM - 5:00 PM</p>
+                  </div>
                 </div>
               </Panel>
 

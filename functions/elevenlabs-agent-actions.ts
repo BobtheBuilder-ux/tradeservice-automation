@@ -341,6 +341,8 @@ function buildAgentPrompt(context: JsonRecord) {
   const bookingUrl = context.bookingIntegration?.booking_url || 'not configured';
   const senderEmail = context.agent?.email_address || context.emailIdentity?.from_email || 'not configured';
   const phoneNumber = context.phoneNumber?.phone_number || 'not configured';
+  const tenantTimezone = context.tenant?.default_timezone || 'UTC';
+  const tenantLocation = [context.tenant?.city, context.tenant?.country].filter(Boolean).join(', ') || 'not configured';
   const toolWebhookUrl = elevenLabsToolWebhookUrl();
   const personality = context.agent?.metadata?.personality || {};
   const voiceProfile = context.agent?.metadata?.voiceProfile || {};
@@ -360,6 +362,7 @@ function buildAgentPrompt(context: JsonRecord) {
     'Never end the call because of background noise, cross-talk, multiple interruptions, silence, or a language change. Treat interruptions as normal conversation. If the lead is silent, patiently prompt again instead of ending.',
     'If the lead sounds busy after the introduction, offer a quick SMS follow-up or a better time. Do not pressure them.',
     'Use the runtime lead variables first. Only call get_lead_context when important lead, company, campaign, or setup context is missing or ambiguous. Do not call get_lead_context just because the lead said yes to booking or gave a day/time.',
+    `Business-hours guardrail: outbound voice calls are allowed only from 10:00 AM to 5:00 PM in the tenant timezone (${tenantTimezone}). Never ask the system to place or retry a voice call before 10:00 AM or at/after 5:00 PM local tenant time. If outside that window, wait until the next 10:00 AM local window or use an allowed non-call channel only when the lead consent permits it.`,
     'The core purpose of the call is booking. Treat service_interest, imported coverage_type_needed, imported service/interest, lead_form_summary, qualification notes, and location as enough reason/context to proceed. Do not ask why the lead is interested when those fields exist. Only ask a service-interest clarifier when all lead/form interest fields are missing.',
     'Some leads already filled out a form or import fields before the call. When lead context, custom_fields.importedLeadData, qualification notes, or qualification answers already contain useful answers, do not ask those questions again. Use the booking-first insurance form script, mention service_interest or coverage_type_needed, then ask whether they want to book a consultation with one of our experts.',
     'Adapt to preferred_contact_channel. If the lead prefers call or phone, prioritize booking directly on the call. If the lead prefers email, keep the call brief, acknowledge their preference, offer to send details or a booking link by email when email consent/address exist, and only continue booking by phone if the lead is comfortable doing it now. If the lead changes their preference during the conversation, save it with update_lead_status and follow the new preference immediately.',
@@ -373,11 +376,13 @@ function buildAgentPrompt(context: JsonRecord) {
     'If the lead asks for a text, follow-up, booking link, or recap, use send_sms only when SMS consent is present. If the lead asks for email, use send_email only when email consent and an email address are present. Respect STOP/opt-out immediately.',
     'Stay concise, warm, truthful, and operational. If tenant knowledge is missing, say you will have the team follow up instead of inventing facts.',
     'Respect channel consent, opt-outs, and tenant boundaries. Never contact a lead outside the allowed channels.',
+    `Tenant location: ${tenantLocation}. Tenant timezone: ${tenantTimezone}.`,
+    'Tenant calling hours: 10:00 AM to 5:00 PM local tenant time.',
     `Tenant phone number: ${phoneNumber}.`,
     `Tenant sender email: ${senderEmail}.`,
     `Booking provider: ${bookingProvider}. Booking URL or event reference: ${bookingUrl}.`,
     `Tool webhook URL: ${toolWebhookUrl || 'not configured'}.`,
-    'Runtime dynamic variables may include tenant_id, tenant_name, tenant_agent_id, agent_name, lead_id, lead_name, service_interest, preferred_language, preferred_contact_channel, qualification_mode, lead_form_summary, suggested_booking_date, booking_provider, booking_url, tenant_phone_number, sender_email, tool_webhook_url, current_date, current_time, and current_timezone.',
+    'Runtime dynamic variables may include tenant_id, tenant_name, tenant_agent_id, agent_name, tenant_city, tenant_country, tenant_location, business_hours_start, business_hours_end, lead_id, lead_name, service_interest, preferred_language, preferred_contact_channel, qualification_mode, lead_form_summary, suggested_booking_date, booking_provider, booking_url, tenant_phone_number, sender_email, tool_webhook_url, current_date, current_time, and current_timezone.',
     'Use the configured webhook tools for get_lead_context, update_lead_status, check_availability, create_booking, send_sms, send_whatsapp, send_email, record_call_outcome, escalate_to_human, and mark_opt_out.',
   ].filter(Boolean).join('\n\n');
 }
@@ -419,6 +424,11 @@ function dynamicVariableDefaults(context: JsonRecord) {
     tenant_name: context.tenant?.name || '',
     tenant_agent_id: context.agent?.id || '',
     agent_name: context.agent?.display_name || '',
+    tenant_city: context.tenant?.city || '',
+    tenant_country: context.tenant?.country || '',
+    tenant_location: [context.tenant?.city, context.tenant?.country].filter(Boolean).join(', '),
+    business_hours_start: String(context.tenant?.business_hours_start || '10:00').slice(0, 5),
+    business_hours_end: String(context.tenant?.business_hours_end || '17:00').slice(0, 5),
     lead_id: 'test-lead-id',
     lead_name: 'Test Lead',
     service_interest: 'consultation',

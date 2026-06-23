@@ -400,6 +400,8 @@ function buildCallPrompt(rows: JsonRecord) {
   const booking = rows.bookingIntegration || {};
   const bookingProvider = booking.provider || 'manual';
   const bookingPath = booking.booking_url || booking.event_type_id || 'not configured';
+  const tenantTimezone = rows.tenant?.default_timezone || 'UTC';
+  const tenantLocation = [rows.tenant?.city, rows.tenant?.country].filter(Boolean).join(', ') || 'not configured';
   const formSummary = leadFormSummary(rows.lead);
   const mode = qualificationMode(rows.lead);
   const suggestedDate = dateAfterDays(2);
@@ -419,7 +421,10 @@ function buildCallPrompt(rows: JsonRecord) {
     'After the lead responds, keep the conversation warm, concise, and useful. If they are busy, offer to send an SMS follow-up or schedule a better time.',
     'Use the tenant knowledge base for company-specific services, process, pricing guidance, objections, and policies. If knowledge is missing, do not invent details; offer to have the team follow up.',
     'Use the runtime lead variables first. Only call get_lead_context when important lead, company, campaign, or setup context is missing or ambiguous. Do not call get_lead_context just because the lead said yes to booking or gave a day/time.',
+    `Business-hours guardrail: this tenant allows outbound voice calls only from 10:00 AM to 5:00 PM in tenant local time (${tenantTimezone}). Never request, schedule, or retry a voice call before 10:00 AM or at/after 5:00 PM local tenant time. If outside that window, wait until the next 10:00 AM local tenant window or use an allowed non-call channel only when consent permits it.`,
     `Booking provider: ${bookingProvider}. Booking path: ${bookingPath}.`,
+    `Tenant location: ${tenantLocation}. Tenant timezone: ${tenantTimezone}.`,
+    'Tenant calling hours: 10:00 AM to 5:00 PM local tenant time.',
     formSummary ? `Lead already provided this form/context data. Use it as answered information and do not ask it again: ${formSummary}.` : '',
     mode === 'form_prequalified_ask_only_missing_then_book'
       ? `This lead appears pre-qualified or form-qualified. Do not run the long question-and-answer flow. The required flow is: introduce yourself with the insurance form script, mention the known interest/coverage, then ask whether they want to book a consultation with one of our experts. If the lead says yes, okay, sure, sounds good, or otherwise agrees but does not give a time, do not go silent and do not call a tool yet. Immediately ask one scheduling question only: "Great — what day and time will you be available?" or offer ${suggestedDate} as a suggested date and ask what time works. When the lead gives a date and time, call create_booking immediately. Do not call check_availability first during a live call.`
@@ -481,6 +486,11 @@ function buildCallDynamicVariables(session: JsonRecord, rows: JsonRecord) {
     tenant_agent_id: dynamicString(session.tenant_agent_id),
     agent_name: dynamicString(rows.agent?.display_name || 'the AI assistant'),
     company_name: dynamicString(rows.tenant?.name),
+    tenant_city: dynamicString(rows.tenant?.city),
+    tenant_country: dynamicString(rows.tenant?.country),
+    tenant_location: dynamicString([rows.tenant?.city, rows.tenant?.country].filter(Boolean).join(', ')),
+    business_hours_start: dynamicString(String(rows.tenant?.business_hours_start || '10:00').slice(0, 5)),
+    business_hours_end: dynamicString(String(rows.tenant?.business_hours_end || '17:00').slice(0, 5)),
     lead_name: dynamicString(leadDisplayName(rows.lead)),
     service_interest: dynamicString(service),
     service_interest_status: dynamicString(service ? 'known' : 'missing_or_unclear'),

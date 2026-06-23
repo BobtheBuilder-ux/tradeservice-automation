@@ -54,6 +54,10 @@ const CAMEL_TO_SNAKE = {
   encryptedTokens: 'encrypted_tokens',
   defaultMeetingType: 'default_meeting_type',
   defaultTimezone: 'default_timezone',
+  city: 'city',
+  country: 'country',
+  businessHoursStart: 'business_hours_start',
+  businessHoursEnd: 'business_hours_end',
   businessNiche: 'business_niche',
   assignedAgentId: 'assigned_agent_id',
   assignedTenantAgentId: 'assigned_tenant_agent_id',
@@ -1040,9 +1044,11 @@ function buildOnboardingReadiness({ summary, knowledgeDocuments = [], leads = []
     {
       key: 'company',
       label: 'Company profile',
-      complete: Boolean(tenant.name && tenant.defaultTimezone),
+      complete: Boolean(tenant.name && tenant.defaultTimezone && tenant.city && tenant.country),
       required: true,
-      detail: tenant.name ? tenant.name : 'Company name and timezone are required.',
+      detail: tenant.name
+        ? [tenant.name, [tenant.city, tenant.country].filter(Boolean).join(', ')].filter(Boolean).join(' - ')
+        : 'Company name, city, country, and timezone are required.',
     },
     {
       key: 'agent',
@@ -1228,6 +1234,10 @@ export async function updateTenantCompanyProfile(user, input = {}) {
   const name = input.name?.trim();
   if (!name) throw new Error('Company name is required');
   const defaultTimezone = input.defaultTimezone?.trim() || 'America/Toronto';
+  const city = input.city?.trim() || null;
+  const country = input.country?.trim() || null;
+  if (!city) throw new Error('City is required');
+  if (!country) throw new Error('Country is required');
   const industry = input.industry?.trim() || null;
   const businessNiche = input.businessNiche?.trim() || null;
   const tenantId = tenantIdFromUser(user);
@@ -1240,6 +1250,10 @@ export async function updateTenantCompanyProfile(user, input = {}) {
         industry,
         businessNiche,
         defaultTimezone,
+        city,
+        country,
+        businessHoursStart: '10:00',
+        businessHoursEnd: '17:00',
         status: 'onboarding',
         updatedAt: new Date().toISOString(),
       }))

@@ -116,6 +116,97 @@ async function loadTenant(db: any, tenantId: string) {
   return rows?.[0] || null;
 }
 
+function parseBusinessTime(value: any, fallback: string) {
+  const match = String(value || fallback).match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return parseBusinessTime(fallback, '10:00');
+  const hour = Math.min(Math.max(Number(match[1]), 0), 23);
+  const minute = Math.min(Math.max(Number(match[2]), 0), 59);
+  return { hour, minute, totalMinutes: hour * 60 + minute, label: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
+}
+
+function normalizedTimeZone(value: any) {
+  const timeZone = String(value || 'UTC').trim() || 'UTC';
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone }).format(new Date());
+    return timeZone;
+  } catch {
+    return 'UTC';
+  }
+}
+
+function timeZoneParts(date: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.filter((part) => part.type !== 'literal').map((part) => [part.type, Number(part.value)]));
+  return {
+    year: values.year,
+    month: values.month,
+    day: values.day,
+    hour: values.hour === 24 ? 0 : values.hour,
+    minute: values.minute,
+    second: values.second,
+  };
+}
+
+function timeZoneOffsetMs(date: Date, timeZone: string) {
+  const parts = timeZoneParts(date, timeZone);
+  const localAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  return localAsUtc - date.getTime();
+}
+
+function zonedLocalTimeToUtc(parts: { year: number; month: number; day: number; hour: number; minute: number }, timeZone: string) {
+  const localAsUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, 0);
+  let utc = new Date(localAsUtc - timeZoneOffsetMs(new Date(localAsUtc), timeZone));
+  utc = new Date(localAsUtc - timeZoneOffsetMs(utc, timeZone));
+  return utc;
+}
+
+function formatBusinessTime(time: { hour: number; minute: number }) {
+  const suffix = time.hour >= 12 ? 'PM' : 'AM';
+  const hour12 = time.hour % 12 || 12;
+  return `${hour12}:${String(time.minute).padStart(2, '0')} ${suffix}`;
+}
+
+function businessHoursStatus(tenant: any, now = new Date()) {
+  const timeZone = normalizedTimeZone(tenant?.default_timezone);
+  const start = parseBusinessTime(tenant?.business_hours_start, '10:00');
+  const end = parseBusinessTime(tenant?.business_hours_end, '17:00');
+  const local = timeZoneParts(now, timeZone);
+  const localMinutes = local.hour * 60 + local.minute;
+  const allowed = localMinutes >= start.totalMinutes && localMinutes < end.totalMinutes;
+  const nextLocalDayOffset = localMinutes < start.totalMinutes ? 0 : 1;
+  const nextLocalMidnight = new Date(Date.UTC(local.year, local.month - 1, local.day + nextLocalDayOffset));
+  const nextAllowedAt = zonedLocalTimeToUtc({
+    year: nextLocalMidnight.getUTCFullYear(),
+    month: nextLocalMidnight.getUTCMonth() + 1,
+    day: nextLocalMidnight.getUTCDate(),
+    hour: start.hour,
+    minute: start.minute,
+  }, timeZone);
+
+  return {
+    allowed,
+    timeZone,
+    start,
+    end,
+    nextAllowedAt: nextAllowedAt.toISOString(),
+    localNow: `${String(local.hour).padStart(2, '0')}:${String(local.minute).padStart(2, '0')}`,
+    label: `${formatBusinessTime(start)} - ${formatBusinessTime(end)} ${timeZone}`,
+  };
+}
+
+function businessHoursBlockedMessage(status: ReturnType<typeof businessHoursStatus>) {
+  return `Voice calls are allowed only during tenant business hours (${status.label}). Next calling window starts at ${status.nextAllowedAt}.`;
+}
+
 async function loadLead(db: any, tenantId: string, leadId: string) {
   if (!leadId) return null;
   const rows = await unwrap(
@@ -777,6 +868,12 @@ async function sendTenantSms(db: any, input: { tenantId: string; lead: any; mess
 async function createVoiceCallSession(db: any, input: JsonRecord) {
   const tenantId = requiredTenantId(input);
   const leadId = input.leadId || input.lead_id || null;
+  const tenant = await loadTenant(db, tenantId);
+  if (!tenant?.id) throw new Error('Tenant was not found for voice call');
+  const hours = businessHoursStatus(tenant);
+  if (!hours.allowed && input.enforceBusinessHours !== false && input.enforce_business_hours !== false) {
+    throw new Error(businessHoursBlockedMessage(hours));
+  }
   const lead = await loadLead(db, tenantId, leadId);
 
   if (leadId && !lead) throw new Error('Lead not found for voice call');
@@ -830,6 +927,11 @@ async function createVoiceCallSession(db: any, input: JsonRecord) {
         to,
         from,
         agentDisplayName: tenantAgent.display_name,
+        tenantBusinessHours: {
+          timezone: hours.timeZone,
+          start: hours.start.label,
+          end: hours.end.label,
+        },
         ...(input.reboundCall || input.rebound_call
           ? {
           reboundCall: true,
@@ -1290,6 +1392,39 @@ async function startQueuedCalls(db: any, body: JsonRecord) {
           },
         }).eq('id', action.id).eq('tenant_id', action.tenant_id);
         results.push({ actionId: action.id, success: true, convertedTo: 'send_email' });
+        continue;
+      }
+      const tenant = await loadTenant(db, action.tenant_id);
+      if (!tenant?.id) throw new Error('Tenant was not found for queued call');
+      const hours = businessHoursStatus(tenant);
+      if (!hours.allowed) {
+        const reason = businessHoursBlockedMessage(hours);
+        await db.database.from('bob_actions').update({
+          status: 'awaiting_call',
+          scheduled_for: hours.nextAllowedAt,
+          reason,
+          updated_at: nowIso(),
+          result: {
+            ...(action.result || {}),
+            deferredReason: 'outside_business_hours',
+            tenantTimezone: hours.timeZone,
+            nextAllowedAt: hours.nextAllowedAt,
+            businessHours: {
+              start: hours.start.label,
+              end: hours.end.label,
+            },
+          },
+        }).eq('id', action.id).eq('tenant_id', action.tenant_id);
+        if (action.campaign_lead_id) {
+          await db.database.from('campaign_leads').update({
+            status: 'queued',
+            current_step: 'call_deferred_until_business_hours',
+            next_action_at: hours.nextAllowedAt,
+            stop_reason: null,
+            updated_at: nowIso(),
+          }).eq('tenant_id', action.tenant_id).eq('id', action.campaign_lead_id);
+        }
+        results.push({ actionId: action.id, success: true, deferred: true, nextAllowedAt: hours.nextAllowedAt, reason });
         continue;
       }
       const call = await launchVoiceCall(db, {

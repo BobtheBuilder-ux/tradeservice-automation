@@ -51,6 +51,8 @@ const STEP_META = {
 
 const defaultCompanyForm = {
   name: '',
+  city: '',
+  country: '',
   industry: '',
   businessNiche: '',
   defaultTimezone: 'America/Toronto',
@@ -332,6 +334,8 @@ export default function OnboardingPage() {
 
     setCompanyForm({
       name: tenant.name || '',
+      city: tenant.city || '',
+      country: tenant.country || '',
       industry: tenant.industry || '',
       businessNiche: tenant.businessNiche || '',
       defaultTimezone: tenant.defaultTimezone || 'America/Toronto',
@@ -675,11 +679,17 @@ export default function OnboardingPage() {
                     <Field label="Company name">
                       <input className="ops-input" value={companyForm.name} onChange={(event) => setCompanyForm({ ...companyForm, name: event.target.value })} />
                     </Field>
-                    <Field label="Timezone">
-                      <input className="ops-input" value={companyForm.defaultTimezone} onChange={(event) => setCompanyForm({ ...companyForm, defaultTimezone: event.target.value })} />
+                    <Field label="City">
+                      <input className="ops-input" value={companyForm.city} onChange={(event) => setCompanyForm({ ...companyForm, city: event.target.value })} />
+                    </Field>
+                    <Field label="Country">
+                      <input className="ops-input" value={companyForm.country} onChange={(event) => setCompanyForm({ ...companyForm, country: event.target.value })} />
                     </Field>
                     <Field label="Industry" optional>
                       <input className="ops-input" value={companyForm.industry} onChange={(event) => setCompanyForm({ ...companyForm, industry: event.target.value })} />
+                    </Field>
+                    <Field label="Timezone">
+                      <input className="ops-input" value={companyForm.defaultTimezone} onChange={(event) => setCompanyForm({ ...companyForm, defaultTimezone: event.target.value })} />
                     </Field>
                     <Field label="Business niche" optional>
                       <select className="ops-select" value={companyForm.businessNiche} onChange={(event) => setCompanyForm({ ...companyForm, businessNiche: event.target.value })}>
