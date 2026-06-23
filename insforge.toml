@@ -3,6 +3,8 @@ allowed_redirect_urls = [
   "http://localhost:3000",
   "http://localhost:3000/login",
   "http://localhost:3000/admin-dashboard",
+  "https://setmymeet.ca/login",
+  "https://setmymeet.ca",
 ]
 require_email_verification = true
 verify_email_method = "code"
