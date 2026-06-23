@@ -158,6 +158,33 @@ async function loadTenantAgent(db: any, tenantId: string, agentId?: string | nul
   return rows?.[0] || null;
 }
 
+function isEmailCapableTenantAgent(agent: any) {
+  return Boolean(agent?.id && ['live', 'testing', 'active'].includes(String(agent.status || '').toLowerCase()));
+}
+
+async function resolveEmailTenantAgent(db: any, tenantId: string, lead?: any, requestedAgentId?: string | null) {
+  const requested = requestedAgentId ? await loadTenantAgent(db, tenantId, requestedAgentId) : null;
+  if (isEmailCapableTenantAgent(requested)) return requested;
+
+  const assigned = lead?.assigned_tenant_agent_id && lead.assigned_tenant_agent_id !== requestedAgentId
+    ? await loadTenantAgent(db, tenantId, lead.assigned_tenant_agent_id)
+    : null;
+  if (isEmailCapableTenantAgent(assigned)) return assigned;
+
+  const active = await unwrap(
+    await db.database
+      .from('tenant_agents')
+      .select('*')
+      .eq('tenant_id', tenantId)
+      .in('status', ['live', 'testing', 'active'])
+      .order('status', { ascending: true })
+      .order('created_at', { ascending: true })
+      .limit(25),
+    'Failed to load active tenant email agent'
+  );
+  return (active || []).find(isEmailCapableTenantAgent) || null;
+}
+
 function isCallableTenantAgent(agent: any) {
   return Boolean(agent?.id && ['live', 'testing'].includes(agent.status) && agent.elevenlabs_agent_id);
 }
@@ -210,6 +237,19 @@ function leadAllowsChannel(lead: any, channel: string) {
   }
   if (!lead?.[consentColumn]) return { allowed: false, reason: 'Missing channel consent' };
   return { allowed: true, reason: 'Consent is present' };
+}
+
+function normalizePreferredContactChannel(value: any) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, '_');
+  if (['phone', 'voice', 'call', 'calls', 'phone_call'].includes(normalized)) return 'call';
+  if (['email', 'e_mail'].includes(normalized)) return 'email';
+  if (['sms', 'text', 'text_message'].includes(normalized)) return 'sms';
+  if (['whatsapp', 'wa'].includes(normalized)) return 'whatsapp';
+  return normalized || '';
+}
+
+function leadPrefersEmail(lead: any) {
+  return normalizePreferredContactChannel(lead?.preferred_contact_channel) === 'email';
 }
 
 function getTwilioClient() {
@@ -375,6 +415,278 @@ function defaultCampaignSmsBody(input: { tenant?: any; agent?: any; lead: any })
   return `Hi ${leadName(input.lead)}, this is ${agentName} from ${tenantName}. We’re following up${service}. Reply here and we can help book the best time. Reply STOP to opt out.`;
 }
 
+function defaultCampaignEmailMessage(input: { tenant?: any; agent?: any; lead: any }) {
+  const tenantName = input.tenant?.name || 'our team';
+  const agentName = input.agent?.display_name || 'the AI assistant';
+  const service = input.lead?.service_interest ? ` about ${input.lead.service_interest}` : '';
+  return [
+    `Write a concise follow-up email from ${agentName} at ${tenantName}.`,
+    `The lead preferred email, so do not mention that we tried to call first.`,
+    `Purpose: follow up${service} and help them book the next best appointment time.`,
+    input.lead?.qualification_notes ? `Lead notes: ${input.lead.qualification_notes}.` : '',
+    input.lead?.preferred_meeting_window ? `Preferred meeting window: ${input.lead.preferred_meeting_window}.` : '',
+    'Use available tenant/agent/lead context. Keep it warm, specific, and action-oriented.',
+  ].filter(Boolean).join(' ');
+}
+
+function escapeHtml(value: unknown) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function safeSenderName(value: unknown) {
+  return String(value || '').trim().replace(/[<>]/g, '').slice(0, 80);
+}
+
+function normalizeEmail(value: unknown) {
+  const text = typeof value === 'object' && value !== null
+    ? String((value as JsonRecord).email || (value as JsonRecord).address || '')
+    : String(value || '');
+  const match = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  return (match?.[0] || '').trim().toLowerCase();
+}
+
+function emailDomain(value: unknown) {
+  const email = normalizeEmail(value);
+  return email.includes('@') ? email.split('@').pop() || '' : '';
+}
+
+function agentEmailLocalPart(agent?: any) {
+  const local = String(agent?.display_name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '.')
+    .replace(/^\.+|\.+$/g, '')
+    .slice(0, 48);
+  return local || 'bob';
+}
+
+function savedAgentEmail(agent?: any) {
+  const email = String(agent?.email_address || '').trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : '';
+}
+
+function platformEmailSender(agent?: any) {
+  const fallbackEmail = Deno.env.get('EMAIL_FROM');
+  if (!fallbackEmail) throw new Error('EMAIL_FROM is not configured');
+  const domain = emailDomain(fallbackEmail);
+  if (!domain) throw new Error('EMAIL_FROM must include a valid domain');
+  const fromName = safeSenderName(agent?.display_name) || Deno.env.get('EMAIL_FROM_NAME') || 'Bob Automation';
+  const fromEmail = savedAgentEmail(agent) || `${agentEmailLocalPart(agent)}@${domain}`;
+  return {
+    from: `${fromName} <${fromEmail}>`,
+    fromName,
+    fromEmail,
+    replyTo: fromEmail,
+    resolution: 'platform_fallback',
+  };
+}
+
+function extractOutputText(response: any) {
+  if (response?.output_text) return response.output_text;
+  return (response?.output || []).flatMap((item: any) => item?.content || [])
+    .filter((content: any) => content?.type === 'output_text')
+    .map((content: any) => content.text)
+    .join('');
+}
+
+async function draftQueuedEmail(input: { tenant?: any; agent?: any; lead: any; message: string }) {
+  const apiKey = Deno.env.get('OPENAI_API_KEY');
+  const fallbackSubject = input.lead?.service_interest ? `Following up about ${input.lead.service_interest}` : 'Following up';
+  const fallbackText = [
+    `Hi ${leadName(input.lead)},`,
+    `${input.agent?.display_name || 'I'} from ${input.tenant?.name || 'our team'} here. I’m following up to help you book the best time for a quick call${input.lead?.service_interest ? ` about ${input.lead.service_interest}` : ''}.`,
+    input.lead?.preferred_meeting_window
+      ? `I saw your preferred time is ${input.lead.preferred_meeting_window}. Does that still work for you?`
+      : 'What day and time works best for you?',
+    'Thank you.',
+  ].join('\n\n');
+  const fallback = {
+    subject: fallbackSubject,
+    text: fallbackText,
+    html: fallbackText.split('\n\n').map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join(''),
+    model: 'deterministic-queued-email-fallback',
+    responseId: null,
+    generatedBy: 'template',
+    generationError: apiKey ? null : 'OPENAI_API_KEY is not configured',
+  };
+  if (!apiKey) return fallback;
+
+  const model = Deno.env.get('OPENAI_EMAIL_MODEL') || 'gpt-5.5';
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      instructions: [
+        'You write concise, accurate automated business emails.',
+        'Return only valid JSON with keys subject, text, and html.',
+        'This is the AI agent starting the conversation by email first, so do not imply the lead emailed first.',
+        'Primary goal: help the lead book a quick call as soon as possible.',
+        'Do not ask long qualification questions when the lead already provided context.',
+        'Never invent prices, promises, availability, policies, discounts, or booking links.',
+        'Use only simple safe HTML tags: p, strong, em, ul, li, a, br.',
+      ].join(' '),
+      input: JSON.stringify({
+        tenant: { name: input.tenant?.name || null, industry: input.tenant?.industry || null },
+        agent: { name: input.agent?.display_name || 'the AI assistant', email: savedAgentEmail(input.agent) || null },
+        lead: {
+          name: leadName(input.lead),
+          email: input.lead?.email || null,
+          serviceInterest: input.lead?.service_interest || null,
+          preferredMeetingWindow: input.lead?.preferred_meeting_window || null,
+          qualificationNotes: input.lead?.qualification_notes || null,
+          preferredContactChannel: input.lead?.preferred_contact_channel || null,
+        },
+        requestedMessage: input.message,
+      }),
+      text: {
+        format: {
+          type: 'json_schema',
+          name: 'queued_first_email',
+          strict: true,
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['subject', 'text', 'html'],
+            properties: {
+              subject: { type: 'string' },
+              text: { type: 'string' },
+              html: { type: 'string' },
+            },
+          },
+        },
+      },
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) return { ...fallback, generationError: data?.error?.message || `OpenAI email draft failed with ${response.status}` };
+  try {
+    const draft = JSON.parse(extractOutputText(data));
+    if (draft?.subject && draft?.text && draft?.html) {
+      return { ...draft, model, responseId: data.id || null, generatedBy: 'openai', generationError: null };
+    }
+  } catch {
+    // Fall through to deterministic copy if OpenAI returns malformed JSON.
+  }
+  return { ...fallback, generationError: 'OpenAI returned an invalid queued email draft' };
+}
+
+async function sendResendEmail(input: { sender: ReturnType<typeof platformEmailSender>; to: string; draft: any }) {
+  const apiKey = Deno.env.get('RESEND_API_KEY');
+  if (!apiKey) throw new Error('RESEND_API_KEY is not configured');
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from: input.sender.from,
+      to: [input.to],
+      subject: input.draft.subject,
+      html: input.draft.html,
+      text: input.draft.text,
+      reply_to: input.sender.replyTo,
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data?.message || data?.error || `Resend send failed with ${response.status}`);
+  return data;
+}
+
+async function sendTenantEmailDirect(db: any, input: {
+  tenantId: string;
+  lead: any;
+  agent?: any;
+  tenant?: any;
+  message: string;
+  source: string;
+  conversationId?: string | null;
+  metadata?: JsonRecord;
+}) {
+  const policy = leadAllowsChannel(input.lead, 'email');
+  if (!policy.allowed) throw new Error(policy.reason);
+  if (!input.lead?.email) throw new Error('Lead email address is required');
+  const conversation = input.conversationId
+    ? null
+    : await ensureLeadConversation(db, input.tenantId, input.lead, 'email');
+  const conversationId = input.conversationId || conversation?.id || null;
+  const sender = platformEmailSender(input.agent);
+  const draft = await draftQueuedEmail({ tenant: input.tenant, agent: input.agent, lead: input.lead, message: input.message });
+  const resend = await sendResendEmail({ sender, to: input.lead.email, draft });
+  const now = nowIso();
+
+  const emailRows = await unwrap(
+    await db.database.from('email_queue').insert([{
+      tenant_id: input.tenantId,
+      lead_id: input.lead.id,
+      to_email: input.lead.email,
+      from_email: sender.fromEmail,
+      sender_display_name: sender.fromName,
+      reply_to_email: sender.replyTo,
+      sender_resolution: sender.resolution,
+      delivery_provider: 'resend',
+      provider_message_id: resend?.id || null,
+      message_id: resend?.id || null,
+      subject: draft.subject,
+      html_content: draft.html,
+      text_content: draft.text,
+      email_type: 'follow_up',
+      status: 'sent',
+      sent_at: now,
+      generated_by: draft.generatedBy || 'openai',
+      generation_model: draft.model || null,
+      generation_status: draft.generationError ? 'failed' : 'generated',
+      generation_error: draft.generationError || null,
+      generated_at: now,
+      metadata: {
+        source: input.source,
+        conversationId,
+        openaiResponseId: draft.responseId || null,
+        resend,
+        ...(input.metadata || {}),
+      },
+    }]).select(),
+    'Failed to record queued email delivery'
+  );
+  const messageRows = await unwrap(
+    await db.database.from('lead_conversation_messages').insert([{
+      tenant_id: input.tenantId,
+      conversation_id: conversationId,
+      lead_id: input.lead.id,
+      direction: 'outbound',
+      channel: 'email',
+      message_type: 'email_first_touch',
+      subject: draft.subject,
+      body_text: draft.text,
+      body_html: draft.html,
+      provider_message_id: resend?.id || null,
+      provider_status: 'sent',
+      status: 'sent',
+      sent_at: now,
+      ai_model: draft.model || null,
+      ai_response_id: draft.responseId || null,
+      metadata: {
+        source: input.source,
+        from: sender.fromEmail,
+        emailQueueId: emailRows?.[0]?.id || null,
+        ...(input.metadata || {}),
+      },
+    }]).select(),
+    'Failed to record queued email timeline row'
+  );
+  await db.database.from('leads').update({ last_contacted_at: now, updated_at: now }).eq('tenant_id', input.tenantId).eq('id', input.lead.id);
+  return {
+    queued: emailRows?.[0] || null,
+    message: messageRows?.[0] || null,
+    resend,
+    sender: { fromEmail: sender.fromEmail, resolution: sender.resolution },
+    draft: { model: draft.model, subject: draft.subject, generatedBy: draft.generatedBy },
+  };
+}
+
 async function sendTenantSms(db: any, input: { tenantId: string; lead: any; message: string; source: string; conversationId?: string | null; metadata?: JsonRecord }) {
   const policy = leadAllowsChannel(input.lead, 'sms');
   if (!policy.allowed) throw new Error(policy.reason);
@@ -431,6 +743,9 @@ async function createVoiceCallSession(db: any, input: JsonRecord) {
 
   if (leadId && !lead) throw new Error('Lead not found for voice call');
   if (lead) {
+    if (leadPrefersEmail(lead)) {
+      throw new Error('Lead prefers email; voice call is blocked and email follow-up should be sent instead');
+    }
     const policy = leadAllowsChannel(lead, 'call');
     if (!policy.allowed) throw new Error(policy.reason);
   } else if (!input.callConsent) {
@@ -592,6 +907,7 @@ async function getBobRunStatus(db: any, tenantId: string, leadId: string, conver
 
 async function createLiveLeadRun(db: any, body: any) {
   const tenantId = requiredTenantId(body);
+  const tenantAgent = await resolveEmailTenantAgent(db, tenantId, null, body.tenantAgentId || body.tenant_agent_id || body.agentId || body.agent_id);
   const email = body.email || `live-test-${Date.now()}@example.com`;
   const fullName = [body.firstName || 'Live', body.lastName || 'Test'].filter(Boolean).join(' ');
   const { data: leads } = await db.database.from('leads').insert([{
@@ -620,7 +936,7 @@ async function createLiveLeadRun(db: any, body: any) {
     whatsapp_consent: Boolean(body.whatsappConsent),
     email_consent: Boolean(body.emailConsent || body.includeEmail !== false),
     do_not_contact: Boolean(body.doNotContact),
-    assigned_tenant_agent_id: body.tenantAgentId || body.tenant_agent_id || null,
+    assigned_tenant_agent_id: tenantAgent?.id || body.tenantAgentId || body.tenant_agent_id || null,
     status: 'new',
   }]).select();
   const lead = leads?.[0];
@@ -638,9 +954,9 @@ async function createLiveLeadRun(db: any, body: any) {
   const emailPolicy = leadAllowsChannel(lead, 'email');
   const smsPolicy = leadAllowsChannel(lead, 'sms');
   const callPolicy = leadAllowsChannel(lead, 'call');
-  if (body.includeEmail !== false) actionRows.push({ tenant_id: tenantId, lead_id: lead.id, conversation_id: conversation.id, action_type: 'send_email', channel: 'email', status: emailPolicy.allowed ? 'pending' : 'awaiting_human', reason: emailPolicy.allowed ? 'Live test email action' : emailPolicy.reason, scheduled_for: nowIso(), payload: { source: 'function_live_test', contactPolicy: emailPolicy } });
+  if (body.includeEmail !== false) actionRows.push({ tenant_id: tenantId, lead_id: lead.id, conversation_id: conversation.id, action_type: 'send_email', channel: 'email', status: emailPolicy.allowed ? 'pending' : 'awaiting_human', reason: emailPolicy.allowed ? 'Live test email action' : emailPolicy.reason, scheduled_for: nowIso(), payload: { source: 'function_live_test', contactPolicy: emailPolicy, tenantAgentId: tenantAgent?.id || null, firstTouch: true } });
   if (body.includeSms) actionRows.push({ tenant_id: tenantId, lead_id: lead.id, conversation_id: conversation.id, action_type: 'send_sms', channel: 'sms', status: smsPolicy.allowed ? 'pending' : 'awaiting_human', reason: smsPolicy.allowed ? 'Live test SMS action' : smsPolicy.reason, scheduled_for: nowIso(), payload: { source: 'function_live_test', contactPolicy: smsPolicy } });
-  if (body.includeCall) actionRows.push({ tenant_id: tenantId, lead_id: lead.id, conversation_id: conversation.id, action_type: 'queue_call_attempt', channel: 'phone', status: callPolicy.allowed ? 'awaiting_call' : 'awaiting_human', reason: callPolicy.allowed ? 'Live test call action' : callPolicy.reason, scheduled_for: nowIso(), payload: { source: 'function_live_test', contactPolicy: callPolicy, tenantAgentId: body.tenantAgentId || body.tenant_agent_id || null } });
+  if (body.includeCall && !leadPrefersEmail(lead)) actionRows.push({ tenant_id: tenantId, lead_id: lead.id, conversation_id: conversation.id, action_type: 'queue_call_attempt', channel: 'phone', status: callPolicy.allowed ? 'awaiting_call' : 'awaiting_human', reason: callPolicy.allowed ? 'Live test call action' : callPolicy.reason, scheduled_for: nowIso(), payload: { source: 'function_live_test', contactPolicy: callPolicy, tenantAgentId: body.tenantAgentId || body.tenant_agent_id || null } });
   if (actionRows.length) await db.database.from('bob_actions').insert(actionRows);
   return { lead, conversation, status: await getBobRunStatus(db, tenantId, lead.id, conversation.id) };
 }
@@ -710,28 +1026,32 @@ async function ensureCampaignCallActions(db: any, body: JsonRecord) {
     const rowTenantId = campaignLead.tenant_id;
     const lead = await loadLead(db, rowTenantId, campaignLead.lead_id);
     if (!lead) continue;
-    const policy = leadAllowsChannel(lead, 'call');
+    const callPolicy = leadAllowsChannel(lead, 'call');
+    const emailPolicy = leadAllowsChannel(lead, 'email');
     if (!lead.assigned_tenant_agent_id && campaignLead.agent_id) {
       await db.database.from('leads').update({ assigned_tenant_agent_id: campaignLead.agent_id, updated_at: nowIso() }).eq('tenant_id', rowTenantId).eq('id', lead.id);
     }
     const smsPolicy = leadAllowsChannel(lead, 'sms');
-    const useCall = policy.allowed;
-    const useSms = !useCall && smsPolicy.allowed;
+    const useEmail = leadPrefersEmail(lead) && emailPolicy.allowed;
+    const useCall = !useEmail && callPolicy.allowed;
+    const useSms = !useEmail && !useCall && smsPolicy.allowed;
+    const selectedPolicy = useEmail ? emailPolicy : useCall ? callPolicy : smsPolicy;
     rows.push({
       tenant_id: rowTenantId,
       campaign_id: campaignLead.campaign_id,
       campaign_lead_id: campaignLead.id,
       lead_id: lead.id,
-      action_type: useCall ? 'queue_call_attempt' : 'send_sms',
-      channel: useCall ? 'phone' : 'sms',
-      status: useCall ? 'awaiting_call' : (useSms ? 'pending' : 'awaiting_human'),
-      reason: useCall ? 'Campaign first step: call' : (useSms ? 'Campaign fallback: SMS' : policy.reason),
+      action_type: useEmail ? 'send_email' : useCall ? 'queue_call_attempt' : 'send_sms',
+      channel: useEmail ? 'email' : useCall ? 'phone' : 'sms',
+      status: useCall ? 'awaiting_call' : ((useEmail || useSms) ? 'pending' : 'awaiting_human'),
+      reason: useEmail ? 'Campaign first step: email preference' : useCall ? 'Campaign first step: call' : (useSms ? 'Campaign fallback: SMS' : callPolicy.reason),
       scheduled_for: nowIso(),
       payload: {
         source: 'campaign_tick',
         campaignLeadId: campaignLead.id,
         tenantAgentId: campaignLead.agent_id || lead.assigned_tenant_agent_id || null,
-        contactPolicy: useCall ? policy : smsPolicy,
+        contactPolicy: selectedPolicy,
+        preferredContactChannel: normalizePreferredContactChannel(lead.preferred_contact_channel),
       },
     });
   }
@@ -761,7 +1081,7 @@ async function sendQueuedSmsActions(db: any, body: JsonRecord) {
       const lead = await loadLead(db, tenantId, action.lead_id);
       if (!lead) throw new Error('Lead not found for queued SMS');
       const tenant = await loadTenant(db, tenantId);
-      const agent = await loadTenantAgent(db, tenantId, action.payload?.tenantAgentId || action.payload?.tenant_agent_id || lead.assigned_tenant_agent_id);
+      const agent = await resolveEmailTenantAgent(db, tenantId, lead, action.payload?.tenantAgentId || action.payload?.tenant_agent_id || lead.assigned_tenant_agent_id);
       const message = String(action.payload?.message || action.payload?.body || '').trim() || defaultCampaignSmsBody({ tenant, agent, lead });
       const sms = await sendTenantSms(db, {
         tenantId,
@@ -815,8 +1135,89 @@ async function sendQueuedSmsActions(db: any, body: JsonRecord) {
   return results;
 }
 
+async function sendQueuedEmailActions(db: any, body: JsonRecord) {
+  let query = db.database
+    .from('bob_actions')
+    .select('*')
+    .eq('action_type', 'send_email')
+    .eq('status', 'pending')
+    .lte('scheduled_for', nowIso())
+    .order('scheduled_for', { ascending: true })
+    .limit(Number(body.emailLimit || body.limit || 3));
+  if (body.tenantId || body.tenant_id) query = query.eq('tenant_id', body.tenantId || body.tenant_id);
+  if (body.leadId || body.lead_id) query = query.eq('lead_id', body.leadId || body.lead_id);
+  if (body.conversationId || body.conversation_id) query = query.eq('conversation_id', body.conversationId || body.conversation_id);
+  if (body.campaignId || body.campaign_id) query = query.eq('campaign_id', body.campaignId || body.campaign_id);
+
+  const actions = await unwrap(await query, 'Failed to load queued email actions');
+  const results = [];
+  for (const action of actions || []) {
+    try {
+      const tenantId = action.tenant_id;
+      const lead = await loadLead(db, tenantId, action.lead_id);
+      if (!lead) throw new Error('Lead not found for queued email');
+      const tenant = await loadTenant(db, tenantId);
+      const agent = await loadTenantAgent(db, tenantId, action.payload?.tenantAgentId || action.payload?.tenant_agent_id || lead.assigned_tenant_agent_id);
+      const message = String(action.payload?.message || action.payload?.body || '').trim() || defaultCampaignEmailMessage({ tenant, agent, lead });
+      const email = await sendTenantEmailDirect(db, {
+        tenantId,
+        lead,
+        agent,
+        tenant,
+        conversationId: action.conversation_id || null,
+        message,
+        source: action.payload?.source || 'queued_bob_action',
+        metadata: {
+          bobActionId: action.id,
+          campaignId: action.campaign_id || null,
+          campaignLeadId: action.campaign_lead_id || null,
+          preferredContactChannel: normalizePreferredContactChannel(lead.preferred_contact_channel),
+        },
+      });
+
+      await db.database.from('bob_actions').update({
+        status: 'completed',
+        executed_at: nowIso(),
+        updated_at: nowIso(),
+        result: {
+          emailQueueId: email.queued?.id || null,
+          providerMessageId: email.resend?.id || null,
+          fromEmail: email.sender?.fromEmail || null,
+          subject: email.draft?.subject || null,
+        },
+      }).eq('id', action.id).eq('tenant_id', tenantId);
+      if (action.campaign_lead_id) {
+        await db.database.from('campaign_leads').update({
+          status: 'running',
+          current_step: 'email_sent',
+          updated_at: nowIso(),
+        }).eq('tenant_id', tenantId).eq('id', action.campaign_lead_id);
+      }
+      results.push({ actionId: action.id, success: true, email });
+    } catch (error) {
+      await db.database.from('bob_actions').update({
+        status: 'failed',
+        executed_at: nowIso(),
+        updated_at: nowIso(),
+        result: { error: String(error?.message || 'Queued email failed') },
+      }).eq('id', action.id).eq('tenant_id', action.tenant_id);
+      if (action.campaign_lead_id) {
+        await db.database.from('campaign_leads').update({
+          status: 'failed',
+          current_step: 'email_failed',
+          stop_reason: String(error?.message || 'Queued email failed'),
+          updated_at: nowIso(),
+        }).eq('tenant_id', action.tenant_id).eq('id', action.campaign_lead_id);
+      }
+      results.push({ actionId: action.id, success: false, error: String(error?.message || 'Queued email failed') });
+    }
+  }
+  return results;
+}
+
 async function startQueuedCalls(db: any, body: JsonRecord) {
   await ensureCampaignCallActions(db, body);
+  const emailResults = await sendQueuedEmailActions(db, body);
   const smsResults = await sendQueuedSmsActions(db, body);
   let query = db.database
     .from('bob_actions')
@@ -834,6 +1235,25 @@ async function startQueuedCalls(db: any, body: JsonRecord) {
   const results = [];
   for (const action of actions || []) {
     try {
+      const lead = await loadLead(db, action.tenant_id, action.lead_id);
+      if (leadPrefersEmail(lead)) {
+        const emailPolicy = leadAllowsChannel(lead, 'email');
+        await db.database.from('bob_actions').update({
+          action_type: 'send_email',
+          channel: 'email',
+          status: emailPolicy.allowed ? 'pending' : 'awaiting_human',
+          reason: emailPolicy.allowed ? 'Lead prefers email; call converted to email' : emailPolicy.reason,
+          updated_at: nowIso(),
+          payload: {
+            ...(action.payload || {}),
+            convertedFrom: 'queue_call_attempt',
+            preferredContactChannel: 'email',
+            contactPolicy: emailPolicy,
+          },
+        }).eq('id', action.id).eq('tenant_id', action.tenant_id);
+        results.push({ actionId: action.id, success: true, convertedTo: 'send_email' });
+        continue;
+      }
       const call = await launchVoiceCall(db, {
         tenantId: action.tenant_id,
         leadId: action.lead_id,
@@ -859,11 +1279,13 @@ async function startQueuedCalls(db: any, body: JsonRecord) {
       results.push({ actionId: action.id, success: false, error: String(error?.message || 'Queued call failed') });
     }
   }
-  return { voiceResults: results, smsResults };
+  const convertedEmailResults = await sendQueuedEmailActions(db, body);
+  return { voiceResults: results, smsResults, emailResults: [...emailResults, ...convertedEmailResults] };
 }
 
 async function createFunctionTestLead(db: any, body: any) {
   const tenantId = requiredTenantId(body);
+  const tenantAgent = await resolveEmailTenantAgent(db, tenantId, null, body.tenantAgentId || body.tenant_agent_id || body.agentId || body.agent_id);
   const { data } = await db.database.from('leads').insert([{
     tenant_id: tenantId,
     email: body.email || `test-${Date.now()}@example.com`,
@@ -871,6 +1293,7 @@ async function createFunctionTestLead(db: any, body: any) {
     phone: body.phone || null,
     source: 'function_test',
     service_interest: body.serviceInterest || body.service_interest || null,
+    preferred_contact_channel: body.preferredContactChannel || body.preferred_contact_channel || 'email',
     location_summary: body.locationSummary || body.location_summary || null,
     preferred_meeting_window: body.preferredMeetingWindow || body.preferred_meeting_window || null,
     call_consent: Boolean(body.callConsent),
@@ -878,7 +1301,7 @@ async function createFunctionTestLead(db: any, body: any) {
     whatsapp_consent: Boolean(body.whatsappConsent),
     email_consent: Boolean(body.emailConsent),
     do_not_contact: Boolean(body.doNotContact),
-    assigned_tenant_agent_id: body.tenantAgentId || body.tenant_agent_id || null,
+    assigned_tenant_agent_id: tenantAgent?.id || body.tenantAgentId || body.tenant_agent_id || null,
     status: 'new',
   }]).select();
   return data?.[0] || null;
@@ -919,7 +1342,7 @@ export default async function(req: Request): Promise<Response> {
     }
 
     if (action === 'tick' || action === 'start-calls') {
-      const { voiceResults, smsResults } = await startQueuedCalls(db, body);
+      const { voiceResults, smsResults, emailResults } = await startQueuedCalls(db, body);
       if (body.leadId || body.lead_id) {
         const tenantId = requiredTenantId(body);
         const leadId = body.leadId || body.lead_id;
@@ -930,11 +1353,12 @@ export default async function(req: Request): Promise<Response> {
             mode: 'function_tick',
             voice: { started: voiceResults.filter((row) => row.success).length, results: voiceResults },
             sms: { sent: smsResults.filter((row) => row.success).length, results: smsResults },
+            email: { sent: emailResults.filter((row) => row.success && row.email).length, results: emailResults },
           },
           status: await getBobRunStatus(db, tenantId, leadId, body.conversationId || body.conversation_id),
         });
       }
-      return jsonResponse({ success: true, queued: await inspectQueuedBobActions(db), voice: { results: voiceResults }, sms: { results: smsResults }, mode: 'function_tick' });
+      return jsonResponse({ success: true, queued: await inspectQueuedBobActions(db), voice: { results: voiceResults }, sms: { results: smsResults }, email: { results: emailResults }, mode: 'function_tick' });
     }
 
     if (action === 'test-lead') {

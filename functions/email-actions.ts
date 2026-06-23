@@ -73,13 +73,35 @@ async function loadSingle(client: any, table: string, tenantId: string, id?: str
   return data?.[0] || null;
 }
 
+function isRunnableEmailAgent(agent: any) {
+  return Boolean(agent?.id && ['live', 'testing', 'active'].includes(String(agent.status || '').toLowerCase()));
+}
+
+async function loadDefaultEmailAgent(client: any, tenantId: string) {
+  const { data, error } = await client.database
+    .from('tenant_agents')
+    .select('*')
+    .eq('tenant_id', tenantId)
+    .in('status', ['live', 'testing', 'active'])
+    .order('status', { ascending: true })
+    .order('created_at', { ascending: true })
+    .limit(10);
+  if (error) throw new Error(error.message || 'Failed to load default tenant email agent');
+  return (data || []).find(isRunnableEmailAgent) || data?.[0] || null;
+}
+
 async function loadEmailContext(client: any, tenantId: string, input: any) {
-  const [tenantResult, lead, agent] = await Promise.all([
+  const requestedAgentId = firstValue(input.tenantAgentId, input.tenant_agent_id, input.agentId, input.agent_id);
+  const [tenantResult, lead, requestedAgent] = await Promise.all([
     client.database.from('tenants').select('*').eq('id', tenantId).limit(1),
     loadSingle(client, 'leads', tenantId, firstValue(input.leadId, input.lead_id)),
-    loadSingle(client, 'tenant_agents', tenantId, firstValue(input.tenantAgentId, input.tenant_agent_id, input.agentId, input.agent_id)),
+    loadSingle(client, 'tenant_agents', tenantId, requestedAgentId),
   ]);
   if (tenantResult.error) throw new Error(tenantResult.error.message || 'Failed to load tenant for email');
+  const assignedAgent = !requestedAgent && lead?.assigned_tenant_agent_id
+    ? await loadSingle(client, 'tenant_agents', tenantId, lead.assigned_tenant_agent_id)
+    : null;
+  const agent = requestedAgent || assignedAgent || await loadDefaultEmailAgent(client, tenantId);
   return { tenant: tenantResult.data?.[0] || null, lead, agent };
 }
 
@@ -92,32 +114,36 @@ async function assertEmailAllowed(lead: any) {
   if (!lead.email_consent) throw new Error('Missing email consent');
 }
 
-function platformSender() {
-  const email = Deno.env.get('EMAIL_FROM');
-  const name = Deno.env.get('EMAIL_FROM_NAME') || 'Bob Automation';
-  if (!email) throw new Error('Platform fallback sender is not configured');
+function safeSenderName(value: any) {
+  return String(value || '').trim().replace(/[<>]/g, '').slice(0, 80);
+}
+
+function agentEmailLocalPart(agent?: any) {
+  const local = String(agent?.display_name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '.')
+    .replace(/^\.+|\.+$/g, '')
+    .slice(0, 48);
+  return local || 'bob';
+}
+
+function savedAgentEmail(agent?: any) {
+  const email = String(agent?.email_address || '').trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : '';
+}
+
+function platformSender(agent?: any) {
+  const fallbackEmail = Deno.env.get('EMAIL_FROM');
+  const name = safeSenderName(agent?.display_name) || Deno.env.get('EMAIL_FROM_NAME') || 'Bob Automation';
+  if (!fallbackEmail) throw new Error('Platform fallback sender is not configured');
+  const [, domain] = String(fallbackEmail).split('@');
+  const email = savedAgentEmail(agent) || (domain ? `${agentEmailLocalPart(agent)}@${domain}` : fallbackEmail);
   return { from: `${name} <${email}>`, fromEmail: email, fromName: name, replyTo: null, resolution: 'platform_fallback', identityId: null };
 }
 
-async function resolveSender(client: any, tenantId: string) {
-  const { data, error } = await client.database
-    .from('tenant_email_identities')
-    .select('*')
-    .eq('tenant_id', tenantId)
-    .eq('status', 'active')
-    .eq('verified_status', 'verified')
-    .limit(1);
-  if (error) throw new Error(error.message || 'Failed to resolve sender identity');
-  const identity = data?.[0];
-  if (!identity?.from_email) return platformSender();
-  return {
-    from: `${identity.from_name || 'Support'} <${identity.from_email}>`,
-    fromEmail: identity.from_email,
-    fromName: identity.from_name || 'Support',
-    replyTo: identity.reply_to_email || null,
-    resolution: 'tenant_verified',
-    identityId: identity.id,
-  };
+async function resolveSender(client: any, tenantId: string, agent?: any) {
+  return platformSender(agent);
 }
 
 function emailIntent(action: string, input: any) {
@@ -130,7 +156,7 @@ function buildDraftInstructions(action: string, context: any, input: any) {
   const intent = emailIntent(action, input);
   return {
     role: 'system',
-    content: `You write concise, accurate automated business emails. Return only valid JSON with keys subject, text, and html. Never invent booking details, pricing, promises, or links. Keep the tone warm and professional. The HTML must use only simple safe tags: p, strong, em, ul, li, a, br.`,
+    content: `You write concise, accurate automated business emails. Return only valid JSON with keys subject, text, and html. Never invent booking details, pricing, promises, or links. Keep the tone warm and professional. If this is a first outreach/follow-up email, behave as the assigned AI agent starting the conversation by email and move quickly toward booking a call; do not imply the lead emailed first. The HTML must use only simple safe tags: p, strong, em, ul, li, a, br.`,
     input: {
       intent,
       tenant: { name: context.tenant?.name || null, industry: context.tenant?.industry || null },
@@ -294,7 +320,7 @@ async function sendAutomatedEmail(client: any, action: string, input: any) {
   const tenantId = requiredTenantId(input);
   const context = await loadEmailContext(client, tenantId, input);
   await assertEmailAllowed(context.lead);
-  const sender = await resolveSender(client, tenantId);
+  const sender = await resolveSender(client, tenantId, context.agent);
   const draft = deterministicBookingDraft(action, context, input) || await draftWithOpenAI(action, context, input);
   const resend = await sendViaResend({ ...input, ...draft }, sender);
   const queued = await recordDelivery(client, tenantId, { ...input, action }, sender, draft, resend);
@@ -305,7 +331,7 @@ async function queueEmailIntent(client: any, input: any) {
   const tenantId = requiredTenantId(input);
   const context = await loadEmailContext(client, tenantId, input);
   await assertEmailAllowed(context.lead);
-  const sender = await resolveSender(client, tenantId);
+  const sender = await resolveSender(client, tenantId, context.agent);
   const toEmail = firstValue(input.to, input.toEmail, input.to_email, context.lead?.email);
   if (!toEmail) throw new Error('Recipient email is required');
   return recordDelivery(client, tenantId, { ...input, to: toEmail }, sender, null, null, 'pending');

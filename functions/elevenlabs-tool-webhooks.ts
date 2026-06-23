@@ -62,6 +62,25 @@ function bookingTimeGuard(start: Date, tenantTimezone = 'UTC') {
   return null;
 }
 
+function bookingHorizonGuard(start: Date, tenantTimezone = 'UTC') {
+  const now = new Date();
+  const maxAdvanceDays = Number(Deno.env.get('BOOKING_MAX_ADVANCE_DAYS') || 120);
+  const maxAdvanceMs = Math.max(14, maxAdvanceDays) * 24 * 60 * 60 * 1000;
+  if (start.getTime() > now.getTime() + maxAdvanceMs) {
+    return {
+      success: false,
+      code: 'BOOKING_TIME_TOO_FAR',
+      error: `The requested booking time ${start.toISOString()} is too far in the future. Current time is ${now.toISOString()} (${tenantTimezone}). Ask the lead to confirm the exact month, day, year, and time before booking.`,
+      requestedStartTime: start.toISOString(),
+      currentTime: now.toISOString(),
+      currentTimezone: tenantTimezone,
+      maxAdvanceDays,
+      askLeadToConfirmTime: true,
+    };
+  }
+  return null;
+}
+
 function normalizeFutureBookingStart(raw: any) {
   if (!raw) {
     return { start: null, originalStartTime: null, normalized: false, strategy: 'empty' };
@@ -88,17 +107,12 @@ function normalizeFutureBookingStart(raw: any) {
     return { start: adjusted, originalStartTime, normalized: true, strategy: 'next_future_day' };
   }
 
-  let guard = 0;
-  do {
-    adjusted.setUTCFullYear(adjusted.getUTCFullYear() + 1);
-    guard += 1;
-  } while (adjusted.getTime() < minimumFutureMs && guard < 10);
-
   return {
-    start: adjusted,
+    start,
     originalStartTime,
-    normalized: adjusted.getTime() !== start.getTime(),
-    strategy: 'next_future_year_occurrence',
+    normalized: false,
+    strategy: 'stale_date_requires_confirmation',
+    needsConfirmation: true,
   };
 }
 
@@ -398,7 +412,16 @@ function formatMeetingTime(input: JsonRecord, tenant: JsonRecord) {
   });
 }
 
-async function resolveEmailSender(db: any, tenantId: string) {
+function safeSenderName(value: any) {
+  return String(value || '').trim().replace(/[<>]/g, '').slice(0, 80);
+}
+
+function savedAgentEmail(agent?: any) {
+  const email = String(agent?.email_address || '').trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : '';
+}
+
+async function resolveEmailSender(db: any, tenantId: string, agent?: any) {
   const identities = await unwrap(
     await db.database
       .from('tenant_email_identities')
@@ -424,10 +447,13 @@ async function resolveEmailSender(db: any, tenantId: string) {
     };
   }
   if (!fallbackEmail) throw new Error('Platform fallback sender is not configured');
+  const agentEmail = savedAgentEmail(agent);
+  const fallbackFromEmail = agentEmail || fallbackEmail;
+  const fallbackFromName = agentEmail ? safeSenderName(agent?.display_name) || fallbackName : fallbackName;
   return {
-    from: `${fallbackName} <${fallbackEmail}>`,
-    fromEmail: fallbackEmail,
-    fromName: fallbackName,
+    from: `${fallbackFromName} <${fallbackFromEmail}>`,
+    fromEmail: fallbackFromEmail,
+    fromName: fallbackFromName,
     replyTo: null,
     resolution: 'platform_fallback',
     identityId: null,
@@ -470,7 +496,7 @@ async function sendDirectTenantEmail(db: any, context: JsonRecord, input: JsonRe
   if (!toEmail) throw new Error('Lead email is required');
   const apiKey = Deno.env.get('RESEND_API_KEY');
   if (!apiKey) throw new Error('RESEND_API_KEY is not configured');
-  const sender = await resolveEmailSender(db, context.tenantId);
+  const sender = await resolveEmailSender(db, context.tenantId, context.agent);
   const draft = deterministicEmailDraft(context, { ...input, to: toEmail });
   const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -823,6 +849,25 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
     });
     return timeGuard;
   }
+  const horizonGuard = bookingHorizonGuard(start, firstValue(input.timezone, context.tenant.default_timezone, 'UTC'));
+  if (horizonGuard) {
+    await logTimelineMessage(db, {
+      tenantId: context.tenantId,
+      leadId: context.leadId,
+      channel: 'voice',
+      messageType: 'booking_rejected',
+      bodyText: horizonGuard.error,
+      status: 'failed',
+      metadata: {
+        source: 'elevenlabs_tool',
+        requestedStartTime: horizonGuard.requestedStartTime,
+        currentTime: horizonGuard.currentTime,
+        maxAdvanceDays: horizonGuard.maxAdvanceDays,
+        dateNormalizationStrategy: futureStart.strategy,
+      },
+    });
+    return horizonGuard;
+  }
   const endTime = firstValue(input.endTime, input.end_time) || new Date(start.getTime() + durationMinutes * 60 * 1000).toISOString();
   const configuredMeetingLink = firstValue(
     input.meetingLink,
@@ -893,26 +938,37 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
     },
   });
 
-  let reminderRows: JsonRecord[] = [];
   const formattedTime = start.toLocaleString('en-US', { timeZone: context.tenant.default_timezone || 'UTC', dateStyle: 'medium', timeStyle: 'short' });
+  const reminderRows: JsonRecord[] = [];
+  const reminderDefinitions = [
+    { hours: 24, method: 'email' },
+    { hours: 24, method: 'sms' },
+    { hours: 1, method: 'sms' },
+  ];
+  for (const reminder of reminderDefinitions) {
+    const scheduledFor = new Date(start.getTime() - reminder.hours * 60 * 60 * 1000);
+    const hasConsent = reminder.method === 'email'
+      ? Boolean(context.lead.email && context.lead.email_consent && !context.lead.do_not_contact)
+      : Boolean(context.lead.phone && context.lead.sms_consent && !context.lead.do_not_contact);
+    reminderRows.push({
+      tenant_id: context.tenantId,
+      meeting_id: meeting?.id,
+      reminder_type: `${reminder.hours}h`,
+      delivery_method: reminder.method,
+      scheduled_for: scheduledFor.toISOString(),
+      status: scheduledFor.getTime() > Date.now() && hasConsent ? 'pending' : 'skipped',
+      error_message: hasConsent ? null : `Missing ${reminder.method} consent or contact details`,
+    });
+  }
+  await unwrap(
+    await db.database.from('meeting_reminders').insert(reminderRows),
+    'Failed to schedule booking reminders'
+  );
 
   const [smsResult, emailResult] = await Promise.all([
     (async () => {
       try {
         assertLeadAllowsChannel(context.lead, 'sms');
-        reminderRows = [24, 1]
-          .map((hours) => ({
-            tenant_id: context.tenantId,
-            meeting_id: meeting?.id,
-            reminder_type: `${hours}h`,
-            delivery_method: 'sms',
-            scheduled_for: new Date(start.getTime() - hours * 60 * 60 * 1000).toISOString(),
-            status: new Date(start.getTime() - hours * 60 * 60 * 1000).getTime() > Date.now() ? 'pending' : 'skipped',
-          }));
-        await unwrap(
-          await db.database.from('meeting_reminders').insert(reminderRows),
-          'Failed to schedule booking reminders'
-        );
         await sendSms(db, context, { message: `Your appointment is confirmed for ${formattedTime}.${meetingUrl ? ` Meeting link: ${meetingUrl}` : ''}` });
         return { sent: true, error: null };
       } catch (error) {

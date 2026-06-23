@@ -108,7 +108,7 @@ export default function LiveAutomationTest() {
     setError('');
 
     try {
-      const data = await invokeFunction('bob-queue-actions', { action: 'live-start', body: form });
+      const data = await invokeFunction('bob-queue-actions', { action: 'live-start', body: { ...form, tenantId: user?.tenantId } });
       setRun(data);
     } catch (err) {
       setError(err.message || 'Failed to start live automation test');
@@ -123,7 +123,7 @@ export default function LiveAutomationTest() {
     setTicking(true);
 
     try {
-      const data = await invokeFunction('bob-queue-actions', { action: 'tick', body: { leadId, conversationId, silent } });
+      const data = await invokeFunction('bob-queue-actions', { action: 'tick', body: { tenantId: user?.tenantId, leadId, conversationId, silent } });
       setRun((current) => ({
         ...(current || {}),
         tick: data.tick,
@@ -161,7 +161,7 @@ export default function LiveAutomationTest() {
     setError('');
 
     try {
-      const data = await invokeFunction('bob-queue-actions', { action: 'live-status', body: { leadId, conversationId } });
+      const data = await invokeFunction('bob-queue-actions', { action: 'live-status', body: { tenantId: user?.tenantId, leadId, conversationId } });
       setRun((current) => ({
         ...(current || {}),
         status: data.status,
@@ -177,7 +177,7 @@ export default function LiveAutomationTest() {
     setSkippingActionId(actionId);
 
     try {
-      const data = await invokeFunction('bob-queue-actions', { action: 'skip', body: { leadId, conversationId, actionId } });
+      const data = await invokeFunction('bob-queue-actions', { action: 'skip', body: { tenantId: user?.tenantId, leadId, conversationId, actionId } });
       setRun((current) => ({
         ...(current || {}),
         status: data.status,

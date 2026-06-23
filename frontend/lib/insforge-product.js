@@ -25,6 +25,10 @@ const CAMEL_TO_SNAKE = {
   displayName: 'display_name',
   templateKey: 'template_key',
   elevenlabsAgentId: 'elevenlabs_agent_id',
+  emailAddress: 'email_address',
+  emailLocalPart: 'email_local_part',
+  emailDomain: 'email_domain',
+  emailConfiguredAt: 'email_configured_at',
   voiceId: 'voice_id',
   promptVersion: 'prompt_version',
   primaryPhoneNumberId: 'primary_phone_number_id',
@@ -500,6 +504,21 @@ export async function getCurrentPlatformAdminProfile() {
 export async function createAssistedTenant(user, input = {}) {
   const name = String(input.name || '').trim();
   if (!name) throw new Error('Company name is required');
+  const ownerEmail = String(input.ownerEmail || '').trim();
+  if (!ownerEmail) throw new Error('Owner email is required');
+  const ownerEmailNormalized = ownerEmail.toLowerCase();
+  const existingClaims = await unwrap(
+    await insforge.database
+      .from('tenant_owner_claims')
+      .select('id, email, tenant_id, status')
+      .eq('email_normalized', ownerEmailNormalized)
+      .eq('status', 'pending')
+      .limit(1),
+    'Failed to validate owner email'
+  );
+  if (existingClaims?.length) {
+    throw new Error('This owner email already has a pending tenant account claim.');
+  }
   const slugBase = slugifyTenantName(input.slug || name);
   const slug = `${slugBase}-${Date.now().toString(36)}`.slice(0, 118);
   const tenant = await insertRow('tenants', {
@@ -511,10 +530,23 @@ export async function createAssistedTenant(user, input = {}) {
     status: 'onboarding',
     metadata: {
       source: 'super_admin_assisted',
-      ownerEmail: String(input.ownerEmail || '').trim() || null,
+      ownerEmail: ownerEmail || null,
       createdByUserId: user?.authUserId || user?.id || null,
     },
   });
+
+  const ownerClaim = ownerEmail ? await insertRow('tenant_owner_claims', {
+    tenantId: tenant.id,
+    email: ownerEmail,
+    emailNormalized: ownerEmailNormalized,
+    role: 'owner',
+    status: 'pending',
+    invitedByUserId: user?.authUserId || user?.id || null,
+    metadata: {
+      source: 'super_admin_assisted',
+      targetTenantName: name,
+    },
+  }) : null;
 
   const progress = await insertRow('tenant_onboarding_progress', {
     tenantId: tenant.id,
@@ -547,11 +579,12 @@ export async function createAssistedTenant(user, input = {}) {
     metadata: {
       actorMode: 'super_admin_assisted',
       targetTenantName: name,
-      ownerEmail: String(input.ownerEmail || '').trim() || null,
+      ownerEmail: ownerEmail || null,
+      ownerClaimId: ownerClaim?.id || null,
     },
   });
 
-  return { tenant, progress, session };
+  return { tenant, progress, session, ownerClaim };
 }
 
 export async function updateTenantBusinessNiche(tenantId, businessNiche) {
@@ -657,6 +690,44 @@ export async function createPlatformKnowledgeDocument(user, input = {}) {
     status: input.status || 'uploaded',
     version: Number(input.version) || 1,
     metadata: input.metadata || { source: 'phase18_admin_dashboard' },
+    createdByUserId: user?.authUserId || user?.id || null,
+  });
+}
+
+export async function uploadPlatformKnowledgeFile(user, file, input = {}) {
+  if (!file) throw new Error('Choose a file to upload');
+  const title = assertKnowledgeTitle(input.title || file.name);
+  const scope = input.scope === 'niche' ? 'niche' : 'global';
+  if (scope === 'niche' && !input.nicheKey) throw new Error('Choose a niche for niche knowledge');
+  if (scope === 'global' && input.nicheKey) throw new Error('Global knowledge cannot have a niche key');
+
+  const safeName = sanitizeStorageName(file.name || title);
+  const storageKey = `${scope}/${input.nicheKey || 'global'}/${Date.now()}-${safeName}`;
+  const { data, error } = await insforge.storage
+    .from('platform-knowledge')
+    .upload(storageKey, file);
+
+  if (error) {
+    throw new Error(error.message || 'Failed to upload file to platform knowledge storage');
+  }
+
+  return insertRow('platform_knowledge_documents', {
+    scope,
+    nicheKey: scope === 'niche' ? input.nicheKey : null,
+    title,
+    sourceType: 'file',
+    storageUrl: data?.url || null,
+    storageKey: data?.key || storageKey,
+    status: 'uploaded',
+    version: Number(input.version) || 1,
+    metadata: {
+      source: 'super_admin_knowledge_upload',
+      originalFileName: file.name || null,
+      mimeType: file.type || null,
+      fileSize: Number.isFinite(file.size) ? file.size : null,
+      uploadedByUserId: user?.authUserId || user?.id || null,
+      uploadedAt: new Date().toISOString(),
+    },
     createdByUserId: user?.authUserId || user?.id || null,
   });
 }
@@ -1442,18 +1513,30 @@ export async function importLeadsFromCsv(user, { csvText, fileName } = {}) {
       })));
       await insertTenantRows('bob_actions', user, campaignLeads.map((campaignLead) => {
         const lead = eligible.find((row) => row.id === campaignLead.leadId);
+        const preferredChannel = String(lead?.preferredContactChannel || '').toLowerCase().replace(/[\s_-]+/g, '_');
+        const prefersEmail = preferredChannel === 'email';
+        const canEmail = Boolean(lead?.emailConsent && lead?.email);
         const canCall = Boolean(lead?.callConsent && lead?.phone);
         const canSms = Boolean(lead?.smsConsent && lead?.phone);
+        const useEmail = prefersEmail && canEmail;
+        const useCall = !useEmail && canCall;
+        const useSms = !useEmail && !useCall && canSms;
         return {
           campaignId: campaign.id,
           campaignLeadId: campaignLead.id,
           leadId: campaignLead.leadId,
-          actionType: canCall ? 'queue_call_attempt' : 'send_sms',
-          channel: canCall ? 'phone' : 'sms',
-          status: canCall ? 'awaiting_call' : (canSms ? 'pending' : 'awaiting_human'),
-          reason: canCall ? 'Campaign first step: call' : (canSms ? 'Campaign next step: SMS' : 'Campaign requires call or SMS consent with a phone number'),
+          actionType: useEmail ? 'send_email' : useCall ? 'queue_call_attempt' : 'send_sms',
+          channel: useEmail ? 'email' : useCall ? 'phone' : 'sms',
+          status: useCall ? 'awaiting_call' : ((useEmail || useSms) ? 'pending' : 'awaiting_human'),
+          reason: useEmail ? 'Campaign first step: email preference' : useCall ? 'Campaign first step: call' : (useSms ? 'Campaign next step: SMS' : 'Campaign requires email preference, call, or SMS consent'),
           scheduledFor: new Date().toISOString(),
-          payload: { source: 'campaign_import', campaignNumber: campaign.campaignNumber, campaignLeadId: campaignLead.id, tenantAgentId: campaignLead.agentId || lead?.assignedTenantAgentId || defaultAgent?.id || null },
+          payload: {
+            source: 'campaign_import',
+            campaignNumber: campaign.campaignNumber,
+            campaignLeadId: campaignLead.id,
+            tenantAgentId: campaignLead.agentId || lead?.assignedTenantAgentId || defaultAgent?.id || null,
+            preferredContactChannel: preferredChannel || null,
+          },
         };
       }));
     }

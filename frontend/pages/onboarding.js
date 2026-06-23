@@ -20,6 +20,7 @@ import {
   createTenantAgent,
   createTenantKnowledgeDocument,
   createTenantPhoneNumber,
+  getCurrentPlatformAdminProfile,
   getTenantOnboardingState,
   importLeadsFromCsv,
   listBusinessNiches,
@@ -176,9 +177,12 @@ export default function OnboardingPage() {
   const [saving, setSaving] = useState(false);
   const [activeStep, setActiveStep] = useState('company');
   const [state, setState] = useState(null);
+  const [onboardingUser, setOnboardingUser] = useState(null);
   const [niches, setNiches] = useState([]);
   const [voiceOptions, setVoiceOptions] = useState([]);
   const [voiceLoading, setVoiceLoading] = useState(false);
+  const [voiceError, setVoiceError] = useState('');
+  const [voiceSearch, setVoiceSearch] = useState('');
   const [calendlyEventTypes, setCalendlyEventTypes] = useState([]);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -192,9 +196,12 @@ export default function OnboardingPage() {
   const [csvText, setCsvText] = useState('');
   const [csvFile, setCsvFile] = useState(null);
   const [importResult, setImportResult] = useState(null);
+  const targetTenantId = typeof router.query.tenantId === 'string' ? router.query.tenantId : '';
+  const assistedMode = router.query.mode === 'super_admin_assisted' && Boolean(targetTenantId);
+  const tenantUser = onboardingUser || user;
 
   useEffect(() => {
-    if (authLoading) return;
+    if (authLoading || !router.isReady) return;
     if (!isAuthenticated) {
       router.replace('/login');
       return;
@@ -203,8 +210,39 @@ export default function OnboardingPage() {
       router.replace('/login');
       return;
     }
-    loadOnboarding();
-  }, [authLoading, isAuthenticated, user, router]);
+
+    async function prepareOnboarding() {
+      if (assistedMode) {
+        try {
+          const profile = await getCurrentPlatformAdminProfile();
+          if (!profile?.isPlatformAdmin) {
+            router.replace('/admin-dashboard');
+            return;
+          }
+          const nextUser = {
+            ...user,
+            tenantId: targetTenantId,
+            tenant: {
+              ...(user?.tenant || {}),
+              id: targetTenantId,
+            },
+            actorMode: 'super_admin_assisted',
+          };
+          setOnboardingUser(nextUser);
+          await loadOnboarding(nextUser);
+        } catch (err) {
+          setError(err.message || 'Failed to open assisted onboarding');
+          setLoading(false);
+        }
+        return;
+      }
+
+      setOnboardingUser(user);
+      await loadOnboarding(user);
+    }
+
+    prepareOnboarding();
+  }, [authLoading, isAuthenticated, user, router, router.isReady, assistedMode, targetTenantId]);
 
   useEffect(() => {
     if (!user || typeof window === 'undefined') return undefined;
@@ -218,7 +256,7 @@ export default function OnboardingPage() {
       setError('');
       setNotice('Calendly connected.');
       setActiveStep('booking');
-      await loadOnboarding();
+      await loadOnboarding(tenantUser);
       const result = await listCalendlyEventTypes().catch(() => ({ eventTypes: [] }));
       setCalendlyEventTypes(result.eventTypes || []);
     }
@@ -243,21 +281,22 @@ export default function OnboardingPage() {
       window.removeEventListener('storage', handleStorage);
       if (channel) channel.close();
     };
-  }, [user]);
+  }, [user, tenantUser]);
 
-  async function loadOnboarding() {
+  async function loadOnboarding(activeUser = tenantUser) {
+    if (!activeUser) return;
     try {
       setLoading(true);
       setError('');
       const [nextState, nicheRows] = await Promise.all([
-        getTenantOnboardingState(user),
+        getTenantOnboardingState(activeUser),
         listBusinessNiches().catch(() => []),
       ]);
       setState(nextState);
       setNiches((nicheRows || []).filter((niche) => niche.status !== 'archived'));
       hydrateForms(nextState);
       setActiveStep(nextState.progress?.currentStep || 'company');
-      fetchVoiceOptions();
+      fetchVoiceOptions(activeUser);
     } catch (err) {
       setError(err.message || 'Failed to load onboarding');
     } finally {
@@ -265,14 +304,19 @@ export default function OnboardingPage() {
     }
   }
 
-  async function fetchVoiceOptions() {
+  async function fetchVoiceOptions(activeUser = tenantUser) {
     try {
       setVoiceLoading(true);
-      const result = await listElevenLabsVoices(user);
+      setVoiceError('');
+      const result = await listElevenLabsVoices(activeUser);
       setVoiceOptions(result.voices || []);
+      if (!(result.voices || []).length) {
+        setVoiceError('No ElevenLabs voices were returned by the provider.');
+      }
     } catch (err) {
       console.warn('Failed to load ElevenLabs voices:', err);
       setVoiceOptions([]);
+      setVoiceError(err.message || 'Failed to load ElevenLabs voices.');
     } finally {
       setVoiceLoading(false);
     }
@@ -332,12 +376,27 @@ export default function OnboardingPage() {
   const filteredVoiceOptions = useMemo(() => {
     const profile = voiceProfiles.find((item) => item.key === agentForm.voiceProfile) || voiceProfiles[0];
     const matches = voiceOptions.filter(profile.match);
-    return matches.length ? matches : voiceOptions;
-  }, [agentForm.voiceProfile, voiceOptions]);
+    const profileMatches = matches.length ? matches : voiceOptions;
+    const search = voiceSearch.trim().toLowerCase();
+    if (!search) return profileMatches;
+    return profileMatches.filter((voice) => [
+      voice.name,
+      voice.gender,
+      voice.accent,
+      voice.age,
+      voice.useCase,
+      voice.category,
+      voice.description,
+    ].filter(Boolean).join(' ').toLowerCase().includes(search));
+  }, [agentForm.voiceProfile, voiceOptions, voiceSearch]);
+  const selectedVoice = useMemo(
+    () => voiceOptions.find((voice) => voice.voiceId === agentForm.voiceId) || null,
+    [agentForm.voiceId, voiceOptions]
+  );
 
   async function reloadAfterSave(step, next = nextStep(step), message = 'Setup saved.') {
-    await saveTenantOnboardingStep(user, step, { nextStep: next, answers: {} });
-    const nextState = await getTenantOnboardingState(user);
+    await saveTenantOnboardingStep(tenantUser, step, { nextStep: next, answers: {} });
+    const nextState = await getTenantOnboardingState(tenantUser);
     setState(nextState);
     setActiveStep(next);
     setNotice(message);
@@ -358,7 +417,7 @@ export default function OnboardingPage() {
 
   function saveCompany() {
     return runSave('company', async () => {
-      await updateTenantCompanyProfile(user, companyForm);
+      await updateTenantCompanyProfile(tenantUser, companyForm);
       await reloadAfterSave('company');
     });
   }
@@ -373,6 +432,9 @@ export default function OnboardingPage() {
         label: selectedVoiceProfile.label,
         selectedVoiceName: selectedVoice?.name || null,
         selectedVoiceLabels: selectedVoice?.labels || null,
+        selectedVoicePreviewUrl: selectedVoice?.previewUrl || null,
+        selectedVoiceCategory: selectedVoice?.category || null,
+        selectedVoiceUseCase: selectedVoice?.useCase || null,
       };
       const personality = {
         key: selectedPersonality.key,
@@ -381,7 +443,7 @@ export default function OnboardingPage() {
       };
       let savedAgent;
       if (agentForm.id) {
-        savedAgent = await updateTenantAgent(user, agentForm.id, {
+        savedAgent = await updateTenantAgent(tenantUser, agentForm.id, {
           displayName: agentForm.displayName,
           voiceId: agentForm.voiceId,
           status: 'live',
@@ -391,7 +453,7 @@ export default function OnboardingPage() {
           existingMetadata: state?.summary?.agents?.find((agent) => agent.id === agentForm.id)?.metadata || {},
         });
       } else {
-        savedAgent = await createTenantAgent(user, {
+        savedAgent = await createTenantAgent(tenantUser, {
           displayName: agentForm.displayName,
           voiceId: agentForm.voiceId,
           status: 'live',
@@ -400,7 +462,7 @@ export default function OnboardingPage() {
           customPersonalityNotes: agentForm.customPersonalityNotes,
         });
       }
-      const result = await provisionElevenLabsAgent(user, savedAgent?.id || agentForm.id);
+      const result = await provisionElevenLabsAgent(tenantUser, savedAgent?.id || agentForm.id);
       if (!result?.elevenlabsAgentId) {
         throw new Error('AI agent sync did not return an agent ID. Please try again.');
       }
@@ -415,7 +477,7 @@ export default function OnboardingPage() {
         return;
       }
       if (!state?.summary?.primaryPhoneNumber?.id) {
-        await createTenantPhoneNumber(user, {
+        await createTenantPhoneNumber(tenantUser, {
           ...phoneForm,
           voiceEnabled: true,
           smsEnabled: true,
@@ -431,7 +493,7 @@ export default function OnboardingPage() {
   function saveEmail(skip = false) {
     return runSave('email', async () => {
       if (!skip && (emailForm.fromEmail || emailForm.fromName || emailForm.replyToEmail)) {
-        await upsertTenantEmailIdentity(user, {
+        await upsertTenantEmailIdentity(tenantUser, {
           ...emailForm,
           provider: 'platform',
         });
@@ -442,7 +504,7 @@ export default function OnboardingPage() {
 
   function saveBooking() {
     return runSave('booking', async () => {
-      await upsertTenantBookingIntegration(user, { ...bookingForm, provider: 'calendly' });
+      await upsertTenantBookingIntegration(tenantUser, { ...bookingForm, provider: 'calendly' });
       await reloadAfterSave('booking');
     });
   }
@@ -473,9 +535,9 @@ export default function OnboardingPage() {
     return runSave('knowledge', async () => {
       if (!skip) {
         if (knowledgeForm.sourceType === 'file') {
-          await uploadTenantKnowledgeFile(user, knowledgeFile, { title: knowledgeForm.title });
+          await uploadTenantKnowledgeFile(tenantUser, knowledgeFile, { title: knowledgeForm.title });
         } else {
-          await createTenantKnowledgeDocument(user, knowledgeForm);
+          await createTenantKnowledgeDocument(tenantUser, knowledgeForm);
         }
         setKnowledgeForm(defaultKnowledgeForm);
         setKnowledgeFile(null);
@@ -489,7 +551,7 @@ export default function OnboardingPage() {
       if (!skip) {
         const fileText = await readFileText(csvFile);
         const sourceText = fileText || csvText;
-        const result = await importLeadsFromCsv(user, {
+        const result = await importLeadsFromCsv(tenantUser, {
           csvText: sourceText,
           fileName: csvFile?.name || 'onboarding-leads.csv',
         });
@@ -503,9 +565,9 @@ export default function OnboardingPage() {
 
   function finishOnboarding() {
     return runSave('review', async () => {
-      await completeTenantOnboarding(user);
-      setNotice('Onboarding complete. Opening dashboard...');
-      router.replace('/admin-dashboard');
+      await completeTenantOnboarding(tenantUser);
+      setNotice('Onboarding complete.');
+      router.replace(assistedMode ? '/tenant-setup' : '/admin-dashboard');
     });
   }
 
@@ -537,14 +599,19 @@ export default function OnboardingPage() {
               <p className="mt-1 text-sm text-text-secondary">
                 {state?.summary?.tenant?.name || 'Complete required setup before live outreach.'}
               </p>
+              {assistedMode ? (
+                <p className="mt-1 text-xs text-text-muted">
+                  Super admin assisted setup by {user?.email || user?.name || 'platform admin'}
+                </p>
+              ) : null}
             </div>
             <div className="flex items-center gap-3">
               <StatusBadge
                 value={state?.progress?.isComplete ? 'Complete' : 'In progress'}
                 tone={state?.progress?.isComplete ? 'success' : 'info'}
               />
-              <button type="button" className="ops-button-secondary" onClick={() => router.push('/admin-dashboard')}>
-                Dashboard
+              <button type="button" className="ops-button-secondary" onClick={() => router.push(assistedMode ? '/tenant-setup' : '/admin-dashboard')}>
+                {assistedMode ? 'Tenant Setup' : 'Dashboard'}
               </button>
             </div>
           </header>
@@ -641,16 +708,45 @@ export default function OnboardingPage() {
                         ))}
                       </select>
                     </Field>
+                    <Field label="Search voices" optional>
+                      <div className="space-y-2 rounded-lg border border-border bg-surface-secondary p-3">
+                        <div className="flex items-center justify-between gap-2 text-xs text-text-muted">
+                          <span>{voiceLoading ? 'Loading ElevenLabs voices...' : `${voiceOptions.length} ElevenLabs voices loaded`}</span>
+                          {filteredVoiceOptions.length !== voiceOptions.length ? <span>{filteredVoiceOptions.length} shown</span> : null}
+                        </div>
+                        <input
+                          className="ops-input"
+                          value={voiceSearch}
+                          onChange={(event) => setVoiceSearch(event.target.value)}
+                          placeholder="Search by name, accent, gender, or use case"
+                        />
+                      </div>
+                    </Field>
                     <Field label="ElevenLabs voice" optional>
                       <select className="ops-select" value={agentForm.voiceId} onChange={(event) => setAgentForm({ ...agentForm, voiceId: event.target.value })}>
-                        <option value="">{voiceLoading ? 'Loading voices...' : 'Use provider default voice'}</option>
+                        <option value="">{voiceLoading ? 'Loading voices...' : voiceOptions.length ? 'Use provider default voice' : 'No voices loaded'}</option>
                         {filteredVoiceOptions.map((voice) => (
                           <option key={voice.voiceId} value={voice.voiceId}>
                             {voice.name}
                             {voice.gender || voice.accent ? ` - ${[voice.gender, voice.accent].filter(Boolean).join(', ')}` : ''}
+                            {voice.useCase ? ` - ${voice.useCase}` : ''}
                           </option>
                         ))}
                       </select>
+                      {selectedVoice ? (
+                        <div className="rounded-lg border border-border bg-surface-secondary px-3 py-2 text-xs text-text-secondary">
+                          <div className="font-medium text-text-primary">{selectedVoice.name}</div>
+                          <div className="mt-1">
+                            {[selectedVoice.gender, selectedVoice.accent, selectedVoice.age, selectedVoice.useCase, selectedVoice.category].filter(Boolean).join(' · ') || 'Voice details unavailable'}
+                          </div>
+                          {selectedVoice.previewUrl ? (
+                            <a className="mt-2 inline-flex text-accent hover:text-accent-hover" href={selectedVoice.previewUrl} target="_blank" rel="noreferrer">
+                              Preview voice
+                            </a>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {voiceError ? <p className="text-xs text-warning">{voiceError}</p> : null}
                     </Field>
                     <Field label="Personality">
                       <select className="ops-select" value={agentForm.personality} onChange={(event) => setAgentForm({ ...agentForm, personality: event.target.value })}>

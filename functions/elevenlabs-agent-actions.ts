@@ -1,8 +1,9 @@
-import { createClient } from 'npm:@insforge/sdk';
+import { createAdminClient, createClient } from 'npm:@insforge/sdk';
 
 const ELEVENLABS_API_BASE = 'https://api.elevenlabs.io/v1';
 const DEFAULT_PROMPT_VERSION = 'v2-campaign-booking';
 const DEFAULT_VOICE_ID = '21m00Tcm4TlvDq8ikWAM';
+const ELEVENLABS_EXPRESSIVE_TTS_MODEL_ID = 'eleven_v3_conversational';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -42,6 +43,15 @@ function createInsForgeClient(req: Request) {
   });
 }
 
+function createInsForgeAdminClient() {
+  const apiKey = Deno.env.get('API_KEY');
+  if (!apiKey) return null;
+  return createAdminClient({
+    baseUrl: Deno.env.get('INSFORGE_BASE_URL'),
+    apiKey,
+  });
+}
+
 async function unwrap(result: any, message: string) {
   if (result?.error) throw new Error(result.error.message || message);
   return result?.data;
@@ -56,8 +66,17 @@ async function resolvePortalUser(db: any) {
   return portalUser;
 }
 
-function requireTenant(portalUser: JsonRecord, requestedTenantId?: string) {
+async function resolvePlatformAdminProfile(db: any) {
+  const profile = await unwrap(
+    await db.database.rpc('current_platform_admin_profile'),
+    'Failed to check platform admin profile'
+  );
+  return profile || { isPlatformAdmin: false };
+}
+
+function requireTenant(portalUser: JsonRecord, requestedTenantId?: string, platformProfile: JsonRecord = {}) {
   if (requestedTenantId && requestedTenantId !== portalUser.tenantId) {
+    if (platformProfile?.isPlatformAdmin) return requestedTenantId;
     throw new Error('Requested tenant does not match signed-in tenant');
   }
   return portalUser.tenantId;
@@ -66,7 +85,7 @@ function requireTenant(portalUser: JsonRecord, requestedTenantId?: string) {
 async function loadTenantContext(db: any, tenantId: string, agentId: string) {
   if (!agentId) throw new Error('agentId is required');
 
-  const [tenantRows, agentRows, phoneRows, emailRows, bookingRows, knowledgeRows] = await Promise.all([
+  const [tenantRows, agentRows, phoneRows, emailRows, bookingRows, tenantKnowledgeRows] = await Promise.all([
     unwrap(
       await db.database.from('tenants').select('*').eq('id', tenantId).limit(1),
       'Failed to load tenant'
@@ -120,15 +139,108 @@ async function loadTenantContext(db: any, tenantId: string, agentId: string) {
   const agent = agentRows?.[0];
   if (!agent) throw new Error('Tenant agent was not found');
   if (agent.status === 'archived') throw new Error('Archived agents cannot be provisioned');
+  const tenant = tenantRows?.[0] || null;
+  const platformKnowledgeRows = await loadPlatformKnowledgeDocuments(db, tenant, tenantId, agentId);
 
   return {
-    tenant: tenantRows?.[0] || null,
+    tenant,
     agent,
     phoneNumber: phoneRows?.find((row: JsonRecord) => row.is_primary) || phoneRows?.[0] || null,
     emailIdentity: emailRows?.[0] || null,
     bookingIntegration: bookingRows?.[0] || null,
-    knowledgeDocuments: knowledgeRows || [],
+    knowledgeDocuments: [
+      ...platformKnowledgeRows,
+      ...((tenantKnowledgeRows || []).map((document: JsonRecord) => ({
+        ...document,
+        __knowledge_table: 'tenant_knowledge_documents',
+        __storage_bucket: 'tenant-knowledge',
+      }))),
+    ],
   };
+}
+
+function activeKnowledgeStatuses() {
+  return ['uploaded', 'processing', 'ready', 'failed'];
+}
+
+function annotatePlatformKnowledge(document: JsonRecord, source: string) {
+  return {
+    ...document,
+    __knowledge_table: 'platform_knowledge_documents',
+    __storage_bucket: 'platform-knowledge',
+    __shared_source: source,
+  };
+}
+
+async function loadPlatformKnowledgeDocuments(db: any, tenant: JsonRecord | null, tenantId: string, agentId: string) {
+  const activeStatuses = activeKnowledgeStatuses();
+  const queries = [
+    unwrap(
+      await db.database
+        .from('platform_knowledge_documents')
+        .select('*')
+        .eq('scope', 'global')
+        .in('status', activeStatuses)
+        .order('created_at', { ascending: true })
+        .limit(100),
+      'Failed to load global knowledge documents'
+    ),
+  ];
+
+  if (tenant?.business_niche) {
+    queries.push(unwrap(
+      await db.database
+        .from('platform_knowledge_documents')
+        .select('*')
+        .eq('scope', 'niche')
+        .eq('niche_key', tenant.business_niche)
+        .in('status', activeStatuses)
+        .order('created_at', { ascending: true })
+        .limit(100),
+      'Failed to load niche knowledge documents'
+    ));
+  } else {
+    queries.push(Promise.resolve([]));
+  }
+
+  const assignments = await unwrap(
+    await db.database
+      .from('tenant_knowledge_assignments')
+      .select('*')
+      .eq('tenant_id', tenantId)
+      .eq('status', 'active')
+      .or(`tenant_agent_id.is.null,tenant_agent_id.eq.${agentId}`)
+      .order('created_at', { ascending: true })
+      .limit(200),
+    'Failed to load shared knowledge assignments'
+  );
+
+  const assignedIds = [...new Set((assignments || []).map((assignment: JsonRecord) => assignment.platform_knowledge_document_id).filter(Boolean))];
+  const assignedRows = assignedIds.length
+    ? await unwrap(
+      await db.database
+        .from('platform_knowledge_documents')
+        .select('*')
+        .in('id', assignedIds)
+        .in('status', activeStatuses)
+        .order('created_at', { ascending: true })
+        .limit(200),
+      'Failed to load assigned platform knowledge documents'
+    )
+    : [];
+
+  const [globalRows, nicheRows] = await Promise.all(queries);
+  const merged = new Map<string, JsonRecord>();
+  for (const document of globalRows || []) {
+    merged.set(document.id, annotatePlatformKnowledge(document, 'global_default'));
+  }
+  for (const document of nicheRows || []) {
+    merged.set(document.id, annotatePlatformKnowledge(document, 'niche_default'));
+  }
+  for (const document of assignedRows || []) {
+    merged.set(document.id, annotatePlatformKnowledge(document, 'super_admin_override'));
+  }
+  return [...merged.values()];
 }
 
 function elevenLabsApiKey() {
@@ -161,12 +273,73 @@ function safeName(value: string, fallback: string) {
   return String(value || fallback).trim().slice(0, 120) || fallback;
 }
 
+function emailDomain(value: unknown) {
+  const match = String(value || '').match(/@([A-Z0-9.-]+\.[A-Z]{2,})$/i);
+  return (match?.[1] || '').toLowerCase();
+}
+
+function platformEmailDomain() {
+  return String(Deno.env.get('RESEND_INBOUND_DOMAIN') || emailDomain(Deno.env.get('EMAIL_FROM')) || '').trim().toLowerCase();
+}
+
+function agentEmailLocalPartFromName(value: unknown) {
+  const local = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '.')
+    .replace(/^\.+|\.+$/g, '')
+    .slice(0, 48);
+  return local || 'bob';
+}
+
+async function agentEmailExists(db: any, agent: JsonRecord, emailAddress: string) {
+  const rows = await unwrap(
+    await db.database
+      .from('tenant_agents')
+      .select('id')
+      .eq('email_address', emailAddress)
+      .limit(2),
+    'Failed to check tenant agent email address'
+  );
+  return (rows || []).some((row: JsonRecord) => row.id !== agent.id);
+}
+
+async function resolveAgentEmailAddress(db: any, context: JsonRecord) {
+  const agent = context.agent || {};
+  const domain = platformEmailDomain();
+  if (!domain) return null;
+
+  const baseLocal = agentEmailLocalPartFromName(agent.display_name);
+  const tenantSlug = String(context.tenant?.slug || context.tenant?.name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '.')
+    .replace(/^\.+|\.+$/g, '')
+    .slice(0, 32);
+  const shortId = String(agent.id || crypto.randomUUID()).split('-')[0];
+  const localCandidates = [
+    baseLocal,
+    tenantSlug ? `${baseLocal}.${tenantSlug}`.slice(0, 64) : '',
+    `${baseLocal}.${shortId}`.slice(0, 64),
+  ].filter(Boolean);
+
+  for (const localPart of localCandidates) {
+    const emailAddress = `${localPart}@${domain}`;
+    if (!(await agentEmailExists(db, agent, emailAddress))) {
+      return { emailAddress, emailLocalPart: localPart, emailDomain: domain };
+    }
+  }
+
+  const emailLocalPart = `${baseLocal}.${crypto.randomUUID().slice(0, 8)}`.slice(0, 64);
+  return { emailAddress: `${emailLocalPart}@${domain}`, emailLocalPart, emailDomain: domain };
+}
+
 function buildAgentPrompt(context: JsonRecord) {
   const tenantName = context.tenant?.name || 'the company';
   const agentName = context.agent?.display_name || 'the AI assistant';
   const bookingProvider = context.bookingIntegration?.provider || 'manual';
   const bookingUrl = context.bookingIntegration?.booking_url || 'not configured';
-  const senderEmail = context.emailIdentity?.from_email || 'not configured';
+  const senderEmail = context.agent?.email_address || context.emailIdentity?.from_email || 'not configured';
   const phoneNumber = context.phoneNumber?.phone_number || 'not configured';
   const toolWebhookUrl = elevenLabsToolWebhookUrl();
   const personality = context.agent?.metadata?.personality || {};
@@ -180,6 +353,7 @@ function buildAgentPrompt(context: JsonRecord) {
     `Personality: ${personalityLabel}. ${personalityInstruction}`,
     customPersonalityNotes ? `Additional personality notes: ${customPersonalityNotes}.` : '',
     voiceProfile.label ? `Selected voice style: ${voiceProfile.label}.` : '',
+    'Use expressive speech naturally. Match your tone to the lead: calm and reassuring when they sound worried, warm when they are positive, and clear and measured when explaining details. Keep delivery professional and never overact.',
     'You qualify leads, answer questions from the tenant knowledge base, and help book consultations.',
     'Start outbound calls with a clear introduction: say your name, the company name, and the specific reason for the call using the lead/service context. In that same introduction, ask what language the lead would prefer to communicate in. Do not open with "is now a good time" or similar permission-only language.',
     'When the lead gives a preferred language in the introduction, switch immediately in your next spoken response. Do not wait for a tool result before speaking. Then call update_lead_status with preferredLanguage set to the spoken language as a fast background-style state save. Do not repeat the introduction or ask the language question again after the language is selected. If the lead already has preferred_language, greet them and continue in that language without asking again unless they ask to change it.',
@@ -188,9 +362,12 @@ function buildAgentPrompt(context: JsonRecord) {
     'If the lead sounds busy after the introduction, offer a quick SMS follow-up or a better time. Do not pressure them.',
     'Early in the conversation, use get_lead_context when you need lead, company, campaign, or setup context. Use tenant knowledge before answering company-specific service, policy, pricing, or process questions.',
     'The core purpose of the call is to understand what service the lead is interested in and move that interest toward qualification and booking. If service_interest is missing, generic, unclear, or the lead has not clearly expressed interest yet, do not abandon the workflow and do not mark them not_interested. Ask one concise clarifying question such as which service they wanted help with, what prompted the request, or what outcome they want. If tenant knowledge lists services, offer 2 to 4 likely service options. Once the interest is clear, save it with update_lead_status and continue qualification.',
+    'Some leads already filled out a form or import fields before the call. When lead context, custom_fields.importedLeadData, qualification notes, or qualification answers already contain useful answers, do not ask those questions again. Briefly confirm the important details only if needed, ask at most one missing must-have question, then move quickly toward booking.',
+    'Adapt to preferred_contact_channel. If the lead prefers call or phone, prioritize booking directly on the call. If the lead prefers email, keep the call brief, acknowledge their preference, offer to send details or a booking link by email when email consent/address exist, and only continue booking by phone if the lead is comfortable doing it now. If the lead changes their preference during the conversation, save it with update_lead_status and follow the new preference immediately.',
     'Before booking, qualify the lead with a short dynamic question set based on their service interest and tenant knowledge. Ask only relevant questions, one at a time, normally 3 to 7 questions. For insurance-like services, examples include marital/common-law status, children, home ownership, what they want to protect, free review interest, age range, and current insurance status. For other services, infer comparable qualification questions from the service and knowledge base.',
-    'After collecting qualification answers, call update_lead_status with qualificationQuestions, qualificationAnswers, qualificationSummary, qualificationStatus, qualificationScore when useful, and leadStage or schedulingState. Do not book until the lead has answered enough qualification questions, refuses, or clearly asks to skip qualification.',
-    'During an active call, treat every booking date the lead mentions as a future date by default. Use current_date, current_time, and current_timezone to resolve relative dates like today, tomorrow, Monday, next week, or later today to the next future occurrence. For month/day or weekday mentions without a year, choose the next future occurrence, never a past year. Never use old example dates or training-data dates. If the date/time is genuinely ambiguous, ask one short confirmation question before booking.',
+    'For pre-qualified or form-qualified leads, replace the normal long qualification flow with a fast booking flow: summarize what is already known in one short sentence, ask only the one most important missing question if any, then ask for a preferred appointment time.',
+    'After collecting or confirming qualification answers, call update_lead_status with qualificationQuestions, qualificationAnswers, qualificationSummary, qualificationStatus, qualificationScore when useful, and leadStage or schedulingState. Do not book until the lead has answered enough necessary questions, refuses, clearly asks to skip qualification, or the existing form/lead context already provides enough information to proceed.',
+    'During an active call, treat every booking date the lead mentions as a near-future date by default, not next year. Use current_date, current_time, and current_timezone to resolve relative dates like today, tomorrow, Monday, next week, or later today to the next near-future occurrence. If the lead gives a weekday or day number without a clear month, ask one short confirmation question for the exact month, day, year, and time before calling create_booking. Never use old example dates, training-data dates, or a far-future year to fill missing date parts.',
     'When the lead is interested or asks for next steps, your first attempt must be to book the appointment directly on the phone by asking for a preferred date/time and calling create_booking. Sending a booking link by SMS/email is only a fallback when the lead explicitly asks to choose a time later, asks for the link, refuses to pick a time on the call, or cannot decide.',
     'After a booking is created, SMS and email confirmation are handled by the booking tool when consent and provider configuration exist. If a confirmation channel fails, tell the lead which channel failed and provide the link verbally.',
     'Do not read, pronounce, or spell long URLs by default. Say that the meeting link will be sent by SMS/email. If the lead explicitly asks you to read a link aloud, read it slowly in short chunks.',
@@ -201,7 +378,7 @@ function buildAgentPrompt(context: JsonRecord) {
     `Tenant sender email: ${senderEmail}.`,
     `Booking provider: ${bookingProvider}. Booking URL or event reference: ${bookingUrl}.`,
     `Tool webhook URL: ${toolWebhookUrl || 'not configured'}.`,
-    'Runtime dynamic variables may include tenant_id, tenant_name, tenant_agent_id, agent_name, lead_id, lead_name, service_interest, preferred_language, booking_provider, booking_url, tenant_phone_number, sender_email, tool_webhook_url, current_date, current_time, and current_timezone.',
+    'Runtime dynamic variables may include tenant_id, tenant_name, tenant_agent_id, agent_name, lead_id, lead_name, service_interest, preferred_language, preferred_contact_channel, qualification_mode, lead_form_summary, booking_provider, booking_url, tenant_phone_number, sender_email, tool_webhook_url, current_date, current_time, and current_timezone.',
     'Use the configured webhook tools for get_lead_context, update_lead_status, check_availability, create_booking, send_sms, send_whatsapp, send_email, record_call_outcome, escalate_to_human, and mark_opt_out.',
   ].filter(Boolean).join('\n\n');
 }
@@ -232,6 +409,7 @@ function buildConversationConfig(context: JsonRecord, documents: JsonRecord[], t
     },
     tts: {
       voice_id: voiceId,
+      model_id: ELEVENLABS_EXPRESSIVE_TTS_MODEL_ID,
     },
   };
 }
@@ -246,10 +424,13 @@ function dynamicVariableDefaults(context: JsonRecord) {
     lead_name: 'Test Lead',
     service_interest: 'consultation',
     preferred_language: '',
+    preferred_contact_channel: 'call',
+    qualification_mode: 'ask_only_missing_then_book',
+    lead_form_summary: '',
     booking_provider: context.bookingIntegration?.provider || 'manual',
     booking_url: context.bookingIntegration?.booking_url || '',
     tenant_phone_number: context.phoneNumber?.phone_number || '',
-    sender_email: context.emailIdentity?.from_email || '',
+    sender_email: context.agent?.email_address || context.emailIdentity?.from_email || '',
     tool_webhook_url: elevenLabsToolWebhookUrl(),
     current_date: new Date().toISOString().slice(0, 10),
     current_time: new Date().toISOString(),
@@ -335,7 +516,7 @@ function elevenLabsToolDefinitions() {
       'create_booking',
       'Create a booking once the lead agrees to a time. If no time is agreed and a Calendly/booking link exists, use this to send the booking link by SMS when consent exists.',
       {
-        startTime: literal('string', 'ISO start time agreed with the lead. Resolve all spoken call dates to the next future occurrence by default. Omit only when sending the booking link instead.'),
+        startTime: literal('string', 'ISO start time agreed with the lead. Resolve spoken dates only after the month/day/time are clear. Do not guess a far-future year; ask for confirmation if month or year is uncertain. Omit only when sending the booking link instead.'),
         durationMinutes: literal('integer', 'Appointment duration in minutes. Default to 30 if unsure.'),
         timezone: literal('string', 'IANA timezone for the appointment, such as America/New_York.'),
         title: literal('string', 'Short meeting title based on the service interest.'),
@@ -370,6 +551,7 @@ function elevenLabsToolDefinitions() {
         leadStage: literal('string', 'Optional lead stage update.'),
         schedulingState: literal('string', 'Optional scheduling state, such as interested, scheduled, or booking_link_sent.'),
         preferredLanguage: literal('string', 'The lead spoken language preference, such as English, Spanish, French, Yoruba, Igbo, Hausa, Arabic, or Portuguese. Save exactly what the lead asks for.'),
+        preferredContactChannel: literal('string', 'Optional preferred contact channel the lead asks for, such as call, phone, email, sms, or whatsapp. Save it when the lead says they prefer a different follow-up channel.'),
         qualificationQuestions: literal('string', 'JSON or concise text list of the qualification questions asked in this conversation.'),
         qualificationAnswers: literal('string', 'JSON or concise text list of the lead answers to the qualification questions.'),
         qualificationSummary: literal('string', 'Short summary of the qualification result and why the lead is or is not ready to book.'),
@@ -481,20 +663,45 @@ function simplifyVoice(voice: JsonRecord) {
 }
 
 async function listElevenLabsVoices() {
-  const response = await elevenLabsRequest('https://api.elevenlabs.io/v2/voices?page_size=100', {
-    method: 'GET',
-  });
-  return (response?.voices || []).map(simplifyVoice).filter((voice: JsonRecord) => voice.voiceId);
+  const voices: JsonRecord[] = [];
+  let nextPageToken = '';
+
+  for (let page = 0; page < 10; page += 1) {
+    const url = new URL('https://api.elevenlabs.io/v2/voices');
+    url.searchParams.set('page_size', '100');
+    url.searchParams.set('sort', 'name');
+    url.searchParams.set('sort_direction', 'asc');
+    url.searchParams.set('include_total_count', 'true');
+    if (nextPageToken) url.searchParams.set('next_page_token', nextPageToken);
+
+    const response = await elevenLabsRequest(url.toString(), { method: 'GET' });
+    voices.push(...((response?.voices || []).map(simplifyVoice).filter((voice: JsonRecord) => voice.voiceId)));
+    if (!response?.has_more || !response?.next_page_token) break;
+    nextPageToken = response.next_page_token;
+  }
+
+  const unique = new Map<string, JsonRecord>();
+  for (const voice of voices) unique.set(voice.voiceId, voice);
+  return [...unique.values()].sort((left, right) => String(left.name || '').localeCompare(String(right.name || '')));
 }
 
 async function updateKnowledgeDocument(db: any, document: JsonRecord, patch: JsonRecord) {
-  const { data } = await db.database
-    .from('tenant_knowledge_documents')
+  const table = document.__knowledge_table || 'tenant_knowledge_documents';
+  let query = db.database
+    .from(table)
     .update({ ...patch, updated_at: new Date().toISOString() })
-    .eq('id', document.id)
-    .eq('tenant_id', document.tenant_id)
-    .select();
-  return data?.[0] || null;
+    .eq('id', document.id);
+  if (table === 'tenant_knowledge_documents') {
+    query = query.eq('tenant_id', document.tenant_id);
+  }
+  const { data } = await query.select();
+  const updated = data?.[0] || null;
+  return updated ? {
+    ...updated,
+    __knowledge_table: table,
+    __storage_bucket: document.__storage_bucket || (table === 'platform_knowledge_documents' ? 'platform-knowledge' : 'tenant-knowledge'),
+    __shared_source: document.__shared_source || null,
+  } : null;
 }
 
 async function createKnowledgeDocumentInElevenLabs(db: any, document: JsonRecord) {
@@ -515,10 +722,11 @@ async function createKnowledgeDocumentInElevenLabs(db: any, document: JsonRecord
       });
     } else if (document.source_type === 'file') {
       if (!document.storage_key) throw new Error('Stored file key is missing');
-      const { data: blob, error } = await db.storage.from('tenant-knowledge').download(document.storage_key);
+      const storageBucket = document.__storage_bucket || 'tenant-knowledge';
+      const { data: blob, error } = await db.storage.from(storageBucket).download(document.storage_key);
       if (error) throw new Error(error.message || 'Failed to download stored knowledge file');
       const formData = new FormData();
-      formData.append('file', blob, document.storage_key.split('/').pop() || name);
+      formData.append('file', blob, document.metadata?.originalFileName || document.storage_key.split('/').pop() || name);
       formData.append('name', name);
       providerDocument = await elevenLabsRequest('/convai/knowledge-base/file', {
         method: 'POST',
@@ -582,6 +790,7 @@ async function updateTenantAgent(db: any, agent: JsonRecord, patch: JsonRecord) 
 async function createOrUpdateAgent(db: any, context: JsonRecord, documents: JsonRecord[]) {
   const agent = context.agent;
   const name = safeName(`${context.tenant?.name || 'Tenant'} - ${agent.display_name || 'AI Agent'}`, 'Tenant agent');
+  const agentEmail = await resolveAgentEmailAddress(db, context);
   const toolIds = await syncElevenLabsWebhookTools();
   const tags = agentProviderTags(context);
   const payload = {
@@ -615,12 +824,15 @@ async function createOrUpdateAgent(db: any, context: JsonRecord, documents: Json
 
   const metadata = {
     ...(agent.metadata || {}),
+    emailAddress: agentEmail?.emailAddress || agent.email_address || null,
     elevenlabs: {
       ...((agent.metadata || {}).elevenlabs || {}),
       lastProvisionedAt: new Date().toISOString(),
       lastProvisionStatus: 'synced',
       name,
       promptVersion: agent.prompt_version || DEFAULT_PROMPT_VERSION,
+      ttsModelId: ELEVENLABS_EXPRESSIVE_TTS_MODEL_ID,
+      expressiveMode: true,
       dynamicVariableDefaults: dynamicVariableDefaults(context),
       knowledgeDocumentCount: knowledgeRefs(documents).length,
       toolIds,
@@ -629,6 +841,12 @@ async function createOrUpdateAgent(db: any, context: JsonRecord, documents: Json
 
   return updateTenantAgent(db, agent, {
     elevenlabs_agent_id: elevenlabsAgentId,
+    ...(agentEmail ? {
+      email_address: agentEmail.emailAddress,
+      email_local_part: agentEmail.emailLocalPart,
+      email_domain: agentEmail.emailDomain,
+      email_configured_at: agent.email_configured_at || new Date().toISOString(),
+    } : {}),
     prompt_version: agent.prompt_version || DEFAULT_PROMPT_VERSION,
     metadata,
   });
@@ -676,6 +894,7 @@ async function testAgentSetup(db: any, tenantId: string, agentId: string) {
     agent: {
       id: context.agent.id,
       displayName: context.agent.display_name,
+      emailAddress: context.agent.email_address || null,
       status: context.agent.status,
       elevenlabsAgentId: context.agent.elevenlabs_agent_id || null,
       hasProviderAgent: Boolean(context.agent.elevenlabs_agent_id),
@@ -697,6 +916,7 @@ export default async function(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return optionsResponse();
 
   const db = createInsForgeClient(req);
+  const adminDb = createInsForgeAdminClient();
   const url = new URL(req.url);
   const body = req.method === 'GET' ? {} : await req.json().catch(() => ({}));
   const action = url.searchParams.get('action') || body.action || 'status';
@@ -712,35 +932,38 @@ export default async function(req: Request): Promise<Response> {
     }
 
     const portalUser = await resolvePortalUser(db);
-    const tenantId = requireTenant(portalUser, body.tenantId || body.tenant_id);
+
+    if (action === 'list-voices') {
+      return jsonResponse({
+        success: true,
+        voices: await listElevenLabsVoices(),
+      });
+    }
+
+    const platformProfile = await resolvePlatformAdminProfile(db).catch(() => ({ isPlatformAdmin: false }));
+    const tenantId = requireTenant(portalUser, body.tenantId || body.tenant_id, platformProfile);
     const agentId = body.agentId || body.agent_id;
+    const workDb = adminDb || db;
 
     if (action === 'provision-agent') {
       return jsonResponse({
         success: true,
-        ...(await provisionAgent(db, tenantId, agentId, body.syncKnowledge !== false)),
+        ...(await provisionAgent(workDb, tenantId, agentId, body.syncKnowledge !== false)),
       });
     }
 
     if (action === 'sync-knowledge') {
-      const context = await loadTenantContext(db, tenantId, agentId);
+      const context = await loadTenantContext(workDb, tenantId, agentId);
       return jsonResponse({
         success: true,
-        ...(await syncKnowledgeDocuments(db, context.knowledgeDocuments)),
+        ...(await syncKnowledgeDocuments(workDb, context.knowledgeDocuments)),
       });
     }
 
     if (action === 'test-agent') {
       return jsonResponse({
         success: true,
-        setup: await testAgentSetup(db, tenantId, agentId),
-      });
-    }
-
-    if (action === 'list-voices') {
-      return jsonResponse({
-        success: true,
-        voices: await listElevenLabsVoices(),
+        setup: await testAgentSetup(workDb, tenantId, agentId),
       });
     }
 

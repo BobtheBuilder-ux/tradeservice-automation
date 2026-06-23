@@ -140,6 +140,7 @@ export default function CompanySettingsPage() {
   const [agentProviderBusy, setAgentProviderBusy] = useState(null);
   const [voiceOptions, setVoiceOptions] = useState([]);
   const [voiceLoading, setVoiceLoading] = useState(false);
+  const [voiceSearch, setVoiceSearch] = useState('');
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
   const [agentSetupResult, setAgentSetupResult] = useState(null);
@@ -275,6 +276,9 @@ export default function CompanySettingsPage() {
           label: selectedVoiceProfile.label,
           selectedVoiceName: selectedVoice?.name || null,
           selectedVoiceLabels: selectedVoice?.labels || null,
+          selectedVoicePreviewUrl: selectedVoice?.previewUrl || null,
+          selectedVoiceCategory: selectedVoice?.category || null,
+          selectedVoiceUseCase: selectedVoice?.useCase || null,
         },
         personality: {
           key: selectedPersonality.key,
@@ -458,8 +462,23 @@ export default function CompanySettingsPage() {
   const filteredVoiceOptions = useMemo(() => {
     const profile = voiceProfiles.find((item) => item.key === agentForm.voiceProfile) || voiceProfiles[0];
     const matches = voiceOptions.filter(profile.match);
-    return matches.length ? matches : voiceOptions;
-  }, [agentForm.voiceProfile, voiceOptions]);
+    const profileMatches = matches.length ? matches : voiceOptions;
+    const search = voiceSearch.trim().toLowerCase();
+    if (!search) return profileMatches;
+    return profileMatches.filter((voice) => [
+      voice.name,
+      voice.gender,
+      voice.accent,
+      voice.age,
+      voice.useCase,
+      voice.category,
+      voice.description,
+    ].filter(Boolean).join(' ').toLowerCase().includes(search));
+  }, [agentForm.voiceProfile, voiceOptions, voiceSearch]);
+  const selectedVoice = useMemo(
+    () => voiceOptions.find((voice) => voice.voiceId === agentForm.voiceId) || null,
+    [agentForm.voiceId, voiceOptions]
+  );
 
   if (loading || authLoading) {
     return (
@@ -746,6 +765,18 @@ export default function CompanySettingsPage() {
                       <option key={profile.key} value={profile.key}>{profile.label}</option>
                     ))}
                   </select>
+                  <div className="space-y-2 rounded-lg border border-border bg-surface-secondary p-3">
+                    <div className="flex items-center justify-between gap-2 text-xs text-text-muted">
+                      <span>{voiceLoading ? 'Loading ElevenLabs voices…' : `${voiceOptions.length} ElevenLabs voices loaded`}</span>
+                      {filteredVoiceOptions.length !== voiceOptions.length ? <span>{filteredVoiceOptions.length} shown</span> : null}
+                    </div>
+                    <input
+                      className="ops-input"
+                      placeholder="Search voices by name, accent, gender, or use case"
+                      value={voiceSearch}
+                      onChange={(event) => setVoiceSearch(event.target.value)}
+                    />
+                  </div>
                   <select
                     className="ops-select"
                     value={agentForm.voiceId}
@@ -756,9 +787,23 @@ export default function CompanySettingsPage() {
                       <option key={voice.voiceId} value={voice.voiceId}>
                         {voice.name}
                         {voice.gender || voice.accent ? ` — ${[voice.gender, voice.accent].filter(Boolean).join(', ')}` : ''}
+                        {voice.useCase ? ` — ${voice.useCase}` : ''}
                       </option>
                     ))}
                   </select>
+                  {selectedVoice ? (
+                    <div className="rounded-lg border border-border bg-surface-secondary px-3 py-2 text-xs text-text-secondary">
+                      <div className="font-medium text-text-primary">{selectedVoice.name}</div>
+                      <div className="mt-1">
+                        {[selectedVoice.gender, selectedVoice.accent, selectedVoice.age, selectedVoice.useCase, selectedVoice.category].filter(Boolean).join(' · ') || 'Voice details unavailable'}
+                      </div>
+                      {selectedVoice.previewUrl ? (
+                        <a className="mt-2 inline-flex text-accent hover:text-accent-hover" href={selectedVoice.previewUrl} target="_blank" rel="noreferrer">
+                          Preview voice
+                        </a>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <select
                     className="ops-select"
                     value={agentForm.personality}

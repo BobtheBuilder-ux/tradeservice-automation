@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Head from 'next/head';
+import { useRouter } from 'next/router';
 import { format } from 'date-fns';
 import {
   Activity,
@@ -15,6 +16,7 @@ import {
   Lock,
   Plus,
   ShieldCheck,
+  UploadCloud,
   UserCog,
 } from 'lucide-react';
 import SuperAdminShell from './SuperAdminShell';
@@ -22,6 +24,7 @@ import {
   createAssistedTenant,
   createPlatformKnowledgeDocument,
   getSuperAdminDashboardData,
+  uploadPlatformKnowledgeFile,
   upsertBusinessNiche,
   upsertTenantKnowledgeAssignment,
 } from '../lib/insforge-product';
@@ -150,6 +153,21 @@ function ProgressBar({ value }) {
   );
 }
 
+function titleFromFileName(fileName = '') {
+  const baseName = String(fileName || '')
+    .split(/[\\/]/)
+    .pop()
+    ?.replace(/\.[^.]+$/, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return baseName || '';
+}
+
+function pluralize(count, singular, plural = `${singular}s`) {
+  return count === 1 ? singular : plural;
+}
+
 function SimpleTable({ columns, rows, emptyText }) {
   if (!rows.length) return <EmptyState>{emptyText}</EmptyState>;
   return (
@@ -257,19 +275,25 @@ function Tenants({ data }) {
 }
 
 function TenantSetup({ data, reload, user }) {
+  const router = useRouter();
   const [form, setForm] = useState({ name: '', ownerEmail: '', industry: '', businessNiche: '', defaultTimezone: 'America/Toronto' });
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
 
   const handleSubmit = async (event) => {
     event.preventDefault();
+    if (!form.ownerEmail.trim()) {
+      setMessage('Owner email is required to create a claimable tenant account.');
+      return;
+    }
     setBusy(true);
     setMessage('');
     try {
       const result = await createAssistedTenant(user, form);
-      setMessage(`Assisted setup started for ${result.tenant.name}.`);
+      setMessage(`Assisted setup started for ${result.tenant.name}. ${form.ownerEmail.trim()} can claim this account on login.`);
       setForm({ name: '', ownerEmail: '', industry: '', businessNiche: '', defaultTimezone: 'America/Toronto' });
       await reload();
+      router.push(`/onboarding?mode=super_admin_assisted&tenantId=${encodeURIComponent(result.tenant.id)}`);
     } catch (error) {
       setMessage(error.message || 'Failed to create tenant');
     } finally {
@@ -285,11 +309,11 @@ function TenantSetup({ data, reload, user }) {
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block">
               <span className="mb-1 block text-xs font-medium text-text-secondary">Company name</span>
-              <input className="ops-input" value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} />
+              <input className="ops-input" required value={form.name} onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))} />
             </label>
             <label className="block">
               <span className="mb-1 block text-xs font-medium text-text-secondary">Owner email</span>
-              <input className="ops-input" value={form.ownerEmail} onChange={(event) => setForm((current) => ({ ...current, ownerEmail: event.target.value }))} />
+              <input className="ops-input" required type="email" value={form.ownerEmail} onChange={(event) => setForm((current) => ({ ...current, ownerEmail: event.target.value }))} />
             </label>
             <label className="block">
               <span className="mb-1 block text-xs font-medium text-text-secondary">Industry</span>
@@ -330,8 +354,10 @@ function TenantSetup({ data, reload, user }) {
 function KnowledgeLibrary({ data, reload, user }) {
   const [nicheForm, setNicheForm] = useState({ name: '', key: '', description: '', defaultPlaybookNotes: '' });
   const [docForm, setDocForm] = useState({ scope: 'global', nicheKey: '', title: '', sourceType: 'text', sourceUrl: '', bodyText: '' });
+  const [docFiles, setDocFiles] = useState([]);
   const [assignmentForm, setAssignmentForm] = useState({ tenantId: '', platformKnowledgeDocumentId: '', assignmentSource: 'super_admin_override' });
   const [message, setMessage] = useState('');
+  const [busyAction, setBusyAction] = useState('');
 
   const saveNiche = async (event) => {
     event.preventDefault();
@@ -343,10 +369,40 @@ function KnowledgeLibrary({ data, reload, user }) {
 
   const saveDocument = async (event) => {
     event.preventDefault();
-    await createPlatformKnowledgeDocument(user, docForm);
-    setDocForm({ scope: 'global', nicheKey: '', title: '', sourceType: 'text', sourceUrl: '', bodyText: '' });
-    setMessage('Shared knowledge document saved.');
-    await reload();
+    const formElement = event.currentTarget;
+    setBusyAction('document');
+    try {
+      if (docForm.sourceType === 'file') {
+        if (!docFiles.length) throw new Error('Choose at least one file to upload');
+        await Promise.all(docFiles.map((file) => uploadPlatformKnowledgeFile(user, file, {
+          ...docForm,
+          title: docFiles.length === 1 ? docForm.title : titleFromFileName(file.name),
+        })));
+      } else {
+        await createPlatformKnowledgeDocument(user, docForm);
+      }
+      setDocForm({ scope: 'global', nicheKey: '', title: '', sourceType: 'text', sourceUrl: '', bodyText: '' });
+      setDocFiles([]);
+      formElement.reset();
+      setMessage(docForm.sourceType === 'file'
+        ? `${docFiles.length} shared ${pluralize(docFiles.length, 'document')} uploaded.`
+        : 'Shared knowledge document saved.');
+      await reload();
+    } catch (error) {
+      setMessage(error.message || 'Failed to save shared knowledge document.');
+    } finally {
+      setBusyAction('');
+    }
+  };
+
+  const handleDocumentFileChange = (event) => {
+    const nextFiles = Array.from(event.target.files || []);
+    setDocFiles(nextFiles);
+    if (!nextFiles.length) return;
+    setDocForm((current) => ({
+      ...current,
+      title: current.title?.trim() || nextFiles.length > 1 ? current.title : titleFromFileName(nextFiles[0].name),
+    }));
   };
 
   const saveAssignment = async (event) => {
@@ -372,7 +428,7 @@ function KnowledgeLibrary({ data, reload, user }) {
             <button type="submit" className="ops-button-primary">Save Niche</button>
           </form>
         </Panel>
-        <Panel title="Global / Niche Document" icon={BookOpen}>
+        <Panel title="Global / Niche Document" icon={UploadCloud}>
           <form onSubmit={saveDocument} className="space-y-3">
             <select className="ops-select" value={docForm.scope} onChange={(event) => setDocForm((current) => ({ ...current, scope: event.target.value, nicheKey: event.target.value === 'global' ? '' : current.nicheKey }))}>
               <option value="global">Global</option>
@@ -383,8 +439,38 @@ function KnowledgeLibrary({ data, reload, user }) {
               {data.businessNiches.map((niche) => <option key={niche.key} value={niche.key}>{niche.name}</option>)}
             </select>
             <input className="ops-input" placeholder="Document title" value={docForm.title} onChange={(event) => setDocForm((current) => ({ ...current, title: event.target.value }))} />
-            <textarea className="ops-input h-24 py-2" placeholder="Document text" value={docForm.bodyText} onChange={(event) => setDocForm((current) => ({ ...current, bodyText: event.target.value }))} />
-            <button type="submit" className="ops-button-primary">Add Document</button>
+            <select className="ops-select" value={docForm.sourceType} onChange={(event) => setDocForm((current) => ({ ...current, sourceType: event.target.value, sourceUrl: '', bodyText: '' }))}>
+              <option value="text">Text</option>
+              <option value="url">URL</option>
+              <option value="file">File upload</option>
+            </select>
+            {docForm.sourceType === 'url' && (
+              <input className="ops-input" placeholder="https://example.com/playbook" value={docForm.sourceUrl} onChange={(event) => setDocForm((current) => ({ ...current, sourceUrl: event.target.value }))} />
+            )}
+            {docForm.sourceType === 'file' && (
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-text-secondary">Upload document</span>
+                <input
+                  className="ops-input py-2"
+                  type="file"
+                  multiple
+                  accept=".pdf,.doc,.docx,.txt,.md,.csv,application/pdf,text/plain,text/markdown,text/csv,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                  onChange={handleDocumentFileChange}
+                />
+                {docFiles.length > 0 && (
+                  <span className="mt-1 block text-xs text-text-muted">
+                    {docFiles.length === 1 ? docFiles[0].name : `${docFiles.length} files selected`}
+                  </span>
+                )}
+              </label>
+            )}
+            {docForm.sourceType === 'text' && (
+              <textarea className="ops-input h-24 py-2" placeholder="Document text" value={docForm.bodyText} onChange={(event) => setDocForm((current) => ({ ...current, bodyText: event.target.value }))} />
+            )}
+            <button type="submit" className="ops-button-primary" disabled={busyAction === 'document'}>
+              <UploadCloud className="h-4 w-4" />
+              <span>{busyAction === 'document' ? 'Saving...' : 'Add Document'}</span>
+            </button>
           </form>
         </Panel>
         <Panel title="Assign Shared Knowledge" icon={Layers}>
@@ -409,6 +495,7 @@ function KnowledgeLibrary({ data, reload, user }) {
             { key: 'title', label: 'Title', render: (row) => <span className="font-medium text-text-primary">{row.title}</span> },
             { key: 'scope', label: 'Scope', render: (row) => <StatusBadge value={row.scope} tone={row.scope === 'global' ? 'accent' : 'warning'} /> },
             { key: 'nicheKey', label: 'Niche', render: (row) => row.nicheKey || 'All' },
+            { key: 'sourceType', label: 'Source', render: (row) => <div><p className="capitalize text-text-secondary">{row.sourceType}</p><p className="max-w-48 truncate text-xs text-text-muted">{row.metadata?.originalFileName || row.sourceUrl || row.storageKey || 'Inline text'}</p></div> },
             { key: 'status', label: 'Status', render: (row) => <StatusBadge value={row.status} tone={statusTone(row.status)} /> },
             { key: 'version', label: 'Version', render: (row) => `v${row.version || 1}` },
           ]}

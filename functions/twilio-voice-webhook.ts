@@ -204,12 +204,88 @@ function serviceInterest(lead: JsonRecord) {
   return lead?.service_interest || lead?.service || lead?.interest || '';
 }
 
+function normalizePreferredContactChannel(value: any) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, '_');
+  if (['phone', 'voice', 'call', 'calls', 'phone_call'].includes(normalized)) return 'call';
+  if (['email', 'e_mail'].includes(normalized)) return 'email';
+  if (['sms', 'text', 'text_message'].includes(normalized)) return 'sms';
+  if (['whatsapp', 'wa'].includes(normalized)) return 'whatsapp';
+  return normalized || '';
+}
+
+function leadFormData(lead: JsonRecord) {
+  const customFields = lead?.custom_fields || {};
+  const imported = customFields.importedLeadData || customFields.formData || customFields.form_data || customFields.submission || {};
+  return imported && typeof imported === 'object' && !Array.isArray(imported) ? imported : {};
+}
+
+function compactValue(value: any) {
+  if (value === undefined || value === null) return '';
+  if (Array.isArray(value)) return value.map(compactValue).filter(Boolean).join(', ');
+  if (typeof value === 'object') return Object.entries(value)
+    .map(([key, entry]) => `${String(key).replace(/_/g, ' ')}: ${compactValue(entry)}`)
+    .filter((entry) => !entry.endsWith(': '))
+    .join('; ');
+  return String(value).trim();
+}
+
+function leadFormSummary(lead: JsonRecord) {
+  const formData = leadFormData(lead);
+  const entries = Object.entries(formData)
+    .map(([key, value]) => [String(key).replace(/_/g, ' '), compactValue(value)] as [string, string])
+    .filter(([, value]) => value && value.length <= 240)
+    .slice(0, 8);
+  const summaryParts = [
+    lead?.qualification_notes ? `qualification notes: ${compactValue(lead.qualification_notes)}` : '',
+    lead?.location_summary ? `location: ${compactValue(lead.location_summary)}` : '',
+    lead?.budget_range ? `budget: ${compactValue(lead.budget_range)}` : '',
+    ...entries.map(([key, value]) => `${key}: ${value}`),
+  ].filter(Boolean);
+  return summaryParts.join(' | ').slice(0, 1200);
+}
+
+function hasUsefulPreFilledLeadContext(lead: JsonRecord) {
+  if (!lead) return false;
+  const formData = leadFormData(lead);
+  const formAnswerCount = Object.values(formData).filter((value) => compactValue(value)).length;
+  const hasQualification = Boolean(
+    lead.qualification_notes
+    || (lead.qualification_status && !['unqualified', 'new', 'unknown'].includes(String(lead.qualification_status).toLowerCase()))
+    || lead.custom_fields?.aiQualification?.latest
+  );
+  return formAnswerCount >= 2 || hasQualification || Boolean(lead.location_summary || lead.budget_range);
+}
+
+function qualificationMode(lead: JsonRecord) {
+  if (hasUsefulPreFilledLeadContext(lead)) return 'form_prequalified_ask_only_missing_then_book';
+  return 'standard_short_dynamic_qualification';
+}
+
+function contactPreferenceInstruction(lead: JsonRecord) {
+  const preferred = normalizePreferredContactChannel(lead?.preferred_contact_channel);
+  if (preferred === 'email') {
+    return 'Lead preferred contact channel is email. Keep the call brief, acknowledge that preference, and offer to send the details or booking link by email if email consent/address exist. If they are willing to book now, continue by phone; otherwise send email and end politely.';
+  }
+  if (preferred === 'call') {
+    return 'Lead preferred contact channel is call/phone. Prioritize booking directly on this call and avoid pushing them to email unless they ask.';
+  }
+  if (preferred === 'sms') {
+    return 'Lead preferred contact channel is SMS/text. Keep the call brief and offer to send the booking link or recap by SMS if SMS consent exists. Continue booking by phone only if they want to do it now.';
+  }
+  if (preferred === 'whatsapp') {
+    return 'Lead preferred contact channel is WhatsApp. Keep the call brief and offer WhatsApp follow-up only if WhatsApp consent and tenant capability exist. Continue booking by phone only if they want to do it now.';
+  }
+  return 'Lead preferred contact channel is not explicit. Use the current call to book if they are comfortable, and adapt immediately if they ask for email, SMS, WhatsApp, or a later call.';
+}
+
 function buildCallFirstMessage(rows: JsonRecord) {
   const agentName = rows.agent?.display_name || 'the AI assistant';
   const tenantName = rows.tenant?.name || 'the company';
   const service = serviceInterest(rows.lead);
   const reason = service ? `your recent request about ${service}` : 'your recent request';
   const preferredLanguage = rows.lead?.preferred_language;
+  const preferredContactChannel = normalizePreferredContactChannel(rows.lead?.preferred_contact_channel);
+  const prefilled = hasUsefulPreFilledLeadContext(rows.lead);
   const actionPayload = rows.bobAction?.payload || {};
   const sessionMetadata = rows.session?.metadata || {};
   if (actionPayload.reboundCall || actionPayload.rebound_call || sessionMetadata.reboundCall || sessionMetadata.rebound_call) {
@@ -217,6 +293,12 @@ function buildCallFirstMessage(rows: JsonRecord) {
   }
   if (preferredLanguage) {
     return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}, and I’ll continue in ${preferredLanguage} as your preferred language.`;
+  }
+  if (preferredContactChannel === 'email') {
+    return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling briefly about ${reason}. I see email may be your preferred contact method, so I can keep this quick and help book the next step or send the details by email.`;
+  }
+  if (prefilled) {
+    return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}. I have the details you already shared, so I’ll keep this quick and help book the next step. Before we continue, what language would you prefer we speak in?`;
   }
   return `Hi ${leadDisplayName(rows.lead)}, this is ${agentName} from ${tenantName}. I’m calling about ${reason}, and I can help with the next step. Before we continue, what language would you prefer we speak in?`;
 }
@@ -228,6 +310,8 @@ function buildCallPrompt(rows: JsonRecord) {
   const booking = rows.bookingIntegration || {};
   const bookingProvider = booking.provider || 'manual';
   const bookingPath = booking.booking_url || booking.event_type_id || 'not configured';
+  const formSummary = leadFormSummary(rows.lead);
+  const mode = qualificationMode(rows.lead);
 
   return [
     `You are ${agentName}, an AI outreach and booking assistant for ${tenantName}.`,
@@ -236,18 +320,24 @@ function buildCallPrompt(rows: JsonRecord) {
       ? 'This is a rebound call after an interrupted/drop event. Start by apologizing briefly for the interruption, then continue the same purpose without restarting awkwardly.'
       : '',
     'Open with your identity, company, and reason for calling. Never begin with "is now a good time" or a similar permission-only line.',
+    'Use expressive speech naturally. Match your tone to the lead: calm and reassuring when they sound worried, warm when they are positive, and clear and measured when explaining details. Keep delivery professional and never overact.',
     'In the introduction, ask what language the lead would prefer to communicate in unless preferred_language is already set. When the lead answers, switch immediately in your next spoken response. Do not wait for a tool result before speaking. Then call update_lead_status with preferredLanguage as a fast state save. Do not repeat the introduction or ask the language question again after the language is selected.',
     'If the lead asks to switch language mid-call, never end the call and never restart the introduction. Respond within one short sentence in the requested language, then continue all subsequent responses in that language from the current point in the conversation. Save preferredLanguage with update_lead_status after the spoken acknowledgement, but do not let the save delay the language switch.',
     'Never end the call because of background noise, cross-talk, multiple interruptions, silence, or a language change. Treat interruptions as normal conversation. If the lead is silent, patiently prompt again instead of ending.',
     rows.lead?.preferred_language ? `Lead preferred language: ${rows.lead.preferred_language}. Continue in this language unless the lead changes it.` : 'Lead preferred language is not set yet.',
+    contactPreferenceInstruction(rows.lead),
     'After the lead responds, keep the conversation warm, concise, and useful. If they are busy, offer to send an SMS follow-up or schedule a better time.',
     'Use the tenant knowledge base for company-specific services, process, pricing guidance, objections, and policies. If knowledge is missing, do not invent details; offer to have the team follow up.',
     'Use get_lead_context before answering detailed lead/setup questions, booking, or sending follow-up messages.',
     `Booking provider: ${bookingProvider}. Booking path: ${bookingPath}.`,
+    formSummary ? `Lead already provided this form/context data. Use it as answered information and do not ask it again: ${formSummary}.` : '',
+    mode === 'form_prequalified_ask_only_missing_then_book'
+      ? 'This lead appears pre-qualified or form-qualified. Do not run the long question-and-answer flow. Briefly confirm the main known details if needed, ask only one missing must-have question, then ask for a preferred appointment time and book as quickly as possible.'
+      : 'This lead does not have enough pre-filled qualification context. Use a short dynamic qualification flow before booking.',
     'The core purpose of this outbound call is to understand the lead’s service interest and move that interest toward qualification and booking. If service_interest is missing, generic, unclear, or the lead has not clearly expressed interest yet, do not abandon the workflow and do not mark them not_interested. Ask one concise clarifying question such as which service they wanted help with, what prompted the request, or what outcome they want. If tenant knowledge lists services, offer 2 to 4 likely service options. Once the interest is clear, save it with update_lead_status and continue qualification.',
-    'Before booking, qualify the lead with a short dynamic question set based on their service interest and tenant knowledge. Ask only relevant questions, one at a time, normally 3 to 7 questions. For insurance-like services, examples include marital/common-law status, children, home ownership, what they want to protect, free review interest, age range, and current insurance status. For other services, infer comparable qualification questions from the service and knowledge base.',
+    'Before booking, qualify the lead with a short dynamic question set based on their service interest and tenant knowledge only when the form/context does not already answer the needed questions. Ask only relevant missing questions, one at a time. For pre-filled leads, skip repeated questions and move to booking quickly.',
     'After collecting qualification answers, call update_lead_status with qualificationQuestions, qualificationAnswers, qualificationSummary, qualificationStatus, qualificationScore when useful, and leadStage or schedulingState.',
-    'During this active call, treat every booking date the lead mentions as a future date by default. Use current_date, current_time, and current_timezone to resolve relative dates like today, tomorrow, Monday, next week, or later today to the next future occurrence. For month/day or weekday mentions without a year, choose the next future occurrence, never a past year. Never use old example dates or training-data dates. If the date/time is genuinely ambiguous, ask one short confirmation question before booking.',
+    'During this active call, treat every booking date the lead mentions as a near-future date by default, not next year. Use current_date, current_time, and current_timezone to resolve relative dates like today, tomorrow, Monday, next week, or later today to the next near-future occurrence. If the lead gives a weekday or day number without a clear month, ask one short confirmation question for the exact month, day, year, and time before calling create_booking. Never use old example dates, training-data dates, or a far-future year to fill missing date parts.',
     'When the lead is qualified, interested, or clearly ready to book, your first attempt must be to book directly on the phone by asking for a preferred date/time and calling create_booking. Sending a booking link by SMS/email is only a fallback when the lead explicitly asks to choose a time later, asks for the link, refuses to pick a time on the call, or cannot decide.',
     'If a booking is created, the tool handles SMS confirmation and reminders when SMS consent exists.',
     'Do not read, pronounce, or spell long URLs by default. Say that the meeting link will be sent by SMS/email. If the lead explicitly asks you to read a link aloud, read it slowly in short chunks.',
@@ -288,6 +378,8 @@ function buildConversationConfigOverride(rows: JsonRecord) {
 
 function buildCallDynamicVariables(session: JsonRecord, rows: JsonRecord) {
   const service = serviceInterest(rows.lead);
+  const preferredContactChannel = normalizePreferredContactChannel(rows.lead?.preferred_contact_channel);
+  const formSummary = leadFormSummary(rows.lead);
   return {
     tenant_id: dynamicString(session.tenant_id),
     tenant_name: dynamicString(rows.tenant?.name),
@@ -299,8 +391,12 @@ function buildCallDynamicVariables(session: JsonRecord, rows: JsonRecord) {
     service_interest: dynamicString(service),
     service_interest_status: dynamicString(service ? 'known' : 'missing_or_unclear'),
     preferred_language: dynamicString(rows.lead?.preferred_language),
+    preferred_contact_channel: dynamicString(preferredContactChannel),
+    qualification_mode: dynamicString(qualificationMode(rows.lead)),
+    lead_form_summary: dynamicString(formSummary),
+    form_context_available: dynamicString(formSummary ? 'true' : 'false'),
     language_switch_mode: 'instant_spoken_ack_then_fast_save',
-    booking_date_default: 'future_occurrence',
+    booking_date_default: 'near_future_confirm_unclear_month_year',
     booking_context: dynamicString(rows.lead?.preferred_meeting_window),
     booking_provider: dynamicString(rows.bookingIntegration?.provider),
     booking_url: dynamicString(rows.bookingIntegration?.booking_url),
