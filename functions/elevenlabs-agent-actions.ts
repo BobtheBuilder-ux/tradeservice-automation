@@ -359,7 +359,7 @@ function buildAgentPrompt(context: JsonRecord) {
     'If the lead asks to switch language mid-call, never end the call and never restart the introduction. Respond within one short sentence in the requested language, then continue all subsequent responses in that language from the current point in the conversation. Save preferredLanguage with update_lead_status after the spoken acknowledgement, but do not let the save delay the language switch. Do not save English as a default unless the lead explicitly asks for English.',
     'Never end the call because of background noise, cross-talk, multiple interruptions, silence, or a language change. Treat interruptions as normal conversation. If the lead is silent, patiently prompt again instead of ending.',
     'If the lead sounds busy after the introduction, offer a quick SMS follow-up or a better time. Do not pressure them.',
-    'Early in the conversation, use get_lead_context when you need lead, company, campaign, or setup context. Use tenant knowledge before answering company-specific service, policy, pricing, or process questions.',
+    'Use the runtime lead variables first. Only call get_lead_context when important lead, company, campaign, or setup context is missing or ambiguous. Do not call get_lead_context just because the lead said yes to booking or gave a day/time.',
     'The core purpose of the call is booking. Treat service_interest, imported coverage_type_needed, imported service/interest, lead_form_summary, qualification notes, and location as enough reason/context to proceed. Do not ask why the lead is interested when those fields exist. Only ask a service-interest clarifier when all lead/form interest fields are missing.',
     'Some leads already filled out a form or import fields before the call. When lead context, custom_fields.importedLeadData, qualification notes, or qualification answers already contain useful answers, do not ask those questions again. Use the booking-first insurance form script, mention service_interest or coverage_type_needed, then ask whether they want to book a consultation with one of our experts.',
     'Adapt to preferred_contact_channel. If the lead prefers call or phone, prioritize booking directly on the call. If the lead prefers email, keep the call brief, acknowledge their preference, offer to send details or a booking link by email when email consent/address exist, and only continue booking by phone if the lead is comfortable doing it now. If the lead changes their preference during the conversation, save it with update_lead_status and follow the new preference immediately.',
@@ -368,7 +368,7 @@ function buildAgentPrompt(context: JsonRecord) {
     'After collecting or confirming qualification answers, call update_lead_status with qualificationQuestions, qualificationAnswers, qualificationSummary, qualificationStatus, qualificationScore when useful, and leadStage or schedulingState. Do not book until the lead has answered enough necessary questions, refuses, clearly asks to skip qualification, or the existing form/lead context already provides enough information to proceed.',
     'During an active call, treat every booking date the lead mentions as a near-future date by default, not next year. Use current_date, current_time, and current_timezone to resolve relative dates like today, tomorrow, Monday, next week, or later today to the next near-future occurrence. If the lead gives a weekday or day number without a clear month, ask one short confirmation question for the exact month, day, year, and time before calling create_booking. Never use old example dates, training-data dates, or a far-future year to fill missing date parts.',
     'After the introduction for a form-filled lead, move immediately to confirming a booking. If the lead says yes, ask one scheduling question only: "Great — what day and time will you be available?" If the lead gives both date and time, call create_booking immediately. Do not call check_availability first during a live call. Sending a booking link by SMS/email is only a fallback when the lead explicitly asks to choose a time later, asks for the link, refuses to pick a time on the call, or cannot decide.',
-    'After a booking is created, SMS and email confirmation are handled by the booking tool when consent and provider configuration exist. If a confirmation channel fails, tell the lead which channel failed and provide the link verbally.',
+    'After a booking is created, say the consultation is confirmed and that meeting details/reminders will be sent by the allowed channels. Do not wait for delivery confirmation during the live call.',
     'Do not read, pronounce, or spell long URLs by default. Say that the meeting link will be sent by SMS/email. If the lead explicitly asks you to read a link aloud, read it slowly in short chunks.',
     'If the lead asks for a text, follow-up, booking link, or recap, use send_sms only when SMS consent is present. If the lead asks for email, use send_email only when email consent and an email address are present. Respect STOP/opt-out immediately.',
     'Stay concise, warm, truthful, and operational. If tenant knowledge is missing, say you will have the team follow up instead of inventing facts.',
@@ -522,7 +522,9 @@ function elevenLabsToolDefinitions() {
         title: literal('string', 'Short meeting title based on the service interest.'),
         meetingType: literal('string', 'Meeting type, usually consultation.'),
         message: literal('string', 'Optional SMS text to send with the booking link if no time was agreed.'),
-      }
+      },
+      [],
+      10
     ),
     webhookToolConfig(
       'send_sms',

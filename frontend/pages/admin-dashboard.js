@@ -33,7 +33,6 @@ import {
   Briefcase,
   Layers,
   Library,
-  Sparkles,
   RefreshCw
 } from 'lucide-react';
 import { format } from 'date-fns';
@@ -128,7 +127,7 @@ export default function AdminDashboard() {
     totalLeads: 0
   });
 
-  // Phase 18 super-admin setup and layered knowledge state
+  // Legacy super-admin setup and layered knowledge state
   const [platformTenants, setPlatformTenants] = useState([]);
   const [businessNiches, setBusinessNiches] = useState([]);
   const [platformKnowledgeDocuments, setPlatformKnowledgeDocuments] = useState([]);
@@ -898,13 +897,6 @@ export default function AdminDashboard() {
               })}
             </nav>
 
-            <div className="mt-auto rounded-lg border border-border bg-surface-secondary p-3">
-              <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-text-primary">
-                <Sparkles className="h-4 w-4 text-accent" />
-                <span>Phase 18</span>
-              </div>
-              <p className="text-xs text-text-muted">Super-admin setup, layered knowledge, and niche assignment controls.</p>
-            </div>
           </aside>
 
           <div className="min-w-0 flex-1">
@@ -912,7 +904,7 @@ export default function AdminDashboard() {
               <div className="flex min-h-20 flex-col gap-4 px-4 py-4 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
                 <div className="min-w-0">
                   <h1 className="text-2xl font-semibold text-text-primary">Overview Dashboard</h1>
-                  <p className="mt-1 text-sm text-text-muted">Monitor leads, bookings, AI performance, and platform setup in one place.</p>
+                  <p className="mt-1 text-sm text-text-muted">Monitor leads, bookings, AI performance, and tenant activity in one place.</p>
                 </div>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
                   <div className="relative">
@@ -2141,7 +2133,7 @@ export default function AdminDashboard() {
             </div>
           )}
 
-          {/* Phase 18 Platform Setup Tab */}
+          {/* Legacy Platform Setup Tab */}
           {activeTab === 'platform' && platformAdminProfile.isPlatformAdmin && (
             <div className="space-y-6">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

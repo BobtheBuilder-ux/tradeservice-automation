@@ -793,41 +793,6 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
       metadata: { provider: booking.provider, bookingUrl: booking.booking_url, eventTypeId: booking.event_type_id || null },
     });
 
-    let smsConfirmationSent = false;
-    let smsError: string | null = null;
-    let emailConfirmationSent = false;
-    let emailError: string | null = null;
-    try {
-      assertLeadAllowsChannel(context.lead, 'sms');
-      await sendSms(db, context, {
-        message: firstValue(
-          input.message,
-          input.smsMessage,
-          input.sms_message,
-          `Here is the booking link to choose a time that works for you: ${booking.booking_url}`
-        ),
-      });
-      smsConfirmationSent = true;
-    } catch (error) {
-      smsError = safeError(error, 'Booking link SMS was not sent');
-    }
-
-    try {
-      await sendBookingEmail(db, context, {
-        emailType: 'booking_link',
-        meetingUrl: booking.booking_url,
-        bookingUrl: booking.booking_url,
-        message: firstValue(
-          input.emailMessage,
-          input.email_message,
-          `Here is the booking link to choose a time that works for you: ${booking.booking_url}`
-        ),
-      });
-      emailConfirmationSent = true;
-    } catch (error) {
-      emailError = safeError(error, 'Booking link email was not sent');
-    }
-
     return {
       success: true,
       mode: booking.provider === 'calendly' ? 'calendly_link' : 'booking_link',
@@ -835,10 +800,10 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
       bookingUrl: booking.booking_url,
       eventTypeId: booking.event_type_id || null,
       requiresLeadSelfSchedule: true,
-      smsConfirmationSent,
-      smsError,
-      emailConfirmationSent,
-      emailError,
+      smsConfirmationSent: false,
+      smsError: 'Booking link delivery is not sent inside create_booking during live calls. Use send_sms only if the lead explicitly asks for a text link and SMS consent exists.',
+      emailConfirmationSent: false,
+      emailError: 'Booking link delivery is not sent inside create_booking during live calls. Use send_email only if the lead explicitly asks for an email link and email consent exists.',
     };
   }
 
@@ -886,7 +851,9 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
   );
   const meetingUrl = configuredMeetingLink || null;
   const title = firstValue(input.title, `Consultation with ${publicLead(context.lead).name || 'lead'}`);
+  const formattedTime = start.toLocaleString('en-US', { timeZone: context.tenant.default_timezone || 'UTC', dateStyle: 'medium', timeStyle: 'short' });
 
+  // First do only the minimum required to return quickly: create meeting and update lead status
   const rows = await unwrap(
     await db.database.from('meetings').insert([{
       tenant_id: context.tenantId,
@@ -945,7 +912,6 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
     },
   });
 
-  const formattedTime = start.toLocaleString('en-US', { timeZone: context.tenant.default_timezone || 'UTC', dateStyle: 'medium', timeStyle: 'short' });
   const reminderRows: JsonRecord[] = [];
   const reminderDefinitions = [
     { hours: 0, method: 'email', type: 'confirmation' },
@@ -954,10 +920,12 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
     { hours: 24, method: 'sms' },
     { hours: 1, method: 'sms' },
   ];
+  const queuedAt = Date.now();
   for (const reminder of reminderDefinitions) {
-    const scheduledFor = new Date(start.getTime() - reminder.hours * 60 * 60 * 1000);
     const immediate = reminder.hours === 0;
-    if (immediate) scheduledFor.setTime(Date.now());
+    const scheduledFor = immediate
+      ? new Date(queuedAt)
+      : new Date(start.getTime() - reminder.hours * 60 * 60 * 1000);
     const hasConsent = shouldQueueBookingConfirmation(context.lead, reminder.method as 'email' | 'sms');
     reminderRows.push({
       tenant_id: context.tenantId,
@@ -965,10 +933,11 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
       reminder_type: reminder.type || `${reminder.hours}h`,
       delivery_method: reminder.method,
       scheduled_for: scheduledFor.toISOString(),
-      status: scheduledFor.getTime() > Date.now() && hasConsent ? 'pending' : 'skipped',
+      status: hasConsent && (immediate || scheduledFor.getTime() > queuedAt) ? 'pending' : 'skipped',
       error_message: hasConsent ? null : `Missing ${reminder.method} consent or contact details`,
     });
   }
+
   await unwrap(
     await db.database.from('meeting_reminders').insert(reminderRows),
     'Failed to schedule booking reminders'

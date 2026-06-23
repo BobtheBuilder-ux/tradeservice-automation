@@ -418,7 +418,7 @@ function buildCallPrompt(rows: JsonRecord) {
     contactPreferenceInstruction(rows.lead),
     'After the lead responds, keep the conversation warm, concise, and useful. If they are busy, offer to send an SMS follow-up or schedule a better time.',
     'Use the tenant knowledge base for company-specific services, process, pricing guidance, objections, and policies. If knowledge is missing, do not invent details; offer to have the team follow up.',
-    'Use get_lead_context before answering detailed lead/setup questions, booking, or sending follow-up messages.',
+    'Use the runtime lead variables first. Only call get_lead_context when important lead, company, campaign, or setup context is missing or ambiguous. Do not call get_lead_context just because the lead said yes to booking or gave a day/time.',
     `Booking provider: ${bookingProvider}. Booking path: ${bookingPath}.`,
     formSummary ? `Lead already provided this form/context data. Use it as answered information and do not ask it again: ${formSummary}.` : '',
     mode === 'form_prequalified_ask_only_missing_then_book'
@@ -429,7 +429,7 @@ function buildCallPrompt(rows: JsonRecord) {
     'After collecting qualification answers, call update_lead_status with qualificationQuestions, qualificationAnswers, qualificationSummary, qualificationStatus, qualificationScore when useful, and leadStage or schedulingState.',
     'During this active call, treat every booking date the lead mentions as a near-future date by default, not next year. Use current_date, current_time, and current_timezone to resolve relative dates like today, tomorrow, Monday, next week, or later today to the next near-future occurrence. If the lead gives a weekday or day number without a clear month, ask one short confirmation question for the exact month, day, year, and time before calling create_booking. Never use old example dates, training-data dates, or a far-future year to fill missing date parts.',
     'After the introduction for a form-filled lead, move immediately to confirming a booking. If they say yes, okay, sure, sounds good, or otherwise agrees but does not give a time, ask one scheduling question only: "Great — what day and time will you be available?" If the lead gives both date and time, call create_booking immediately. Do not call check_availability first during a live call.',
-    'If a booking is created, the tool handles SMS confirmation and reminders when SMS consent exists.',
+    'If a booking is created, say the consultation is confirmed and that meeting details/reminders will be sent by the allowed channels. Do not wait for delivery confirmation during the live call.',
     'Do not read, pronounce, or spell long URLs by default. Say that the meeting link will be sent by SMS/email. If the lead explicitly asks you to read a link aloud, read it slowly in short chunks.',
     'Use send_sms for requested texts, recaps, booking links, or follow-ups only when SMS consent exists. Respect opt-outs immediately.',
     'Record outcomes with record_call_outcome before ending when practical.',

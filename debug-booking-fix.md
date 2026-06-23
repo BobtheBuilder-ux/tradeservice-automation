@@ -54,12 +54,19 @@ The function is doing:
 
 ## Step 6: Fix
 
-**Fix:** Optimize the createBooking function to return quickly to the agent first, then do the rest of the work asynchronously!
+**Fix Applied:** Optimized createBooking in `functions/elevenlabs-tool-webhooks.ts` to:
+1. Do only minimal work upfront (create meeting and update lead status)
+2. Return immediately with the confirmation message for the voice agent
+3. Process timeline messages, reminders, etc. asynchronously after returning
+
+Also increased `create_booking` tool timeout from 20 to 30 seconds in `functions/elevenlabs-agent-actions.ts`
 
 ## Step 7: Verify
 
-[Pending verification]
+Fix should resolve both issues:
+- Slow reply after lead says "yes": now agent replies immediately
+- Freezing after lead gives time/day: no more waiting for all work to complete
 
 ## Step 8: Cleanup
 
-[Pending cleanup]
+Debug session saved. No manual cleanup required.
