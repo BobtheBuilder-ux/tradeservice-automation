@@ -564,6 +564,11 @@ function escapeHtml(value: unknown) {
     .replace(/'/g, '&#039;');
 }
 
+function compactText(value: unknown, maxLength = 1200) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
 function safeSenderName(value: unknown) {
   return String(value || '').trim().replace(/[<>]/g, '').slice(0, 80);
 }
@@ -596,6 +601,83 @@ function savedAgentEmail(agent?: any) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : '';
 }
 
+function knowledgeExcerpt(row: JsonRecord, scope: string) {
+  const body = compactText(row.body_text || row.metadata?.extractedText || row.metadata?.extracted_text || '', 1200);
+  const reference = !body && row.source_url ? `Reference URL: ${row.source_url}` : '';
+  const fileReference = !body && (row.metadata?.originalFileName || row.storage_key)
+    ? `Uploaded document reference: ${row.metadata?.originalFileName || row.storage_key}`
+    : '';
+  const content = body || reference || fileReference;
+  if (!content) return null;
+  return {
+    scope,
+    title: row.title || 'Knowledge document',
+    sourceType: row.source_type || null,
+    content,
+    hasExcerpt: Boolean(body),
+  };
+}
+
+async function loadKnowledgeContext(db: any, tenant: any, agent: any) {
+  if (!tenant?.id) return [];
+  const excerpts: JsonRecord[] = [];
+  const addRows = (rows: any[], scope: string) => {
+    for (const row of rows || []) {
+      const excerpt = knowledgeExcerpt(row, scope);
+      if (excerpt) excerpts.push(excerpt);
+      if (excerpts.length >= 12) break;
+    }
+  };
+
+  try {
+    const tenantRows = await unwrap(
+      await db.database
+        .from('tenant_knowledge_documents')
+        .select('title,body_text,source_type,source_url,storage_key,status,tenant_agent_id,metadata,updated_at')
+        .eq('tenant_id', tenant.id)
+        .in('status', ['ready', 'uploaded'])
+        .order('updated_at', { ascending: false })
+        .limit(20),
+      'Failed to load tenant knowledge context'
+    );
+    addRows((tenantRows || []).filter((row: any) => !row.tenant_agent_id || row.tenant_agent_id === agent?.id), 'tenant');
+  } catch {
+    // Knowledge context should not block queued delivery.
+  }
+
+  try {
+    const assignments = await unwrap(
+      await db.database
+        .from('tenant_knowledge_assignments')
+        .select('platform_knowledge_document_id')
+        .eq('tenant_id', tenant.id)
+        .eq('status', 'active')
+        .or(agent?.id ? `tenant_agent_id.is.null,tenant_agent_id.eq.${agent.id}` : 'tenant_agent_id.is.null')
+        .limit(100),
+      'Failed to load shared knowledge assignments'
+    );
+    const assignedIds = [...new Set((assignments || []).map((row: any) => row.platform_knowledge_document_id).filter(Boolean))];
+    const platformRows = await unwrap(
+      await db.database
+        .from('platform_knowledge_documents')
+        .select('id,title,scope,niche_key,body_text,source_type,source_url,storage_key,status,metadata,updated_at')
+        .in('status', ['ready', 'uploaded'])
+        .order('updated_at', { ascending: false })
+        .limit(80),
+      'Failed to load platform knowledge context'
+    );
+    addRows((platformRows || []).filter((row: any) => (
+      row.scope === 'global'
+      || (tenant.business_niche && row.scope === 'niche' && row.niche_key === tenant.business_niche)
+      || assignedIds.includes(row.id)
+    )), 'platform');
+  } catch {
+    // Shared knowledge is optional for message generation.
+  }
+
+  return excerpts.slice(0, 12);
+}
+
 function platformEmailSender(agent?: any) {
   const fallbackEmail = Deno.env.get('EMAIL_FROM');
   if (!fallbackEmail) throw new Error('EMAIL_FROM is not configured');
@@ -620,7 +702,7 @@ function extractOutputText(response: any) {
     .join('');
 }
 
-async function draftQueuedEmail(input: { tenant?: any; agent?: any; lead: any; message: string }) {
+async function draftQueuedEmail(input: { tenant?: any; agent?: any; lead: any; message: string; knowledgeContext?: JsonRecord[] }) {
   const apiKey = Deno.env.get('OPENAI_API_KEY');
   const service = spokenField(leadServiceInterest(input.lead) || 'insurance coverage');
   const fallbackSubject = `Consultation about ${service}`;
@@ -656,6 +738,8 @@ async function draftQueuedEmail(input: { tenant?: any; agent?: any; lead: any; m
         'Primary goal: use this intro format: "I’m [agent name]. You filled our form on insurance, and I see you’re interested in [service_interest or coverage_type_needed]. Would you like to book a consultation with one of our experts?"',
         'If the lead replies yes later, ask what day and time they will be available.',
         'Do not ask long qualification questions when the lead already provided context.',
+        'Use knowledgeContext as source-of-truth context for services, policies, objections, offers, qualification guidance, and booking rules.',
+        'If a knowledge item is only a file or URL reference without an excerpt, do not claim details from its unseen contents.',
         'Never invent prices, promises, availability, policies, discounts, or booking links.',
         'Use only simple safe HTML tags: p, strong, em, ul, li, a, br.',
       ].join(' '),
@@ -671,6 +755,7 @@ async function draftQueuedEmail(input: { tenant?: any; agent?: any; lead: any; m
           qualificationNotes: input.lead?.qualification_notes || null,
           preferredContactChannel: input.lead?.preferred_contact_channel || null,
         },
+        knowledgeContext: input.knowledgeContext || [],
         requestedMessage: input.message,
       }),
       text: {
@@ -743,7 +828,8 @@ async function sendTenantEmailDirect(db: any, input: {
     : await ensureLeadConversation(db, input.tenantId, input.lead, 'email');
   const conversationId = input.conversationId || conversation?.id || null;
   const sender = platformEmailSender(input.agent);
-  const draft = await draftQueuedEmail({ tenant: input.tenant, agent: input.agent, lead: input.lead, message: input.message });
+  const knowledgeContext = await loadKnowledgeContext(db, input.tenant, input.agent);
+  const draft = await draftQueuedEmail({ tenant: input.tenant, agent: input.agent, lead: input.lead, message: input.message, knowledgeContext });
   const resend = await sendResendEmail({ sender, to: input.lead.email, draft });
   const now = nowIso();
 

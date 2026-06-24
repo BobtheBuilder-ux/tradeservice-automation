@@ -1019,7 +1019,6 @@ async function sendEmail(db: any, context: JsonRecord, input: JsonRecord) {
   assertLeadAllowsChannel(context.lead, 'email');
   const toEmail = firstValue(input.to, input.toEmail, input.to_email, context.lead.email);
   if (!toEmail) throw new Error('Lead email is required');
-  return sendDirectTenantEmail(db, context, { ...input, to: toEmail });
   const functionBaseUrl = Deno.env.get('INSFORGE_FUNCTION_BASE_URL');
   if (!functionBaseUrl) throw new Error('Email delivery function is not configured');
   const emailActionsSecret = Deno.env.get('EMAIL_ACTIONS_SECRET') || Deno.env.get('ELEVENLABS_TOOL_SECRET');

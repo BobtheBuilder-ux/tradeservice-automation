@@ -29,6 +29,38 @@ function safeError(error: any, fallback = 'ElevenLabs agent action failed') {
   return message.replace(/xi-api-key=[^\s&]+/gi, 'xi-api-key=[redacted]');
 }
 
+function compactJson(value: unknown) {
+  try {
+    return JSON.stringify(value).slice(0, 600);
+  } catch {
+    return String(value || '').slice(0, 600);
+  }
+}
+
+function elevenLabsErrorMessage(status: number, data: unknown) {
+  if (typeof data === 'string') {
+    return data.trim() || `ElevenLabs request failed: ${status}`;
+  }
+
+  const detail = (data as JsonRecord)?.detail;
+  const nestedDetail = Array.isArray(detail)
+    ? detail.map((item) => item?.msg || item?.message || compactJson(item)).filter(Boolean).join('; ')
+    : typeof detail === 'string'
+      ? detail
+      : detail
+        ? compactJson(detail)
+        : '';
+  const message = nestedDetail
+    || (data as JsonRecord)?.message
+    || (data as JsonRecord)?.error
+    || (data as JsonRecord)?.error_message
+    || compactJson(data);
+
+  return message
+    ? `ElevenLabs request failed: ${status} - ${message}`
+    : `ElevenLabs request failed: ${status}`;
+}
+
 function bearerToken(req: Request) {
   const authorization = req.headers.get('authorization') || '';
   return authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
@@ -263,8 +295,7 @@ async function elevenLabsRequest(path: string, options: RequestInit = {}) {
   const contentType = response.headers.get('content-type') || '';
   const data = contentType.includes('json') ? await response.json().catch(() => ({})) : await response.text();
   if (!response.ok) {
-    const message = typeof data === 'string' ? data : data?.detail?.[0]?.msg || data?.message || data?.error;
-    throw new Error(message || `ElevenLabs request failed: ${response.status}`);
+    throw new Error(elevenLabsErrorMessage(response.status, data));
   }
   return data;
 }
@@ -737,9 +768,12 @@ async function createKnowledgeDocumentInElevenLabs(db: any, document: JsonRecord
       const storageBucket = document.__storage_bucket || 'tenant-knowledge';
       const { data: blob, error } = await db.storage.from(storageBucket).download(document.storage_key);
       if (error) throw new Error(error.message || 'Failed to download stored knowledge file');
+      const fileName = document.metadata?.originalFileName || document.storage_key.split('/').pop() || `${name}.pdf`;
+      const mimeType = document.metadata?.mimeType || blob?.type || 'application/octet-stream';
+      const uploadFile = new File([blob], fileName, { type: mimeType });
       const formData = new FormData();
-      formData.append('file', blob, document.metadata?.originalFileName || document.storage_key.split('/').pop() || name);
       formData.append('name', name);
+      formData.append('file', uploadFile);
       providerDocument = await elevenLabsRequest('/convai/knowledge-base/file', {
         method: 'POST',
         body: formData,

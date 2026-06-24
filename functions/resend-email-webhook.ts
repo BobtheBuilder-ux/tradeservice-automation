@@ -351,16 +351,27 @@ async function loadKnowledgeContext(db: any, tenant: any, agent: any) {
   const excerpts: JsonRecord[] = [];
   const pushRows = (rows: any[], scope: string) => {
     for (const row of rows || []) {
-      const body = compactText(row.body_text || '', 1000);
-      if (!body) continue;
-      excerpts.push({ scope, title: row.title || 'Knowledge note', body });
+      const body = compactText(row.body_text || row.metadata?.extractedText || row.metadata?.extracted_text || '', 1000);
+      const reference = !body && row.source_url ? `Reference URL: ${row.source_url}` : '';
+      const fileReference = !body && (row.metadata?.originalFileName || row.storage_key)
+        ? `Uploaded document reference: ${row.metadata?.originalFileName || row.storage_key}`
+        : '';
+      const content = body || reference || fileReference;
+      if (!content) continue;
+      excerpts.push({
+        scope,
+        title: row.title || 'Knowledge note',
+        body: content,
+        sourceType: row.source_type || null,
+        hasExcerpt: Boolean(body),
+      });
       if (excerpts.length >= 10) break;
     }
   };
 
   try {
     const tenantRows = await unwrap(
-      await db.database.from('tenant_knowledge_documents').select('title,body_text,source_type,source_url,status,tenant_agent_id')
+      await db.database.from('tenant_knowledge_documents').select('title,body_text,source_type,source_url,storage_key,status,tenant_agent_id,metadata')
         .eq('tenant_id', tenant.id).in('status', ['ready', 'uploaded']).limit(12),
       'Failed to load tenant knowledge'
     );
@@ -370,12 +381,25 @@ async function loadKnowledgeContext(db: any, tenant: any, agent: any) {
   }
 
   try {
+    const assignments = await unwrap(
+      await db.database.from('tenant_knowledge_assignments').select('platform_knowledge_document_id')
+        .eq('tenant_id', tenant.id)
+        .eq('status', 'active')
+        .or(agent?.id ? `tenant_agent_id.is.null,tenant_agent_id.eq.${agent.id}` : 'tenant_agent_id.is.null')
+        .limit(100),
+      'Failed to load platform knowledge assignments'
+    );
+    const assignedIds = [...new Set((assignments || []).map((row: any) => row.platform_knowledge_document_id).filter(Boolean))];
     const platformRows = await unwrap(
-      await db.database.from('platform_knowledge_documents').select('title,scope,niche_key,body_text,source_type,source_url,status')
+      await db.database.from('platform_knowledge_documents').select('id,title,scope,niche_key,body_text,source_type,source_url,storage_key,status,metadata')
         .in('status', ['ready', 'uploaded']).limit(30),
       'Failed to load platform knowledge'
     );
-    pushRows((platformRows || []).filter((row: any) => row.scope === 'global' || (tenant?.business_niche && row.niche_key === tenant.business_niche)), 'platform');
+    pushRows((platformRows || []).filter((row: any) => (
+      row.scope === 'global'
+      || (tenant?.business_niche && row.niche_key === tenant.business_niche)
+      || assignedIds.includes(row.id)
+    )), 'platform');
   } catch {
     // Platform knowledge is optional at runtime.
   }
@@ -781,6 +805,7 @@ async function draftEmailReply(db: any, input: {
         'Return only valid JSON with keys subject, text, and html.',
         'The reply is sent automatically, so be accurate, concise, and helpful.',
         'Primary goal: answer the lead if the answer is known, then move toward booking a consultation/call as quickly as possible.',
+        'Use the provided knowledge array as source-of-truth context. If a knowledge item is only a file or URL reference without an excerpt, do not claim details from its unseen contents.',
         'Do not ask long qualification questions when the lead already provided useful context.',
         'If the lead gave a date or time but not both, ask only for the missing date or time. Do not ask for timezone; use the lead location already in context.',
         'Never invent prices, promises, availability, policies, discounts, or booking links.',

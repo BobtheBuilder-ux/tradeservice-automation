@@ -47,7 +47,7 @@ export async function provisionElevenLabsAgent(user, agentId, options = {}) {
   return invokeFunction('elevenlabs-agent-actions', {
     action: 'provision-agent',
     body: {
-      tenantId: user?.tenantId,
+      tenantId: options.tenantId || user?.tenantId,
       agentId,
       syncKnowledge: options.syncKnowledge !== false,
     },

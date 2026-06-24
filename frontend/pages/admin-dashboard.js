@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/router';
 import Head from 'next/head';
 import { 
@@ -42,6 +42,7 @@ import {
   deleteAllLeads,
   getBobActivity,
   getCallTranscript,
+  getLeadConversationSummary,
   listCampaigns,
   listFeedback,
   importLeadsFromCsv,
@@ -77,6 +78,7 @@ import { invokeFunction } from '../lib/insforge-functions';
 export default function AdminDashboard() {
   const router = useRouter();
   const { user, isAuthenticated, loading: authLoading } = useAuth();
+  const leadDiscussionRequestIdRef = useRef(0);
   const [activeTab, setActiveTab] = useState('overview');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -200,6 +202,9 @@ export default function AdminDashboard() {
   const [bobControlBusy, setBobControlBusy] = useState(false);
   const [selectedCallTranscript, setSelectedCallTranscript] = useState(null);
   const [callTranscriptLoading, setCallTranscriptLoading] = useState(false);
+  const [leadDiscussionSummary, setLeadDiscussionSummary] = useState(null);
+  const [leadDiscussionSummaryLoading, setLeadDiscussionSummaryLoading] = useState(false);
+  const [leadDiscussionSummaryError, setLeadDiscussionSummaryError] = useState('');
   const [callOutcomeAction, setCallOutcomeAction] = useState(null);
   const [callOutcomeForm, setCallOutcomeForm] = useState({ outcome: 'needs_human_follow_up', notes: '' });
 
@@ -795,14 +800,38 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleViewLead = (lead) => {
+  const handleViewLead = async (lead) => {
+    const requestId = leadDiscussionRequestIdRef.current + 1;
+    leadDiscussionRequestIdRef.current = requestId;
     setSelectedLead(lead);
     setShowLeadModal(true);
+    setLeadDiscussionSummary(null);
+    setLeadDiscussionSummaryError('');
+
+    try {
+      setLeadDiscussionSummaryLoading(true);
+      const summary = await getLeadConversationSummary(user, lead.id);
+      if (leadDiscussionRequestIdRef.current === requestId) {
+        setLeadDiscussionSummary(summary);
+      }
+    } catch (err) {
+      console.error('Error loading lead discussion summary:', err);
+      if (leadDiscussionRequestIdRef.current === requestId) {
+        setLeadDiscussionSummaryError(err.message || 'Failed to load discussion summary');
+      }
+    } finally {
+      if (leadDiscussionRequestIdRef.current === requestId) {
+        setLeadDiscussionSummaryLoading(false);
+      }
+    }
   };
 
   const handleCloseLeadModal = () => {
+    leadDiscussionRequestIdRef.current += 1;
     setShowLeadModal(false);
     setSelectedLead(null);
+    setLeadDiscussionSummary(null);
+    setLeadDiscussionSummaryError('');
   };
 
   const fetchMeetings = async () => {
@@ -2827,7 +2856,7 @@ export default function AdminDashboard() {
       {/* Lead Details Modal */}
       {showLeadModal && selectedLead && (
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
-          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-1/2 shadow-lg rounded-md bg-white">
+          <div className="relative top-20 mx-auto p-5 border w-11/12 md:w-3/4 lg:w-3/4 xl:w-2/3 shadow-lg rounded-md bg-white">
             <div className="mt-3">
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-lg font-medium text-gray-900">Lead Details</h3>
@@ -2863,6 +2892,94 @@ export default function AdminDashboard() {
                       </span>
                     </div>
                   </div>
+                </div>
+
+                {/* Discussion Summary */}
+                <div className="rounded-lg border border-border bg-surface-secondary p-4">
+                  <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h4 className="text-md font-semibold text-text-primary">Discussion summary</h4>
+                      <p className="mt-1 text-sm text-text-muted">Calls, email, text, and chat captured for this lead.</p>
+                    </div>
+                    {leadDiscussionSummary?.summary?.totals && (
+                      <span className="ops-badge bg-primary-soft text-primary">
+                        {leadDiscussionSummary.summary.totals.messages + leadDiscussionSummary.summary.totals.emails + leadDiscussionSummary.summary.totals.calls} touchpoints
+                      </span>
+                    )}
+                  </div>
+
+                  {leadDiscussionSummaryLoading ? (
+                    <div className="rounded-lg border border-border bg-surface px-3 py-4 text-center text-sm text-text-muted">
+                      Loading discussion summary...
+                    </div>
+                  ) : leadDiscussionSummaryError ? (
+                    <div className="rounded-lg border border-error bg-error-soft px-3 py-2 text-sm text-error">
+                      {leadDiscussionSummaryError}
+                    </div>
+                  ) : leadDiscussionSummary?.summary ? (
+                    <div className="space-y-4">
+                      <div className="rounded-lg border border-border bg-surface px-3 py-3">
+                        <p className="text-sm leading-6 text-text-primary">{leadDiscussionSummary.summary.overview}</p>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                        {[
+                          ['Calls', leadDiscussionSummary.summary.channelCounts.calls],
+                          ['Emails', leadDiscussionSummary.summary.channelCounts.emails],
+                          ['Texts', leadDiscussionSummary.summary.channelCounts.texts],
+                          ['Chats', leadDiscussionSummary.summary.channelCounts.chats],
+                        ].map(([label, count]) => (
+                          <div key={label} className="rounded-lg border border-border bg-surface px-3 py-2">
+                            <div className="text-xs font-medium text-text-muted">{label}</div>
+                            <div className="mt-1 text-lg font-semibold text-text-primary">{count}</div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {leadDiscussionSummary.summary.keyPoints.length > 0 && (
+                        <div className="rounded-lg border border-border bg-surface px-3 py-3">
+                          <div className="mb-2 text-xs font-semibold uppercase text-text-muted">Key points</div>
+                          <div className="space-y-2">
+                            {leadDiscussionSummary.summary.keyPoints.map((point) => (
+                              <div key={point} className="flex gap-2 text-sm text-text-primary">
+                                <Check className="mt-0.5 h-4 w-4 flex-none text-success" />
+                                <span>{point}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="rounded-lg border border-border bg-surface px-3 py-3">
+                        <div className="mb-3 text-xs font-semibold uppercase text-text-muted">Latest discussion</div>
+                        {leadDiscussionSummary.summary.timeline.length > 0 ? (
+                          <div className="space-y-3">
+                            {leadDiscussionSummary.summary.timeline.slice(0, 6).map((event) => (
+                              <div key={event.id} className="border-b border-border pb-3 last:border-b-0 last:pb-0">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className="ops-badge bg-info-soft text-info">{event.channel}</span>
+                                    <span className="text-sm font-medium text-text-primary">{event.title}</span>
+                                  </div>
+                                  <span className="text-xs text-text-muted">
+                                    {event.occurredAt ? format(new Date(event.occurredAt), 'MMM d, yyyy HH:mm') : 'No date'}
+                                  </span>
+                                </div>
+                                {event.body && <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-text-secondary">{event.body}</p>}
+                                {event.status && <p className="mt-1 text-xs text-text-muted">Status: {event.status}</p>}
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="py-4 text-center text-sm text-text-muted">No calls, emails, texts, or chats have been captured yet.</div>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-border bg-surface px-3 py-4 text-center text-sm text-text-muted">
+                      Open a lead to load its discussion summary.
+                    </div>
+                  )}
                 </div>
 
                 {/* Contact Information */}

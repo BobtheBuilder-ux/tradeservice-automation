@@ -3,6 +3,7 @@ import twilio from 'npm:twilio';
 
 const FAILURE_STATUSES = new Set(['failed', 'undelivered']);
 const STOP_PATTERNS = [/\bstop\b/i, /unsubscribe/i, /do not contact/i, /don't text/i, /don't call/i, /not interested/i];
+type JsonRecord = Record<string, any>;
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -53,6 +54,11 @@ function whatsappAddress(value: unknown) {
 
 function safeError(error: unknown) {
   return error instanceof Error ? error.message : 'Message processing failed';
+}
+
+function compactText(value: unknown, maxLength = 1200) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
 }
 
 function functionBaseUrl() {
@@ -137,15 +143,86 @@ function channelAllowed(lead: any, channel: 'sms' | 'whatsapp') {
   return { allowed: true, reason: '' };
 }
 
+function knowledgeExcerpt(row: JsonRecord, scope: string) {
+  const body = compactText(row.body_text || row.metadata?.extractedText || row.metadata?.extracted_text || '', 900);
+  const reference = !body && row.source_url ? `Reference URL: ${row.source_url}` : '';
+  const fileReference = !body && (row.metadata?.originalFileName || row.storage_key)
+    ? `Uploaded document reference: ${row.metadata?.originalFileName || row.storage_key}`
+    : '';
+  const content = body || reference || fileReference;
+  if (!content) return null;
+  return {
+    scope,
+    title: row.title || 'Knowledge document',
+    sourceType: row.source_type || null,
+    content,
+    hasExcerpt: Boolean(body),
+  };
+}
+
+async function loadKnowledgeContext(db: any, tenant: any, agent: any) {
+  if (!tenant?.id) return [];
+  const excerpts: JsonRecord[] = [];
+  const addRows = (rows: any[], scope: string) => {
+    for (const row of rows || []) {
+      const excerpt = knowledgeExcerpt(row, scope);
+      if (excerpt) excerpts.push(excerpt);
+      if (excerpts.length >= 8) break;
+    }
+  };
+
+  try {
+    const { data } = await db.database
+      .from('tenant_knowledge_documents')
+      .select('title,body_text,source_type,source_url,storage_key,status,tenant_agent_id,metadata,updated_at')
+      .eq('tenant_id', tenant.id)
+      .in('status', ['ready', 'uploaded'])
+      .order('updated_at', { ascending: false })
+      .limit(16);
+    addRows((data || []).filter((row: any) => !row.tenant_agent_id || row.tenant_agent_id === agent?.id), 'tenant');
+  } catch {
+    // Knowledge context should not block inbound replies.
+  }
+
+  try {
+    const assignmentResult = await db.database
+      .from('tenant_knowledge_assignments')
+      .select('platform_knowledge_document_id')
+      .eq('tenant_id', tenant.id)
+      .eq('status', 'active')
+      .or(agent?.id ? `tenant_agent_id.is.null,tenant_agent_id.eq.${agent.id}` : 'tenant_agent_id.is.null')
+      .limit(100);
+    const assignedIds = [...new Set((assignmentResult.data || []).map((row: any) => row.platform_knowledge_document_id).filter(Boolean))];
+    const platformResult = await db.database
+      .from('platform_knowledge_documents')
+      .select('id,title,scope,niche_key,body_text,source_type,source_url,storage_key,status,metadata,updated_at')
+      .in('status', ['ready', 'uploaded'])
+      .order('updated_at', { ascending: false })
+      .limit(60);
+    addRows((platformResult.data || []).filter((row: any) => (
+      row.scope === 'global'
+      || (tenant.business_niche && row.scope === 'niche' && row.niche_key === tenant.business_niche)
+      || assignedIds.includes(row.id)
+    )), 'platform');
+  } catch {
+    // Shared knowledge is optional for message generation.
+  }
+
+  return excerpts.slice(0, 8);
+}
+
 async function loadTenantContext(db: any, tenantId: string, lead: any) {
   const [tenantResult, agentResult] = await Promise.all([
-    db.database.from('tenants').select('id,name,industry,default_timezone').eq('id', tenantId).limit(1),
+    db.database.from('tenants').select('id,name,industry,business_niche,default_timezone').eq('id', tenantId).limit(1),
     lead?.assigned_tenant_agent_id
       ? db.database.from('tenant_agents').select('id,display_name').eq('tenant_id', tenantId).eq('id', lead.assigned_tenant_agent_id).limit(1)
       : Promise.resolve({ data: [] }),
   ]);
   if (tenantResult.error) throw new Error(tenantResult.error.message || 'Failed to load tenant');
-  return { tenant: tenantResult.data?.[0] || null, agent: agentResult.data?.[0] || null };
+  const tenant = tenantResult.data?.[0] || null;
+  const agent = agentResult.data?.[0] || null;
+  const knowledgeContext = await loadKnowledgeContext(db, tenant, agent);
+  return { tenant, agent, knowledgeContext };
 }
 
 function extractOutputText(response: any) {
@@ -157,7 +234,7 @@ function extractOutputText(response: any) {
 async function draftTextReply(db: any, tenantId: string, lead: any, channel: 'sms' | 'whatsapp', inboundText: string) {
   const apiKey = Deno.env.get('OPENAI_API_KEY');
   if (!apiKey) throw new Error('OPENAI_API_KEY is not configured');
-  const { tenant, agent } = await loadTenantContext(db, tenantId, lead);
+  const { tenant, agent, knowledgeContext } = await loadTenantContext(db, tenantId, lead);
   const model = Deno.env.get('OPENAI_TEXT_MODEL') || Deno.env.get('OPENAI_EMAIL_MODEL') || 'gpt-5.5';
   const preferredLanguage = lead?.preferred_language || null;
   const response = await fetch('https://api.openai.com/v1/responses', {
@@ -165,12 +242,13 @@ async function draftTextReply(db: any, tenantId: string, lead: any, channel: 'sm
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model,
-      instructions: `Write one concise, helpful business text reply. Return only valid JSON. Never invent prices, availability, booking links, policies, or commitments. If human help is needed, say so briefly and set needs_human_review true. Do not mention internal systems or AI unless the tenant explicitly asked you to.${preferredLanguage ? ` Write the reply in ${preferredLanguage}.` : ''}`,
+      instructions: `Write one concise, helpful business text reply. Return only valid JSON. Use knowledgeContext as source-of-truth context for services, policies, objections, offers, qualification guidance, and booking rules. If a knowledge item is only a file or URL reference without an excerpt, do not claim details from its unseen contents. Never invent prices, availability, booking links, policies, or commitments. If human help is needed, say so briefly and set needs_human_review true. Do not mention internal systems or AI unless the tenant explicitly asked you to.${preferredLanguage ? ` Write the reply in ${preferredLanguage}.` : ''}`,
       input: JSON.stringify({
         channel,
         tenant: { name: tenant?.name || null, industry: tenant?.industry || null },
         agent: { name: agent?.display_name || 'the AI assistant' },
         lead: { name: lead?.full_name || [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || null, serviceInterest: lead?.service_interest || null, preferredLanguage },
+        knowledgeContext,
         inboundMessage: inboundText,
       }),
       text: { format: { type: 'json_schema', name: 'automated_text_reply', strict: true, schema: {

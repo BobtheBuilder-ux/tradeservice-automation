@@ -15,6 +15,7 @@ import {
   Layers,
   Lock,
   Plus,
+  Save,
   ShieldCheck,
   UploadCloud,
   UserCog,
@@ -25,6 +26,7 @@ import {
   createPlatformKnowledgeDocument,
   getSuperAdminDashboardData,
   uploadPlatformKnowledgeFile,
+  updateSuperAdminTenantProfile,
   upsertBusinessNiche,
   upsertTenantKnowledgeAssignment,
 } from '../lib/insforge-product';
@@ -168,6 +170,23 @@ function pluralize(count, singular, plural = `${singular}s`) {
   return count === 1 ? singular : plural;
 }
 
+function firstActive(rows = []) {
+  return rows.find((row) => row.isPrimary && ['active', 'connected'].includes(row.status))
+    || rows.find((row) => ['active', 'connected'].includes(row.status))
+    || rows[0]
+    || null;
+}
+
+function FieldValue({ label, value }) {
+  const displayValue = value === null || value === undefined || value === '' ? 'N/A' : value;
+  return (
+    <div className="rounded-lg border border-border bg-surface-secondary px-3 py-2">
+      <p className="text-xs font-medium text-text-muted">{label}</p>
+      <p className="mt-1 break-words text-sm font-medium text-text-primary">{displayValue}</p>
+    </div>
+  );
+}
+
 function SimpleTable({ columns, rows, emptyText }) {
   if (!rows.length) return <EmptyState>{emptyText}</EmptyState>;
   return (
@@ -255,22 +274,236 @@ function Overview({ data }) {
   );
 }
 
-function Tenants({ data }) {
+function Tenants({ data, reload, user }) {
+  const router = useRouter();
+  const [selectedTenantId, setSelectedTenantId] = useState('');
+  const [editForm, setEditForm] = useState({
+    name: '',
+    industry: '',
+    businessNiche: '',
+    defaultTimezone: '',
+    city: '',
+    country: '',
+    status: 'onboarding',
+  });
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!data.tenantReadiness.length) return;
+    const selectedStillExists = data.tenantReadiness.some((tenant) => tenant.id === selectedTenantId);
+    if (!selectedTenantId || !selectedStillExists) {
+      setSelectedTenantId(data.tenantReadiness[0].id);
+    }
+  }, [data.tenantReadiness, selectedTenantId]);
+
+  const selectedTenant = data.tenantReadiness.find((tenant) => tenant.id === selectedTenantId) || data.tenantReadiness[0] || null;
+
+  useEffect(() => {
+    if (!selectedTenant) return;
+    setEditForm({
+      name: selectedTenant.name || '',
+      industry: selectedTenant.industry || '',
+      businessNiche: selectedTenant.businessNiche || '',
+      defaultTimezone: selectedTenant.defaultTimezone || 'America/Toronto',
+      city: selectedTenant.city || '',
+      country: selectedTenant.country || '',
+      status: selectedTenant.status || 'onboarding',
+    });
+    setMessage('');
+  }, [selectedTenant]);
+
+  const details = useMemo(() => {
+    if (!selectedTenant) return null;
+    const tenantId = selectedTenant.id;
+    const agents = data.tenantAgents.filter((agent) => agent.tenantId === tenantId && agent.status !== 'archived');
+    const phoneNumbers = data.phoneNumbers.filter((phone) => phone.tenantId === tenantId);
+    const emailIdentities = data.emailIdentities.filter((identity) => identity.tenantId === tenantId);
+    const bookingIntegrations = data.bookingIntegrations.filter((booking) => booking.tenantId === tenantId);
+    const usage = data.usageByTenant.find((row) => row.tenantId === tenantId) || {};
+    const setupSession = data.setupSessions.find((session) => session.tenantId === tenantId && session.status !== 'complete')
+      || data.setupSessions.find((session) => session.tenantId === tenantId);
+    return {
+      agents,
+      primaryAgent: agents.find((agent) => agent.status === 'live') || agents[0] || null,
+      primaryPhone: firstActive(phoneNumbers),
+      emailIdentity: firstActive(emailIdentities),
+      bookingIntegration: firstActive(bookingIntegrations),
+      ownerClaim: data.tenantOwnerClaims.find((claim) => claim.tenantId === tenantId) || null,
+      tenantUsers: data.tenantUsers.filter((tenantUser) => tenantUser.tenantId === tenantId),
+      alerts: data.operationalAlerts.filter((alert) => alert.tenantId === tenantId && alert.status !== 'resolved'),
+      usage,
+      setupSession,
+    };
+  }, [data, selectedTenant]);
+
+  const handleSave = async (event) => {
+    event.preventDefault();
+    if (!selectedTenant) return;
+    setBusy(true);
+    setMessage('');
+    try {
+      await updateSuperAdminTenantProfile(user, selectedTenant.id, {
+        ...editForm,
+        existingMetadata: selectedTenant.metadata || {},
+      });
+      setMessage('Tenant details saved.');
+      await reload();
+    } catch (error) {
+      setMessage(error.message || 'Failed to save tenant details.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <Panel title="Tenant Operations" icon={Building2}>
-      <SimpleTable
-        emptyText="No tenants exist yet."
-        rows={data.tenantReadiness}
-        columns={[
-          { key: 'name', label: 'Tenant', render: (row) => <div><p className="font-medium text-text-primary">{row.name}</p><p className="text-xs text-text-muted">{row.slug}</p></div> },
-          { key: 'status', label: 'Status', render: (row) => <StatusBadge value={row.status} tone={statusTone(row.status)} /> },
-          { key: 'businessNiche', label: 'Niche', render: (row) => row.businessNiche || 'None' },
-          { key: 'readinessScore', label: 'Readiness', render: (row) => <div className="min-w-32"><ProgressBar value={row.readinessScore} /><p className="mt-1 text-xs text-text-muted">{row.readinessScore}%</p></div> },
-          { key: 'setupStep', label: 'Setup Step' },
-          { key: 'createdAt', label: 'Created', render: (row) => formatDate(row.createdAt) },
-        ]}
-      />
-    </Panel>
+    <div className="space-y-6">
+      <Panel title="Tenant Operations" icon={Building2}>
+        <SimpleTable
+          emptyText="No tenants exist yet."
+          rows={data.tenantReadiness}
+          columns={[
+            { key: 'name', label: 'Tenant', render: (row) => <div><p className="font-medium text-text-primary">{row.name}</p><p className="text-xs text-text-muted">{row.slug}</p></div> },
+            { key: 'status', label: 'Status', render: (row) => <StatusBadge value={row.status} tone={statusTone(row.status)} /> },
+            { key: 'businessNiche', label: 'Niche', render: (row) => row.businessNiche || 'None' },
+            { key: 'readinessScore', label: 'Readiness', render: (row) => <div className="min-w-32"><ProgressBar value={row.readinessScore} /><p className="mt-1 text-xs text-text-muted">{row.readinessScore}%</p></div> },
+            { key: 'setupStep', label: 'Setup Step' },
+            { key: 'createdAt', label: 'Created', render: (row) => formatDate(row.createdAt) },
+            {
+              key: 'action',
+              label: 'Action',
+              render: (row) => (
+                <button
+                  type="button"
+                  className={row.id === selectedTenant?.id ? 'ops-button-primary h-8 px-3 text-xs' : 'ops-button-secondary h-8 px-3 text-xs'}
+                  onClick={() => setSelectedTenantId(row.id)}
+                >
+                  View
+                </button>
+              ),
+            },
+          ]}
+        />
+      </Panel>
+
+      {selectedTenant && details && (
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+          <section className="ops-panel overflow-hidden xl:col-span-2">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
+              <div>
+                <h2 className="text-sm font-semibold text-text-primary">{selectedTenant.name}</h2>
+                <p className="mt-1 text-xs text-text-muted">{selectedTenant.slug} · Created {formatDate(selectedTenant.createdAt)}</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <StatusBadge value={selectedTenant.status} tone={statusTone(selectedTenant.status)} />
+                <button
+                  type="button"
+                  className="ops-button-secondary h-8 px-3 text-xs"
+                  onClick={() => router.push(`/onboarding?mode=super_admin_assisted&tenantId=${encodeURIComponent(selectedTenant.id)}`)}
+                >
+                  Open setup
+                </button>
+              </div>
+            </div>
+            <div className="space-y-4 p-4">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                <FieldValue label="Owner claim" value={details.ownerClaim ? `${details.ownerClaim.email} · ${details.ownerClaim.status}` : 'No claim'} />
+                <FieldValue label="Tenant users" value={details.tenantUsers.length} />
+                <FieldValue label="Active alerts" value={details.alerts.length} />
+                <FieldValue label="Primary AI agent" value={details.primaryAgent?.displayName} />
+                <FieldValue label="Phone identity" value={details.primaryPhone?.phoneNumber} />
+                <FieldValue label="Sender email" value={details.emailIdentity?.fromEmail} />
+                <FieldValue label="Booking" value={details.bookingIntegration?.bookingUrl || details.bookingIntegration?.eventTypeId} />
+                <FieldValue label="Usage" value={`${details.usage.calls || 0} calls · ${details.usage.messages || 0} messages · ${details.usage.emails || 0} emails`} />
+                <FieldValue label="Setup session" value={details.setupSession ? `${details.setupSession.currentStep} · ${details.setupSession.status}` : 'Not started'} />
+              </div>
+
+              <div className="rounded-lg border border-border bg-surface-secondary p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-text-primary">Readiness</p>
+                    <p className="mt-1 text-xs text-text-muted">
+                      Agent {selectedTenant.hasAgent ? 'ready' : 'missing'} · Phone {selectedTenant.hasPhone ? 'ready' : 'missing'} · Email {selectedTenant.hasEmail ? 'ready' : 'missing'} · Booking {selectedTenant.hasBooking ? 'ready' : 'missing'}
+                    </p>
+                  </div>
+                  <div className="w-32">
+                    <ProgressBar value={selectedTenant.readinessScore} />
+                    <p className="mt-1 text-right text-xs text-text-muted">{selectedTenant.readinessScore}%</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <Bot className="h-4 w-4 text-accent" />
+                  <h3 className="text-sm font-semibold text-text-primary">AI Agents</h3>
+                </div>
+                <SimpleTable
+                  emptyText="No AI agents have been created for this tenant."
+                  rows={details.agents}
+                  columns={[
+                    { key: 'displayName', label: 'Agent', render: (row) => <span className="font-medium text-text-primary">{row.displayName}</span> },
+                    { key: 'status', label: 'Status', render: (row) => <StatusBadge value={row.status} tone={statusTone(row.status)} /> },
+                    { key: 'emailAddress', label: 'Email', render: (row) => row.emailAddress || 'N/A' },
+                    { key: 'elevenlabsAgentId', label: 'ElevenLabs', render: (row) => row.elevenlabsAgentId ? 'Synced' : 'Not synced' },
+                  ]}
+                />
+              </div>
+            </div>
+          </section>
+
+          <Panel title="Edit Tenant" icon={UserCog}>
+            <form onSubmit={handleSave} className="space-y-3">
+              {message && <div className="rounded-lg border border-border bg-surface-secondary px-3 py-2 text-sm text-text-secondary">{message}</div>}
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-text-secondary">Company name</span>
+                <input className="ops-input" value={editForm.name} onChange={(event) => setEditForm((current) => ({ ...current, name: event.target.value }))} />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-text-secondary">Status</span>
+                <select className="ops-select" value={editForm.status} onChange={(event) => setEditForm((current) => ({ ...current, status: event.target.value }))}>
+                  <option value="onboarding">Onboarding</option>
+                  <option value="active">Active</option>
+                  <option value="suspended">Suspended</option>
+                  <option value="archived">Archived</option>
+                </select>
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-text-secondary">Industry</span>
+                <input className="ops-input" value={editForm.industry} onChange={(event) => setEditForm((current) => ({ ...current, industry: event.target.value }))} />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-text-secondary">Business niche</span>
+                <select className="ops-select" value={editForm.businessNiche} onChange={(event) => setEditForm((current) => ({ ...current, businessNiche: event.target.value }))}>
+                  <option value="">No niche selected</option>
+                  {data.businessNiches.filter((niche) => niche.status === 'active').map((niche) => (
+                    <option key={niche.key} value={niche.key}>{niche.name}</option>
+                  ))}
+                </select>
+              </label>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <label className="block">
+                  <span className="mb-1 block text-xs font-medium text-text-secondary">City</span>
+                  <input className="ops-input" value={editForm.city} onChange={(event) => setEditForm((current) => ({ ...current, city: event.target.value }))} />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-xs font-medium text-text-secondary">Country</span>
+                  <input className="ops-input" value={editForm.country} onChange={(event) => setEditForm((current) => ({ ...current, country: event.target.value }))} />
+                </label>
+              </div>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-text-secondary">Default timezone</span>
+                <input className="ops-input" value={editForm.defaultTimezone} onChange={(event) => setEditForm((current) => ({ ...current, defaultTimezone: event.target.value }))} />
+              </label>
+              <button type="submit" className="ops-button-primary" disabled={busy}>
+                <Save className="h-4 w-4" />
+                <span>{busy ? 'Saving...' : 'Save tenant'}</span>
+              </button>
+            </form>
+          </Panel>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -401,7 +634,7 @@ function KnowledgeLibrary({ data, reload, user }) {
     if (!nextFiles.length) return;
     setDocForm((current) => ({
       ...current,
-      title: current.title?.trim() || nextFiles.length > 1 ? current.title : titleFromFileName(nextFiles[0].name),
+      title: current.title?.trim() || (nextFiles.length > 1 ? current.title : titleFromFileName(nextFiles[0].name)),
     }));
   };
 
@@ -636,7 +869,7 @@ export default function SuperAdminPage({ page }) {
 
   const content = useMemo(() => {
     if (!data) return null;
-    if (page === 'tenants') return <Tenants data={data} />;
+    if (page === 'tenants') return <Tenants data={data} reload={reload} user={user} />;
     if (page === 'tenant-setup') return <TenantSetup data={data} reload={reload} user={user} />;
     if (page === 'knowledge-library') return <KnowledgeLibrary data={data} reload={reload} user={user} />;
     if (page === 'provider-health') return <ProviderHealth data={data} />;

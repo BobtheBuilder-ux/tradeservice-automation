@@ -1,6 +1,7 @@
 import { createClient } from 'npm:@insforge/sdk';
 
 const EMAIL_ACTIONS = ['send-email', 'queue-email', 'send-template-email', 'send-booking-confirmation', 'send-reminder'];
+type JsonRecord = Record<string, any>;
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -76,6 +77,11 @@ function escapeHtml(value: unknown) {
     .replace(/'/g, '&#039;');
 }
 
+function compactText(value: unknown, maxLength = 1200) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3)}...` : text;
+}
+
 function renderTemplate(template = '', variables: Record<string, unknown> = {}) {
   return template.replace(/{{\s*([\w.]+)\s*}}/g, (_match, key) => {
     const value = key.split('.').reduce((current: any, part: string) => current?.[part], variables);
@@ -119,7 +125,78 @@ async function loadEmailContext(client: any, tenantId: string, input: any) {
     ? await loadSingle(client, 'tenant_agents', tenantId, lead.assigned_tenant_agent_id)
     : null;
   const agent = requestedAgent || assignedAgent || await loadDefaultEmailAgent(client, tenantId);
-  return { tenant: tenantResult.data?.[0] || null, lead, agent };
+  const tenant = tenantResult.data?.[0] || null;
+  const knowledgeContext = await loadKnowledgeContext(client, tenant, agent).catch(() => []);
+  return { tenant, lead, agent, knowledgeContext };
+}
+
+function knowledgeExcerpt(row: JsonRecord, scope: string) {
+  const body = compactText(row.body_text || row.metadata?.extractedText || row.metadata?.extracted_text || '', 1200);
+  const reference = !body && row.source_url ? `Reference URL: ${row.source_url}` : '';
+  const fileReference = !body && (row.metadata?.originalFileName || row.storage_key)
+    ? `Uploaded document reference: ${row.metadata?.originalFileName || row.storage_key}`
+    : '';
+  const content = body || reference || fileReference;
+  if (!content) return null;
+  return {
+    scope,
+    title: row.title || 'Knowledge document',
+    sourceType: row.source_type || null,
+    content,
+    hasExcerpt: Boolean(body),
+  };
+}
+
+async function loadKnowledgeContext(client: any, tenant: any, agent: any) {
+  if (!tenant?.id) return [];
+  const excerpts: JsonRecord[] = [];
+  const addRows = (rows: any[], scope: string) => {
+    for (const row of rows || []) {
+      const excerpt = knowledgeExcerpt(row, scope);
+      if (excerpt) excerpts.push(excerpt);
+      if (excerpts.length >= 12) break;
+    }
+  };
+
+  try {
+    const { data } = await client.database
+      .from('tenant_knowledge_documents')
+      .select('title,body_text,source_type,source_url,storage_key,status,tenant_agent_id,metadata,updated_at')
+      .eq('tenant_id', tenant.id)
+      .in('status', ['ready', 'uploaded'])
+      .order('updated_at', { ascending: false })
+      .limit(20);
+    addRows((data || []).filter((row: any) => !row.tenant_agent_id || row.tenant_agent_id === agent?.id), 'tenant');
+  } catch {
+    // Knowledge enriches copy, but delivery should not fail when context lookup is unavailable.
+  }
+
+  try {
+    const assignmentResult = await client.database
+      .from('tenant_knowledge_assignments')
+      .select('platform_knowledge_document_id')
+      .eq('tenant_id', tenant.id)
+      .eq('status', 'active')
+      .or(agent?.id ? `tenant_agent_id.is.null,tenant_agent_id.eq.${agent.id}` : 'tenant_agent_id.is.null')
+      .limit(100);
+    const assignedIds = [...new Set((assignmentResult.data || []).map((row: any) => row.platform_knowledge_document_id).filter(Boolean))];
+    const platformResult = await client.database
+      .from('platform_knowledge_documents')
+      .select('id,title,scope,niche_key,body_text,source_type,source_url,storage_key,status,metadata,updated_at')
+      .in('status', ['ready', 'uploaded'])
+      .order('updated_at', { ascending: false })
+      .limit(80);
+    const platformRows = (platformResult.data || []).filter((row: any) => (
+      row.scope === 'global'
+      || (tenant.business_niche && row.scope === 'niche' && row.niche_key === tenant.business_niche)
+      || assignedIds.includes(row.id)
+    ));
+    addRows(platformRows, 'platform');
+  } catch {
+    // Platform knowledge is optional runtime context.
+  }
+
+  return excerpts.slice(0, 12);
 }
 
 async function assertEmailAllowed(lead: any) {
@@ -174,7 +251,7 @@ function buildDraftInstructions(action: string, context: any, input: any) {
   const interest = leadServiceInterest(context.lead, input);
   return {
     role: 'system',
-    content: `You write concise, accurate automated business emails. Return only valid JSON with keys subject, text, and html. Never invent booking details, pricing, promises, or links. Keep the tone warm and professional. If this is a first outreach/follow-up email, behave as the assigned AI agent starting the conversation by email and move quickly toward booking a call; do not imply the lead emailed first. Use this first-outreach intro format: "I’m [agent name]. You filled our form on insurance, and I see you’re interested in [service_interest or coverage_type_needed]. Would you like to book a consultation with one of our experts?" If the lead replies yes later, ask what day and time they will be available. The HTML must use only simple safe tags: p, strong, em, ul, li, a, br.`,
+    content: `You write concise, accurate automated business emails. Return only valid JSON with keys subject, text, and html. Use the provided knowledgeContext as source-of-truth context for company services, policies, objections, offers, qualification guidance, and booking rules. If a knowledge item is only a file or URL reference without an excerpt, do not claim details from its unseen contents. Never invent booking details, pricing, promises, or links. Keep the tone warm and professional. If this is a first outreach/follow-up email, behave as the assigned AI agent starting the conversation by email and move quickly toward booking a call; do not imply the lead emailed first. Use this first-outreach intro format: "I’m [agent name]. You filled our form on insurance, and I see you’re interested in [service_interest or coverage_type_needed]. Would you like to book a consultation with one of our experts?" If the lead replies yes later, ask what day and time they will be available. The HTML must use only simple safe tags: p, strong, em, ul, li, a, br.`,
     input: {
       intent,
       tenant: { name: context.tenant?.name || null, industry: context.tenant?.industry || null },
@@ -191,6 +268,7 @@ function buildDraftInstructions(action: string, context: any, input: any) {
         meetingUrl: firstValue(input.meetingUrl, input.meeting_url, input.bookingUrl, input.booking_url) || null,
         location: input.location || null,
       },
+      knowledgeContext: context.knowledgeContext || [],
       requestedMessage: input.message || input.text || input.bodyText || null,
     },
   };

@@ -152,6 +152,10 @@ const CAMEL_TO_SNAKE = {
   syncedAt: 'synced_at',
   superAdminUserId: 'super_admin_user_id',
   onboardingProgressId: 'onboarding_progress_id',
+  emailNormalized: 'email_normalized',
+  invitedByUserId: 'invited_by_user_id',
+  claimedByUserId: 'claimed_by_user_id',
+  claimedAt: 'claimed_at',
   auditSummary: 'audit_summary',
   completedAt: 'completed_at',
   attemptCount: 'attempt_count',
@@ -591,6 +595,58 @@ export async function createAssistedTenant(user, input = {}) {
   return { tenant, progress, session, ownerClaim };
 }
 
+export async function updateSuperAdminTenantProfile(user, tenantId, input = {}) {
+  if (!tenantId) throw new Error('Tenant is required');
+  const profile = await getCurrentPlatformAdminProfile();
+  if (!profile?.isPlatformAdmin) throw new Error('Platform admin access is required');
+
+  const patch = {};
+  if (input.name !== undefined) {
+    const name = String(input.name || '').trim();
+    if (!name) throw new Error('Company name is required');
+    patch.name = name;
+  }
+  if (input.industry !== undefined) patch.industry = String(input.industry || '').trim() || null;
+  if (input.businessNiche !== undefined) patch.businessNiche = String(input.businessNiche || '').trim() || null;
+  if (input.defaultTimezone !== undefined) {
+    const defaultTimezone = String(input.defaultTimezone || '').trim();
+    if (!defaultTimezone) throw new Error('Default timezone is required');
+    patch.defaultTimezone = defaultTimezone;
+  }
+  if (input.city !== undefined) patch.city = String(input.city || '').trim() || null;
+  if (input.country !== undefined) patch.country = String(input.country || '').trim() || null;
+  if (input.status !== undefined) {
+    const status = String(input.status || '').trim();
+    if (!['active', 'onboarding', 'suspended', 'archived'].includes(status)) {
+      throw new Error('Unsupported tenant status');
+    }
+    patch.status = status;
+  }
+
+  if (!Object.keys(patch).length) throw new Error('No tenant changes were provided');
+
+  const data = await unwrap(
+    await insforge.database
+      .from('tenants')
+      .update(toDbRecord({
+        ...patch,
+        metadata: {
+          ...(input.existingMetadata || {}),
+          lastPlatformAdminEdit: {
+            userId: user?.authUserId || user?.id || null,
+            editedAt: new Date().toISOString(),
+            source: 'super_admin_tenants_page',
+          },
+        },
+        updatedAt: new Date().toISOString(),
+      }))
+      .eq('id', tenantId)
+      .select(),
+    'Failed to update tenant'
+  );
+  return fromDbRecord(data?.[0]);
+}
+
 export async function updateTenantBusinessNiche(tenantId, businessNiche) {
   const data = await unwrap(
     await insforge.database
@@ -832,6 +888,8 @@ export async function getSuperAdminDashboardData() {
     voiceSessions,
     bookingIntegrations,
     emailIdentities,
+    tenantOwnerClaims,
+    tenantUsers,
   ] = await Promise.all([
     safeSelectRows('tenants', { order: { column: 'created_at', ascending: false }, limit: 1000 }),
     safeSelectRows('tenant_agents', { order: { column: 'created_at', ascending: false }, limit: 5000 }),
@@ -854,6 +912,8 @@ export async function getSuperAdminDashboardData() {
     safeSelectRows('voice_call_sessions', { order: { column: 'created_at', ascending: false }, limit: 10000 }),
     safeSelectRows('tenant_booking_integrations', { order: { column: 'created_at', ascending: false }, limit: 5000 }),
     safeSelectRows('tenant_email_identities', { order: { column: 'created_at', ascending: false }, limit: 5000 }),
+    safeSelectRows('tenant_owner_claims', { order: { column: 'created_at', ascending: false }, limit: 5000 }),
+    safeSelectRows('tenant_users', { order: { column: 'created_at', ascending: false }, limit: 5000 }),
   ]);
 
   const tenantById = new Map(tenants.map((tenant) => [tenant.id, tenant]));
@@ -971,6 +1031,8 @@ export async function getSuperAdminDashboardData() {
     voiceSessions,
     bookingIntegrations,
     emailIdentities,
+    tenantOwnerClaims,
+    tenantUsers,
     tenantReadiness,
     agentsWithUsage,
     usageByTenant,
@@ -2035,6 +2097,216 @@ export async function getCallTranscript(user, actionId) {
     lead: fromDbRecord(leadRows?.[0]) || null,
     conversation: fromDbRecord(conversationRows?.[0]) || null,
     messages,
+  };
+}
+
+function compactText(value, maxLength = 220) {
+  if (!value || typeof value !== 'string') return '';
+  const cleaned = value.replace(/\s+/g, ' ').trim();
+  if (cleaned.length <= maxLength) return cleaned;
+  return cleaned.slice(0, maxLength - 1).trimEnd() + '...';
+}
+
+function readableLabel(value) {
+  if (!value) return 'Unknown';
+  return String(value)
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function firstText(...values) {
+  return values.find((value) => typeof value === 'string' && value.trim()) || '';
+}
+
+function eventTimestamp(row = {}) {
+  return row.sentAt || row.deliveredAt || row.executedAt || row.callStartedAt || row.answeredAt || row.endedAt || row.startTime || row.createdAt || row.updatedAt || null;
+}
+
+function buildLeadDiscussionSummary({ lead, conversations, messages, emails, calls, actions, meetings }) {
+  const channelCounts = {
+    calls: calls.length,
+    emails: emails.length,
+    texts: messages.filter((message) => message.channel === 'sms').length,
+    chats: messages.filter((message) => ['chat', 'whatsapp', 'web_chat'].includes(message.channel)).length,
+  };
+
+  const latestConversation = [...conversations]
+    .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0).getTime() - new Date(a.updatedAt || a.createdAt || 0).getTime())[0];
+  const latestCall = [...calls]
+    .sort((a, b) => new Date(eventTimestamp(b) || 0).getTime() - new Date(eventTimestamp(a) || 0).getTime())[0];
+
+  const overview = compactText(firstText(
+    latestConversation?.lastSummary,
+    latestCall?.summary,
+    lead.notes,
+    lead.serviceInterest ? 'Interested in ' + lead.serviceInterest + '.' : ''
+  ), 360);
+
+  const keyPoints = [
+    lead.serviceInterest ? 'Service interest: ' + lead.serviceInterest : null,
+    lead.qualificationStatus ? 'Qualification: ' + readableLabel(lead.qualificationStatus) + (lead.qualificationScore ? ' (' + lead.qualificationScore + ')' : '') : null,
+    lead.schedulingState ? 'Scheduling: ' + readableLabel(lead.schedulingState) : null,
+    latestCall ? 'Latest call: ' + readableLabel(latestCall.outcome || latestCall.status) + (latestCall.summary ? ' - ' + compactText(latestCall.summary, 120) : '') : null,
+    meetings[0] ? 'Meeting: ' + readableLabel(meetings[0].status) + ' for ' + meetings[0].title : null,
+    lead.requiresHumanReview ? 'Needs human review: ' + (lead.escalationReason || 'Review requested.') : null,
+    lead.doNotContact || lead.optedOutAt ? 'Contact paused: lead is marked do not contact or opted out.' : null,
+  ].filter(Boolean).slice(0, 7);
+
+  const timeline = [
+    ...calls.map((call) => ({
+      id: 'call-' + call.id,
+      channel: 'Call',
+      title: readableLabel(call.outcome || call.status || 'Call'),
+      body: compactText(firstText(call.summary, call.transcript, call.errorMessage), 280),
+      status: call.status,
+      occurredAt: eventTimestamp(call),
+    })),
+    ...emails.map((email) => ({
+      id: 'email-' + email.id,
+      channel: 'Email',
+      title: compactText(email.subject || readableLabel(email.emailType || email.status), 120),
+      body: compactText(firstText(email.textContent, email.errorMessage), 280),
+      status: email.status,
+      occurredAt: eventTimestamp(email),
+    })),
+    ...messages.map((message) => ({
+      id: 'message-' + message.id,
+      channel: readableLabel(message.channel),
+      title: readableLabel([message.direction, message.messageType].filter(Boolean).join(' ')),
+      body: compactText(firstText(message.bodyText, message.subject, message.errorMessage), 280),
+      status: message.status,
+      occurredAt: eventTimestamp(message),
+    })),
+    ...actions.map((action) => ({
+      id: 'action-' + action.id,
+      channel: readableLabel(action.channel),
+      title: readableLabel(action.actionType),
+      body: compactText(firstText(action.reason, action.result?.summary, action.result?.outcome, action.errorMessage), 240),
+      status: action.status,
+      occurredAt: eventTimestamp(action),
+    })),
+    ...meetings.map((meeting) => ({
+      id: 'meeting-' + meeting.id,
+      channel: 'Meeting',
+      title: meeting.title || readableLabel(meeting.meetingType),
+      body: compactText(firstText(meeting.notes, meeting.description, meeting.location), 240),
+      status: meeting.status,
+      occurredAt: eventTimestamp(meeting),
+    })),
+  ]
+    .filter((event) => event.occurredAt || event.body || event.title)
+    .sort((a, b) => new Date(b.occurredAt || 0).getTime() - new Date(a.occurredAt || 0).getTime())
+    .slice(0, 20);
+
+  return {
+    overview: overview || 'No discussion summary has been captured yet.',
+    keyPoints,
+    channelCounts,
+    timeline,
+    totals: {
+      conversations: conversations.length,
+      messages: messages.length,
+      emails: emails.length,
+      calls: calls.length,
+      actions: actions.length,
+      meetings: meetings.length,
+    },
+  };
+}
+
+export async function getLeadConversationSummary(user, leadId) {
+  const tenantId = tenantIdFromUser(user);
+  const leadRows = await unwrap(
+    await insforge.database
+      .from('leads')
+      .select('*')
+      .eq('id', leadId)
+      .eq('tenant_id', tenantId)
+      .limit(1),
+    'Failed to load lead'
+  );
+  const lead = fromDbRecord(leadRows?.[0]);
+  if (!lead) throw new Error('Lead not found');
+
+  const [conversationRows, messageRows, emailRows, callRows, actionRows, meetingRows] = await Promise.all([
+    unwrap(
+      await insforge.database
+        .from('lead_conversations')
+        .select('*')
+        .eq('lead_id', leadId)
+        .eq('tenant_id', tenantId)
+        .order('updated_at', { ascending: false })
+        .limit(25),
+      'Failed to load lead conversations'
+    ),
+    unwrap(
+      await insforge.database
+        .from('lead_conversation_messages')
+        .select('*')
+        .eq('lead_id', leadId)
+        .eq('tenant_id', tenantId)
+        .order('created_at', { ascending: false })
+        .limit(150),
+      'Failed to load lead messages'
+    ),
+    unwrap(
+      await insforge.database
+        .from('email_queue')
+        .select('*')
+        .eq('lead_id', leadId)
+        .eq('tenant_id', tenantId)
+        .order('created_at', { ascending: false })
+        .limit(50),
+      'Failed to load lead emails'
+    ),
+    unwrap(
+      await insforge.database
+        .from('voice_call_sessions')
+        .select('*')
+        .eq('lead_id', leadId)
+        .eq('tenant_id', tenantId)
+        .order('created_at', { ascending: false })
+        .limit(50),
+      'Failed to load lead calls'
+    ),
+    unwrap(
+      await insforge.database
+        .from('bob_actions')
+        .select('*')
+        .eq('lead_id', leadId)
+        .eq('tenant_id', tenantId)
+        .order('created_at', { ascending: false })
+        .limit(75),
+      'Failed to load Bob actions'
+    ),
+    unwrap(
+      await insforge.database
+        .from('meetings')
+        .select('*')
+        .eq('lead_id', leadId)
+        .eq('tenant_id', tenantId)
+        .order('start_time', { ascending: false })
+        .limit(25),
+      'Failed to load lead meetings'
+    ),
+  ]);
+
+  const conversations = fromDbRows(conversationRows || []);
+  const messages = fromDbRows(messageRows || []);
+  const emails = fromDbRows(emailRows || []);
+  const calls = fromDbRows(callRows || []);
+  const actions = fromDbRows(actionRows || []);
+  const meetings = fromDbRows(meetingRows || []);
+
+  return {
+    lead,
+    conversations,
+    messages,
+    emails,
+    calls,
+    actions,
+    meetings,
+    summary: buildLeadDiscussionSummary({ lead, conversations, messages, emails, calls, actions, meetings }),
   };
 }
 
