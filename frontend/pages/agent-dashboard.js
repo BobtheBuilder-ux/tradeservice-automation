@@ -432,7 +432,7 @@ export default function AgentDashboard() {
                                   {(lead.qualificationStatus || 'unqualified').replace(/_/g, ' ')}
                                 </span>
                                 <span className="inline-flex px-2 py-1 text-[11px] font-bold rounded-lg bg-indigo-100 text-indigo-800 border border-indigo-200">
-                                  {(lead.leadStage || 'new_inquiry').replace(/_/g, ' ')}
+                                  {(lead.leadStage || 'new').replace(/_/g, ' ')}
                                 </span>
                               </div>
                             </div>

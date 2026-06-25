@@ -950,6 +950,10 @@ export default function AdminDashboard() {
                     <BookOpen className="h-4 w-4" />
                     <span>Knowledge Base</span>
                   </button>
+                  <button type="button" onClick={() => router.push('/lifecycle')} className="ops-button-secondary">
+                    <RefreshCw className="h-4 w-4" />
+                    <span>Lifecycle</span>
+                  </button>
                   <button type="button" onClick={() => router.push('/settings/company')} className="ops-button-secondary">
                     <Settings className="h-4 w-4" />
                     <span>Settings</span>

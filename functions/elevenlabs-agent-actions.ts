@@ -391,12 +391,13 @@ function buildAgentPrompt(context: JsonRecord) {
     'Start outbound calls with this opening format for insurance/form leads: "Hi [lead name], I’m [agent name]. You filled our form on insurance, and I see you’re interested in [service_interest or coverage_type_needed]. Would you like to book a consultation with one of our experts?" Do not mention the company name in the opening. Default to English. Do not ask the lead to choose a language. If preferred_language is already set in lead data, use that language from the start. Do not open with "is now a good time" or similar permission-only language.',
     'If the lead asks to switch language mid-call, never end the call and never restart the introduction. Respond within one short sentence in the requested language, then continue all subsequent responses in that language from the current point in the conversation. Save preferredLanguage with update_lead_status after the spoken acknowledgement, but do not let the save delay the language switch. Do not save English as a default unless the lead explicitly asks for English.',
     'Never end the call because of background noise, cross-talk, multiple interruptions, silence, or a language change. Treat interruptions as normal conversation. If the lead is silent, patiently prompt again instead of ending.',
-    'If the lead sounds busy after the introduction, offer a quick SMS follow-up or a better time. Do not pressure them.',
+    'If the lead sounds busy, says it is not a good time, asks you to call later, asks for a callback, or gives a better day/time, do not pressure them and do not abandon the lead. Ask one short clarifying question for the best callback time if needed, then call update_lead_status with outcome callback_requested or not_available, nextContactAt when a time is known, and preferredContactChannel call unless they asked for another consented channel.',
     'Use the runtime lead variables first. Only call get_lead_context when important lead, company, campaign, or setup context is missing or ambiguous. Do not call get_lead_context just because the lead said yes to booking or gave a day/time.',
     `Business-hours guardrail: outbound voice calls are allowed only from 10:00 AM to 5:00 PM in the tenant timezone (${tenantTimezone}). Never ask the system to place or retry a voice call before 10:00 AM or at/after 5:00 PM local tenant time. If outside that window, wait until the next 10:00 AM local window or use an allowed non-call channel only when the lead consent permits it.`,
     'The core purpose of the call is booking. Treat service_interest, imported coverage_type_needed, imported service/interest, lead_form_summary, qualification notes, and location as enough reason/context to proceed. Do not ask why the lead is interested when those fields exist. Only ask a service-interest clarifier when all lead/form interest fields are missing.',
     'Some leads already filled out a form or import fields before the call. When lead context, custom_fields.importedLeadData, qualification notes, or qualification answers already contain useful answers, do not ask those questions again. Use the booking-first insurance form script, mention service_interest or coverage_type_needed, then ask whether they want to book a consultation with one of our experts.',
     'Adapt to preferred_contact_channel. If the lead prefers call or phone, prioritize booking directly on the call. If the lead prefers email, keep the call brief, acknowledge their preference, offer to send details or a booking link by email when email consent/address exist, and only continue booking by phone if the lead is comfortable doing it now. If the lead changes their preference during the conversation, save it with update_lead_status and follow the new preference immediately.',
+    'Handle lifecycle intents explicitly. If the lead says "text me", "send info", "send details", "email me", "WhatsApp me", or asks to continue on another channel, call update_lead_status with outcome channel_switch_requested, preferredContactChannel/requestedChannel set to sms, email, or whatsapp, and nextContactAt if they gave a time. Then use send_sms, send_email, or send_whatsapp only when the matching consent/contact/setup exists. If the lead says "not now", "not interested right now", or "maybe later" but does not opt out, call update_lead_status with outcome not_interested_now, leadStage nurture, schedulingState needs_follow_up, and do not mark them do-not-contact. If the lead says stop, unsubscribe, wrong number, or never contact me again, use mark_opt_out instead.',
     'Before booking, qualify the lead with a short dynamic question set based on their service interest and tenant knowledge only when the lead has not already provided useful form/import context. Ask only relevant questions, one at a time, normally 3 to 7 questions for non-prefilled leads. For insurance-like services, examples include marital/common-law status, children, home ownership, what they want to protect, free review interest, age range, and current insurance status. For other services, infer comparable qualification questions from the service and knowledge base.',
     'For pre-qualified or form-qualified leads, do not run the normal qualification flow. Use the insurance form script and mention what is already known. If they say yes, okay, sure, sounds good, or otherwise agree to booking but do not give a time, do not go silent and do not call a tool yet. Immediately ask one short scheduling question: "Great — what day and time will you be available?" If they give a day/time, call create_booking immediately. Do not call check_availability first during a live call.',
     'After collecting or confirming qualification answers, call update_lead_status with qualificationQuestions, qualificationAnswers, qualificationSummary, qualificationStatus, qualificationScore when useful, and leadStage or schedulingState. Do not book until the lead has answered enough necessary questions, refuses, clearly asks to skip qualification, or the existing form/lead context already provides enough information to proceed.',
@@ -576,6 +577,14 @@ function elevenLabsToolDefinitions() {
       ['message']
     ),
     webhookToolConfig(
+      'send_whatsapp',
+      'Send a concise WhatsApp follow-up, recap, or booking link to the lead. Only use when the lead has WhatsApp consent and the tenant WhatsApp sender is active.',
+      {
+        message: literal('string', 'The WhatsApp body to send to the lead. Keep it concise and include the booking link when relevant.'),
+      },
+      ['message']
+    ),
+    webhookToolConfig(
       'send_email',
       'Send a concise email follow-up, recap, or booking confirmation to the lead. Only use when the lead has email consent and an email address.',
       {
@@ -592,23 +601,46 @@ function elevenLabsToolDefinitions() {
         status: literal('string', 'Optional CRM status update.'),
         qualificationStatus: literal('string', 'Optional qualification status update.'),
         leadStage: literal('string', 'Optional lead stage update.'),
-        schedulingState: literal('string', 'Optional scheduling state, such as interested, scheduled, or booking_link_sent.'),
+        schedulingState: literal('string', 'Optional scheduling state: not_started, callback_requested, booking_requested, booking_offered, booked, reschedule_requested, or needs_follow_up.'),
         preferredLanguage: literal('string', 'The lead spoken language preference, such as English, Spanish, French, Yoruba, Igbo, Hausa, Arabic, or Portuguese. Save exactly what the lead asks for.'),
         preferredContactChannel: literal('string', 'Optional preferred contact channel the lead asks for, such as call, phone, email, sms, or whatsapp. Save it when the lead says they prefer a different follow-up channel.'),
+        requestedChannel: literal('string', 'Optional requested next channel for lifecycle scheduling, such as call, sms, whatsapp, or email. Use this when the lead asks to text, email, WhatsApp, or call later.'),
+        outcome: literal('string', 'Optional lifecycle outcome when the lead expresses an intent that should schedule or stop automation: callback_requested, not_available, channel_switch_requested, not_interested_now, not_interested_final, wrong_number, opted_out, or needs_human_review.'),
+        lifecycleOutcome: literal('string', 'Same as outcome. Use this when saving a lifecycle intent without changing any other lead fields.'),
         qualificationQuestions: literal('string', 'JSON or concise text list of the qualification questions asked in this conversation.'),
         qualificationAnswers: literal('string', 'JSON or concise text list of the lead answers to the qualification questions.'),
         qualificationSummary: literal('string', 'Short summary of the qualification result and why the lead is or is not ready to book.'),
         qualificationNotes: literal('string', 'Brief notes from the conversation.'),
         nextContactAt: literal('string', 'Optional ISO date/time for the next follow-up.'),
+        requestedCallbackAt: literal('string', 'Optional ISO date/time requested by the lead for a callback or follow-up. Use this for "call me tomorrow" or similar requests.'),
       },
       [],
+      5
+    ),
+    webhookToolConfig(
+      'escalate_to_human',
+      'Escalate the lead to a human when the lead asks for a person, has a sensitive question, or the AI cannot safely continue.',
+      {
+        reason: literal('string', 'Short safe reason for human review.'),
+      },
+      ['reason'],
+      5
+    ),
+    webhookToolConfig(
+      'mark_opt_out',
+      'Mark the lead opted out immediately when they say stop, unsubscribe, wrong number, do not contact, or never contact me again.',
+      {
+        channel: literal('string', 'Opt-out channel: call, sms, whatsapp, email, or all. Use all for wrong number or do-not-contact requests.'),
+        reason: literal('string', 'Short reason from the lead.'),
+      },
+      ['channel'],
       5
     ),
     webhookToolConfig(
       'record_call_outcome',
       'Record the final call outcome, summary, and transcript details at the end of the call.',
       {
-        outcome: literal('string', 'Final call outcome, such as booked, interested, no_answer, not_interested, callback_requested, or completed.'),
+        outcome: literal('string', 'Final call outcome, such as booked, answered, no_answer, busy, voicemail_left, callback_requested, not_available, channel_switch_requested, not_interested_now, not_interested_final, wrong_number, opted_out, or needs_human_review.'),
         summary: literal('string', 'Short summary of what happened on the call.'),
         transcript: literal('string', 'Optional transcript or key call notes.'),
       },

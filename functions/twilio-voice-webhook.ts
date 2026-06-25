@@ -92,6 +92,57 @@ function statusFromTwilio(callStatus: string) {
   return status || 'in_progress';
 }
 
+function canonicalLifecycleOutcome(value: any) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/-/g, '_');
+  const aliases: Record<string, string> = {
+    completed: 'answered',
+    canceled: 'failed',
+    no_answer: 'no_answer',
+  };
+  const canonical = [
+    'answered',
+    'no_answer',
+    'busy',
+    'voicemail_left',
+    'callback_requested',
+    'not_available',
+    'channel_switch_requested',
+    'not_interested_now',
+    'not_interested_final',
+    'wrong_number',
+    'opted_out',
+    'booked',
+    'failed',
+    'interrupted',
+    'needs_human_review',
+  ];
+  const mapped = aliases[normalized] || normalized;
+  return canonical.includes(mapped) ? mapped : 'failed';
+}
+
+async function recordLifecycleEvent(db: any, event: JsonRecord) {
+  if (!event.tenantId || !event.leadId) return null;
+  const { error } = await db.database.from('lead_lifecycle_events').insert([{
+    tenant_id: event.tenantId,
+    lead_id: event.leadId,
+    source_action_id: event.sourceActionId || null,
+    source_channel: event.sourceChannel || 'call',
+    previous_stage: event.previousStage || null,
+    next_stage: event.nextStage || null,
+    previous_scheduling_state: event.previousSchedulingState || null,
+    next_scheduling_state: event.nextSchedulingState || null,
+    outcome: event.outcome ? canonicalLifecycleOutcome(event.outcome) : null,
+    next_action_type: event.nextActionType || null,
+    next_action_channel: event.nextActionChannel || null,
+    next_action_at: event.nextActionAt || null,
+    reason: event.reason || null,
+    blocked_reason: event.blockedReason || null,
+    metadata: event.metadata || {},
+  }]);
+  if (error) console.warn('Failed to record lifecycle event', error.message || error);
+  return !error;
+}
+
 function functionBaseUrl(reqUrl: URL) {
   return (Deno.env.get('INSFORGE_FUNCTION_BASE_URL') || reqUrl.origin).replace(/\/$/, '');
 }
@@ -418,7 +469,7 @@ function buildCallPrompt(rows: JsonRecord) {
     'Never end the call because of background noise, cross-talk, multiple interruptions, silence, or a language change. Treat interruptions as normal conversation. If the lead is silent, patiently prompt again instead of ending.',
     rows.lead?.preferred_language ? `Lead preferred language: ${rows.lead.preferred_language}. Continue in this language unless the lead changes it.` : 'Lead preferred language is not set. Use English by default and do not ask for language selection.',
     contactPreferenceInstruction(rows.lead),
-    'After the lead responds, keep the conversation warm, concise, and useful. If they are busy, offer to send an SMS follow-up or schedule a better time.',
+    'After the lead responds, keep the conversation warm, concise, and useful. If they are busy, say it is not a good time, ask you to call later, or give a better day/time, do not pressure them and do not abandon the lead. Ask one short clarifying question for the best callback time if needed, then call update_lead_status with outcome callback_requested or not_available, nextContactAt when a time is known, and preferredContactChannel call unless they asked for another consented channel.',
     'Use the tenant knowledge base for company-specific services, process, pricing guidance, objections, and policies. If knowledge is missing, do not invent details; offer to have the team follow up.',
     'Use the runtime lead variables first. Only call get_lead_context when important lead, company, campaign, or setup context is missing or ambiguous. Do not call get_lead_context just because the lead said yes to booking or gave a day/time.',
     `Business-hours guardrail: this tenant allows outbound voice calls only from 10:00 AM to 5:00 PM in tenant local time (${tenantTimezone}). Never request, schedule, or retry a voice call before 10:00 AM or at/after 5:00 PM local tenant time. If outside that window, wait until the next 10:00 AM local tenant window or use an allowed non-call channel only when consent permits it.`,
@@ -430,13 +481,14 @@ function buildCallPrompt(rows: JsonRecord) {
       ? `This lead appears pre-qualified or form-qualified. Do not run the long question-and-answer flow. The required flow is: introduce yourself with the insurance form script, mention the known interest/coverage, then ask whether they want to book a consultation with one of our experts. If the lead says yes, okay, sure, sounds good, or otherwise agrees but does not give a time, do not go silent and do not call a tool yet. Immediately ask one scheduling question only: "Great — what day and time will you be available?" or offer ${suggestedDate} as a suggested date and ask what time works. When the lead gives a date and time, call create_booking immediately. Do not call check_availability first during a live call.`
       : 'This lead does not have enough pre-filled qualification context. Use a short dynamic qualification flow before booking.',
     'The core purpose of this outbound call is booking. Treat service_interest, imported coverage_type_needed, imported service/interest, lead_form_summary, and location as enough reason/context to proceed. Do not ask why the lead is interested when those fields exist. Only ask a service-interest clarifier when all lead/form interest fields are missing.',
+    'Handle lifecycle intents explicitly. If the lead says "text me", "send info", "send details", "email me", "WhatsApp me", or asks to continue on another channel, call update_lead_status with outcome channel_switch_requested, preferredContactChannel/requestedChannel set to sms, email, or whatsapp, and nextContactAt if they gave a time. Then use send_sms, send_email, or send_whatsapp only when the matching consent/contact/setup exists. If the lead says "not now", "not interested right now", or "maybe later" but does not opt out, call update_lead_status with outcome not_interested_now, leadStage nurture, schedulingState needs_follow_up, and do not mark them do-not-contact. If the lead says stop, unsubscribe, wrong number, or never contact me again, use mark_opt_out instead.',
     'Before booking, qualify the lead with a short dynamic question set based on their service interest and tenant knowledge only when the form/context does not already answer the needed questions. Ask only relevant missing questions, one at a time. For pre-filled leads, skip repeated questions completely unless one must-have detail is truly missing; the main objective is immediate booking.',
     'After collecting qualification answers, call update_lead_status with qualificationQuestions, qualificationAnswers, qualificationSummary, qualificationStatus, qualificationScore when useful, and leadStage or schedulingState.',
     'During this active call, treat every booking date the lead mentions as a near-future date by default, not next year. Use current_date, current_time, and current_timezone to resolve relative dates like today, tomorrow, Monday, next week, or later today to the next near-future occurrence. If the lead gives a weekday or day number without a clear month, ask one short confirmation question for the exact month, day, year, and time before calling create_booking. Never use old example dates, training-data dates, or a far-future year to fill missing date parts.',
     'After the introduction for a form-filled lead, move immediately to confirming a booking. If they say yes, okay, sure, sounds good, or otherwise agrees but does not give a time, ask one scheduling question only: "Great — what day and time will you be available?" If the lead gives both date and time, call create_booking immediately. Do not call check_availability first during a live call.',
     'If a booking is created, say the consultation is confirmed and that meeting details/reminders will be sent by the allowed channels. Do not wait for delivery confirmation during the live call.',
     'Do not read, pronounce, or spell long URLs by default. Say that the meeting link will be sent by SMS/email. If the lead explicitly asks you to read a link aloud, read it slowly in short chunks.',
-    'Use send_sms for requested texts, recaps, booking links, or follow-ups only when SMS consent exists. Respect opt-outs immediately.',
+    'Use send_sms for requested texts, recaps, booking links, or follow-ups only when SMS consent exists. Use send_email only when email consent and an email address exist. Use send_whatsapp only when WhatsApp consent and tenant WhatsApp setup exist. Respect opt-outs immediately.',
     'Record outcomes with record_call_outcome before ending when practical.',
   ].filter(Boolean).join('\n\n');
 }
@@ -703,6 +755,24 @@ async function handleStatus(db: any, reqUrl: URL, body: JsonRecord) {
     }).eq('id', actionId || session?.bob_action_id).eq('tenant_id', session?.tenant_id || body.tenantId);
   }
 
+  if (session?.lead_id && ended && mappedStatus !== 'completed') {
+    await recordLifecycleEvent(db, {
+      tenantId: session.tenant_id,
+      leadId: session.lead_id,
+      sourceActionId: actionId || session.bob_action_id || null,
+      sourceChannel: 'call',
+      outcome: mappedStatus,
+      reason: `Twilio call ended with status ${mappedStatus}.`,
+      blockedReason: mappedStatus === 'no_answer' || mappedStatus === 'busy' ? null : 'voice_call_failed',
+      metadata: {
+        source: 'twilio_voice_status',
+        voiceCallSessionId: session.id,
+        twilioCallSid: firstValue(body.CallSid, session.twilio_call_sid) || null,
+        durationSeconds: duration,
+      },
+    });
+  }
+
   return jsonResponse({ success: true });
 }
 
@@ -956,6 +1026,30 @@ async function finalizeCallState(db: any, session: JsonRecord, input: JsonRecord
         },
       }).eq('id', campaignLead.id).eq('tenant_id', session.tenant_id);
     }
+  }
+
+  if (session.lead_id) {
+    await recordLifecycleEvent(db, {
+      tenantId: session.tenant_id,
+      leadId: session.lead_id,
+      sourceActionId: session.bob_action_id || null,
+      sourceChannel: 'call',
+      outcome: finalOutcome,
+      nextActionType: reboundAction ? reboundAction.action_type : null,
+      nextActionChannel: reboundAction ? reboundAction.channel : null,
+      nextActionAt: reboundAction ? reboundAction.scheduled_for : null,
+      reason: interrupted
+        ? 'Call was interrupted before the conversation could continue. Rebound call queued.'
+        : summary,
+      blockedReason: callSucceeded || reboundAction ? null : 'voice_call_failed',
+      metadata: {
+        source: 'twilio_voice_finalization',
+        voiceCallSessionId: session.id,
+        observedSeconds,
+        interrupted,
+        reboundActionId: reboundAction?.id || null,
+      },
+    });
   }
 
   return { interrupted, finalOutcome, observedSeconds, reboundAction };

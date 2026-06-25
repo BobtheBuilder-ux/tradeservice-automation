@@ -85,3 +85,45 @@ export async function getCalendlyConnectUrl(options = {}) {
 export async function listCalendlyEventTypes() {
   return invokeFunction('calendly-oauth', { action: 'event-types', body: {} });
 }
+
+export async function getMetaConnectUrl(options = {}) {
+  return invokeFunction('meta-oauth', {
+    action: 'connect-url',
+    body: {
+      returnTo: options.returnTo || undefined,
+    },
+  });
+}
+
+export async function getMetaStatus() {
+  return invokeFunction('meta-oauth', { action: 'status', body: {} });
+}
+
+export async function listMetaAssets(options = {}) {
+  const baseUrl = getInsForgeFunctionBaseUrl();
+  if (!baseUrl) throw new Error('InsForge Function base URL is not configured');
+  const url = new URL('/meta-oauth', baseUrl);
+  url.searchParams.set('action', 'assets');
+  if (options.pageId) url.searchParams.set('pageId', options.pageId);
+  const token = getInsForgeAccessToken();
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(url.toString(), { method: 'GET', headers });
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data?.error || data?.message || `Function request failed: ${response.status}`);
+  }
+  return data;
+}
+
+export async function saveMetaSelection(input = {}) {
+  return invokeFunction('meta-oauth', { action: 'save-selection', body: input });
+}
+
+export async function disconnectMetaIntegration() {
+  return invokeFunction('meta-oauth', { action: 'disconnect', body: {} });
+}
+
+export async function testMetaSetup() {
+  return invokeFunction('meta-oauth', { action: 'test-setup', body: {} });
+}

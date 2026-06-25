@@ -1,6 +1,9 @@
 import { createClient } from 'npm:@insforge/sdk';
 
 type JsonRecord = Record<string, any>;
+const EMAIL_BRAIN_INTENTS = ['general_question', 'booking_request', 'callback_request', 'channel_switch', 'not_interested_now', 'not_interested_final', 'opt_out', 'wrong_number', 'pricing_question', 'service_question', 'human_review', 'other'];
+const EMAIL_BRAIN_OUTCOMES = ['answered', 'callback_requested', 'channel_switch_requested', 'not_interested_now', 'not_interested_final', 'wrong_number', 'opted_out', 'booked', 'needs_human_review'];
+const EMAIL_STOP_PATTERNS = [/\bstop\b/i, /unsubscribe/i, /do not contact/i, /don't contact/i, /wrong number/i, /never contact/i];
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -744,11 +747,99 @@ function extractOutputText(response: any) {
     .join('');
 }
 
+function normalizeBrainChannel(value: unknown) {
+  const channel = String(value || '').toLowerCase();
+  return ['call', 'voice', 'phone', 'sms', 'whatsapp', 'email', 'messenger'].includes(channel) ? channel : null;
+}
+
+function normalizeEmailBrainOutput(raw: any) {
+  const recommendation = raw?.lifecycleRecommendation || {};
+  return {
+    subject: String(raw?.replySubject || raw?.subject || '').trim().slice(0, 240),
+    text: String(raw?.replyText || raw?.text || '').trim().slice(0, 12000),
+    html: String(raw?.replyHtml || raw?.html || '').trim().slice(0, 20000),
+    detectedIntent: EMAIL_BRAIN_INTENTS.includes(raw?.detectedIntent) ? raw.detectedIntent : 'other',
+    preferredChannel: normalizeBrainChannel(raw?.preferredChannel),
+    callbackRequested: Boolean(raw?.callbackRequested),
+    requestedCallbackAt: raw?.requestedCallbackAt ? String(raw.requestedCallbackAt) : null,
+    bookingIntent: Boolean(raw?.bookingIntent),
+    optOutIntent: Boolean(raw?.optOutIntent || raw?.detectedIntent === 'opt_out'),
+    needsHumanReview: Boolean(raw?.needsHumanReview),
+    humanReviewReason: raw?.humanReviewReason ? String(raw.humanReviewReason).slice(0, 500) : null,
+    confidence: Number.isFinite(Number(raw?.confidence)) ? Math.max(0, Math.min(1, Number(raw.confidence))) : 0,
+    lifecycleRecommendation: {
+      outcome: EMAIL_BRAIN_OUTCOMES.includes(recommendation?.outcome) ? recommendation.outcome : null,
+      nextActionType: recommendation?.nextActionType ? String(recommendation.nextActionType).slice(0, 100) : null,
+      nextActionChannel: normalizeBrainChannel(recommendation?.nextActionChannel) || (recommendation?.nextActionChannel === 'human' ? 'human' : recommendation?.nextActionChannel === 'system' ? 'system' : null),
+      nextActionAt: recommendation?.nextActionAt ? String(recommendation.nextActionAt) : null,
+      reason: recommendation?.reason ? String(recommendation.reason).slice(0, 700) : null,
+    },
+    allowedActionHints: Array.isArray(raw?.allowedActionHints) ? raw.allowedActionHints.filter((item: any) => typeof item === 'string').slice(0, 8) : [],
+    reason: raw?.reason ? String(raw.reason).slice(0, 800) : '',
+  };
+}
+
+function emailLifecycleOutcome(input: { draft?: any; confirmedBooking?: any }) {
+  if (input.confirmedBooking?.booked) return 'booked';
+  const draft = input.draft || {};
+  if (draft.optOutIntent || ['opt_out', 'wrong_number', 'not_interested_final'].includes(draft.detectedIntent)) {
+    if (draft.detectedIntent === 'wrong_number') return 'wrong_number';
+    if (draft.detectedIntent === 'not_interested_final') return 'not_interested_final';
+    return 'opted_out';
+  }
+  return draft.lifecycleRecommendation?.outcome || 'answered';
+}
+
+function messageActionsSecret() {
+  return Deno.env.get('MESSAGE_ACTIONS_SECRET') || Deno.env.get('ELEVENLABS_TOOL_SECRET') || '';
+}
+
+async function callLifecycle(db: any, input: JsonRecord) {
+  const base = (Deno.env.get('INSFORGE_FUNCTION_BASE_URL') || '').replace(/\/$/, '');
+  const secret = messageActionsSecret();
+  if (!base || !secret || !input.leadId) return null;
+  try {
+    const response = await fetch(`${base}/bob-queue-actions?action=evaluate-lifecycle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Message-Actions-Secret': secret, 'X-ElevenLabs-Tool-Secret': secret },
+      body: JSON.stringify(input),
+    });
+    return await response.json().catch(() => null);
+  } catch {
+    return null;
+  }
+}
+
+async function stopLeadFromInboundEmail(db: any, input: { tenantId: string; lead: any; reason: string }) {
+  const now = nowIso();
+  await db.database.from('leads').update({
+    email_consent: false,
+    do_not_contact: true,
+    opted_out_at: now,
+    opt_out_channel: 'email',
+    opt_out_reason: input.reason,
+    automation_paused: true,
+    lead_stage: 'do_not_contact',
+    requires_human_review: false,
+    updated_at: now,
+  }).eq('tenant_id', input.tenantId).eq('id', input.lead.id);
+}
+
+async function writeMessagingBrainAudit(db: any, row: JsonRecord) {
+  try {
+    await db.database.from('openai_messaging_brain_audit_logs').insert([row]);
+  } catch {
+    // Audit failure should not block provider webhooks.
+  }
+}
+
 async function draftEmailReply(db: any, input: {
   tenant: any;
   agent: any;
   lead: any;
   inbound: ReturnType<typeof inboundFields>;
+  inboundMessageId?: string | null;
+  conversationId?: string | null;
   confirmedBooking?: any;
 }) {
   if (input.confirmedBooking?.meeting) {
@@ -788,95 +879,180 @@ async function draftEmailReply(db: any, input: {
   const apiKey = Deno.env.get('OPENAI_API_KEY');
   if (!apiKey) throw new Error('OPENAI_API_KEY is not configured');
   const model = Deno.env.get('OPENAI_EMAIL_MODEL') || 'gpt-5.5';
+  const started = Date.now();
   const [knowledge, recentMessages, booking] = await Promise.all([
     loadKnowledgeContext(db, input.tenant, input.agent),
     loadRecentEmailMessages(db, input.tenant.id, input.lead.id),
     loadBookingIntegration(db, input.tenant.id),
   ]);
   const preferredLanguage = input.lead?.preferred_language || null;
+  const requestPayload = {
+    source: 'resend-email-webhook',
+    channel: 'email',
+    tenant: { id: input.tenant?.id || null, name: input.tenant?.name || null, businessNiche: input.tenant?.business_niche || null },
+    agent: { id: input.agent?.id || null, name: input.agent?.display_name || null },
+    lead: {
+      id: input.lead?.id || null,
+      serviceInterest: input.lead?.service_interest || null,
+      preferredContactChannel: input.lead?.preferred_contact_channel || null,
+      preferredLanguage,
+      lifecycleStage: input.lead?.lead_stage || null,
+      schedulingState: input.lead?.scheduling_state || null,
+    },
+    inboundSubject: compactText(input.inbound.subject, 500),
+    inboundText: compactText(input.inbound.text, 3000),
+    knowledgeTitles: (knowledge || []).map((item: any) => ({ scope: item.scope, title: item.title, hasExcerpt: item.hasExcerpt })),
+  };
 
-  const response = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      instructions: [
-        'You are an automated email assistant for a service business.',
-        'Return only valid JSON with keys subject, text, and html.',
-        'The reply is sent automatically, so be accurate, concise, and helpful.',
-        'Primary goal: answer the lead if the answer is known, then move toward booking a consultation/call as quickly as possible.',
-        'Use the provided knowledge array as source-of-truth context. If a knowledge item is only a file or URL reference without an excerpt, do not claim details from its unseen contents.',
-        'Do not ask long qualification questions when the lead already provided useful context.',
-        'If the lead gave a date or time but not both, ask only for the missing date or time. Do not ask for timezone; use the lead location already in context.',
-        'Never invent prices, promises, availability, policies, discounts, or booking links.',
-        'If exact information is missing, say that the team can confirm details on the call and offer the next booking step.',
-        'Use only simple safe HTML tags: p, strong, em, ul, li, a, br.',
-        preferredLanguage ? `Write the reply in ${preferredLanguage}.` : '',
-      ].filter(Boolean).join(' '),
-      input: JSON.stringify({
-        tenant: {
-          name: input.tenant?.name || null,
-          industry: input.tenant?.industry || null,
-          businessNiche: input.tenant?.business_niche || null,
-        },
-        agent: { name: input.agent?.display_name || 'Bob' },
-        lead: {
-          name: leadName(input.lead),
-          email: input.lead?.email || null,
-          serviceInterest: input.lead?.service_interest || null,
-          preferredContactChannel: input.lead?.preferred_contact_channel || null,
-          preferredMeetingWindow: input.lead?.preferred_meeting_window || null,
-          location: input.lead?.location_summary || null,
-          qualificationStatus: input.lead?.qualification_status || null,
-          qualificationNotes: input.lead?.qualification_notes || null,
-          customFields: input.lead?.custom_fields || null,
-        },
-        booking: {
-          provider: booking?.provider || null,
-          bookingUrl: booking?.booking_url || null,
-          defaultMeetingType: booking?.default_meeting_type || null,
-        },
-        inboundEmail: {
-          subject: input.inbound.subject || null,
-          body: compactText(input.inbound.text, 7000),
-        },
-        recentEmailTimeline: (recentMessages || []).reverse().map((message: any) => ({
-          direction: message.direction,
-          subject: message.subject,
-          body: compactText(message.body_text, 900),
-          status: message.status,
-        })),
-        knowledge,
-      }),
-      text: {
-        format: {
-          type: 'json_schema',
-          name: 'automated_inbound_email_reply',
-          strict: true,
-          schema: {
-            type: 'object',
-            additionalProperties: false,
-            required: ['subject', 'text', 'html'],
-            properties: {
-              subject: { type: 'string' },
-              text: { type: 'string' },
-              html: { type: 'string' },
+  try {
+    const response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        instructions: [
+          'You are the OpenAI messaging brain for an automated email assistant at a service business.',
+          'Return only the requested JSON schema.',
+          'You draft replies and classify intent; you do not actually send messages, book meetings, mark opt-outs, or schedule actions.',
+          'InsForge runtime enforces tenant isolation, consent, opt-out, do-not-contact, business hours, channel setup, and stop conditions after your response.',
+          'The reply is sent automatically, so be accurate, concise, and helpful.',
+          'Primary goal: answer the lead if the answer is known, then move toward booking a consultation/call as quickly as possible.',
+          'Use the provided knowledge array as source-of-truth context. If a knowledge item is only a file or URL reference without an excerpt, do not claim details from its unseen contents.',
+          'Do not ask long qualification questions when the lead already provided useful context.',
+          'If the lead gave a date or time but not both, ask only for the missing date or time. Do not ask for timezone; use the lead location already in context.',
+          'Never invent prices, promises, availability, policies, discounts, or booking links.',
+          'If exact information is missing, say that the team can confirm details on the call and offer the next booking step.',
+          'Use only simple safe HTML tags: p, strong, em, ul, li, a, br.',
+          preferredLanguage ? `Write user-facing reply fields in ${preferredLanguage}.` : '',
+        ].filter(Boolean).join(' '),
+        input: JSON.stringify({
+          tenant: {
+            name: input.tenant?.name || null,
+            industry: input.tenant?.industry || null,
+            businessNiche: input.tenant?.business_niche || null,
+            timezone: input.tenant?.default_timezone || null,
+          },
+          agent: { name: input.agent?.display_name || 'Bob' },
+          lead: {
+            name: leadName(input.lead),
+            email: input.lead?.email || null,
+            serviceInterest: input.lead?.service_interest || null,
+            preferredContactChannel: input.lead?.preferred_contact_channel || null,
+            preferredMeetingWindow: input.lead?.preferred_meeting_window || null,
+            location: input.lead?.location_summary || null,
+            qualificationStatus: input.lead?.qualification_status || null,
+            qualificationNotes: input.lead?.qualification_notes || null,
+            lifecycleStage: input.lead?.lead_stage || null,
+            schedulingState: input.lead?.scheduling_state || null,
+            customFields: input.lead?.custom_fields || null,
+          },
+          booking: {
+            provider: booking?.provider || null,
+            bookingUrl: booking?.booking_url || null,
+            defaultMeetingType: booking?.default_meeting_type || null,
+          },
+          inboundEmail: {
+            subject: input.inbound.subject || null,
+            body: compactText(input.inbound.text, 7000),
+          },
+          recentEmailTimeline: (recentMessages || []).reverse().map((message: any) => ({
+            direction: message.direction,
+            subject: message.subject,
+            body: compactText(message.body_text, 900),
+            status: message.status,
+          })),
+          knowledge,
+          allowedActions: ['send_reply', 'book_meeting', 'schedule_callback', 'evaluate_lifecycle', 'mark_opt_out', 'escalate_to_human'],
+        }),
+        text: {
+          format: {
+            type: 'json_schema',
+            name: 'openai_messaging_brain_email_reply',
+            strict: true,
+            schema: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['replyText', 'replySubject', 'replyHtml', 'detectedIntent', 'preferredChannel', 'callbackRequested', 'requestedCallbackAt', 'bookingIntent', 'optOutIntent', 'needsHumanReview', 'humanReviewReason', 'confidence', 'lifecycleRecommendation', 'allowedActionHints', 'reason'],
+              properties: {
+                replyText: { type: 'string' },
+                replySubject: { type: 'string' },
+                replyHtml: { type: 'string' },
+                detectedIntent: { type: 'string', enum: EMAIL_BRAIN_INTENTS },
+                preferredChannel: { type: ['string', 'null'], enum: ['call', 'voice', 'phone', 'sms', 'whatsapp', 'email', 'messenger', null] },
+                callbackRequested: { type: 'boolean' },
+                requestedCallbackAt: { type: ['string', 'null'] },
+                bookingIntent: { type: 'boolean' },
+                optOutIntent: { type: 'boolean' },
+                needsHumanReview: { type: 'boolean' },
+                humanReviewReason: { type: ['string', 'null'] },
+                confidence: { type: 'number' },
+                lifecycleRecommendation: {
+                  type: 'object', additionalProperties: false,
+                  required: ['outcome', 'nextActionType', 'nextActionChannel', 'nextActionAt', 'reason'],
+                  properties: {
+                    outcome: { type: ['string', 'null'], enum: [...EMAIL_BRAIN_OUTCOMES, null] },
+                    nextActionType: { type: ['string', 'null'] },
+                    nextActionChannel: { type: ['string', 'null'], enum: ['call', 'voice', 'phone', 'sms', 'whatsapp', 'email', 'messenger', 'human', 'system', null] },
+                    nextActionAt: { type: ['string', 'null'] },
+                    reason: { type: ['string', 'null'] },
+                  },
+                },
+                allowedActionHints: { type: 'array', items: { type: 'string', enum: ['send_reply', 'book_meeting', 'schedule_callback', 'evaluate_lifecycle', 'mark_opt_out', 'escalate_to_human', 'no_action'] } },
+                reason: { type: 'string' },
+              },
             },
           },
         },
-      },
-    }),
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.error?.message || `OpenAI inbound email reply failed with ${response.status}`);
-  let draft: any;
-  try {
-    draft = JSON.parse(extractOutputText(data));
-  } catch {
-    throw new Error('OpenAI returned an invalid inbound email draft');
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data?.error?.message || `OpenAI inbound email reply failed with ${response.status}`);
+    let draft: any;
+    try {
+      draft = normalizeEmailBrainOutput(JSON.parse(extractOutputText(data)));
+    } catch {
+      throw new Error('OpenAI returned an invalid inbound email draft');
+    }
+    if (!draft.subject || !draft.text || !draft.html) throw new Error('OpenAI returned an incomplete inbound email draft');
+    await writeMessagingBrainAudit(db, {
+      tenant_id: input.tenant.id,
+      lead_id: input.lead.id,
+      conversation_id: input.conversationId || null,
+      message_id: input.inboundMessageId || null,
+      tenant_agent_id: input.agent?.id || null,
+      source_channel: 'email',
+      source: 'resend-email-webhook',
+      status: 'success',
+      model,
+      provider_response_id: data.id || null,
+      detected_intent: draft.detectedIntent,
+      recommended_outcome: draft.lifecycleRecommendation.outcome,
+      recommended_action: draft.lifecycleRecommendation.nextActionType,
+      needs_human_review: draft.needsHumanReview,
+      request_payload: requestPayload,
+      response_payload: draft,
+      duration_ms: Date.now() - started,
+    });
+    return { ...draft, model, responseId: data.id || null, generatedBy: 'openai' };
+  } catch (error) {
+    await writeMessagingBrainAudit(db, {
+      tenant_id: input.tenant.id,
+      lead_id: input.lead.id,
+      conversation_id: input.conversationId || null,
+      message_id: input.inboundMessageId || null,
+      tenant_agent_id: input.agent?.id || null,
+      source_channel: 'email',
+      source: 'resend-email-webhook',
+      status: 'failed',
+      model,
+      needs_human_review: true,
+      request_payload: requestPayload,
+      response_payload: {},
+      error_message: safeError(error),
+      duration_ms: Date.now() - started,
+    });
+    throw error;
   }
-  if (!draft?.subject || !draft?.text || !draft?.html) throw new Error('OpenAI returned an incomplete inbound email draft');
-  return { subject: draft.subject, text: draft.text, html: draft.html, model, responseId: data.id || null, generatedBy: 'openai' };
 }
 
 function fallbackDraft(input: { tenant: any; agent: any; lead: any; inbound: ReturnType<typeof inboundFields>; error?: unknown }) {
@@ -1043,6 +1219,13 @@ async function recordOutbound(db: any, input: {
         source: 'resend_inbound_auto_reply',
         from: input.sender.fromEmail,
         emailQueueId: emailRows?.[0]?.id || null,
+        messagingBrain: input.draft?.detectedIntent ? {
+          detectedIntent: input.draft.detectedIntent,
+          confidence: input.draft.confidence ?? null,
+          needsHumanReview: Boolean(input.draft.needsHumanReview),
+          lifecycleRecommendation: input.draft.lifecycleRecommendation || null,
+          allowedActionHints: input.draft.allowedActionHints || [],
+        } : null,
       },
     }]).select(),
     'Failed to record outbound email timeline row'
@@ -1216,7 +1399,8 @@ async function createConfirmedMeetingFromInbound(db: any, input: {
   await db.database.from('leads').update({
     status: 'booked',
     meeting_scheduled: true,
-    scheduling_state: 'scheduled',
+    lead_stage: 'booked',
+    scheduling_state: 'booked',
     scheduled_at: start.toISOString(),
     meeting_end_time: end.toISOString(),
     meeting_location: meetingUrl,
@@ -1293,6 +1477,30 @@ async function processInboundEmail(db: any, event: JsonRecord) {
     updated_at: now,
   }).eq('tenant_id', tenant.id).eq('id', conversation.id);
 
+  const inboundStop = EMAIL_STOP_PATTERNS.some((pattern) => pattern.test(`${inbound.subject || ''} ${inbound.text || ''}`));
+  if (inboundStop) {
+    await stopLeadFromInboundEmail(db, { tenantId: tenant.id, lead, reason: 'Inbound email opt-out' });
+    await db.database.from('lead_conversations').update({
+      conversation_status: 'closed_opted_out',
+      next_action: 'do_not_contact',
+      human_review_required: false,
+      last_intent: 'opt_out',
+      last_intent_at: nowIso(),
+      last_summary: 'Lead opted out by email reply.',
+      updated_at: nowIso(),
+    }).eq('tenant_id', tenant.id).eq('id', conversation.id);
+    await callLifecycle(db, {
+      tenantId: tenant.id,
+      leadId: lead.id,
+      outcome: 'opted_out',
+      sourceChannel: 'email',
+      requestedChannel: 'email',
+      conversationId: conversation?.id || null,
+      metadata: { source: 'phase29_email_reply', inboundMessageId: inboundRecord.message?.id || null, stopPattern: true },
+    });
+    return { success: true, tenantId: tenant.id, leadId: lead.id, optedOut: true };
+  }
+
   let confirmedBooking: any = null;
   try {
     const bookingResult = await createConfirmedMeetingFromInbound(db, {
@@ -1317,9 +1525,45 @@ async function processInboundEmail(db: any, event: JsonRecord) {
 
   let draft;
   try {
-    draft = await draftEmailReply(db, { tenant, agent, lead, inbound, confirmedBooking });
+    draft = await draftEmailReply(db, {
+      tenant,
+      agent,
+      lead,
+      inbound,
+      confirmedBooking,
+      inboundMessageId: inboundRecord.message?.id || null,
+      conversationId: conversation?.id || null,
+    });
   } catch (error) {
     draft = fallbackDraft({ tenant, agent, lead, inbound, error });
+  }
+
+  const lifecycleOutcome = emailLifecycleOutcome({ draft, confirmedBooking });
+  if (['opted_out', 'wrong_number', 'not_interested_final'].includes(lifecycleOutcome)) {
+    await stopLeadFromInboundEmail(db, { tenantId: tenant.id, lead, reason: `Inbound email ${lifecycleOutcome}` });
+    await db.database.from('lead_conversations').update({
+      conversation_status: 'closed_opted_out',
+      next_action: 'do_not_contact',
+      human_review_required: false,
+      last_intent: draft?.detectedIntent || 'opt_out',
+      last_intent_at: nowIso(),
+      last_summary: draft?.reason || 'Lead requested no further email outreach.',
+      updated_at: nowIso(),
+    }).eq('tenant_id', tenant.id).eq('id', conversation.id);
+    await callLifecycle(db, {
+      tenantId: tenant.id,
+      leadId: lead.id,
+      outcome: lifecycleOutcome,
+      sourceChannel: 'email',
+      requestedChannel: 'email',
+      conversationId: conversation?.id || null,
+      metadata: {
+        source: 'phase29_email_reply',
+        detectedIntent: draft?.detectedIntent || null,
+        inboundMessageId: inboundRecord.message?.id || null,
+      },
+    });
+    return { success: true, tenantId: tenant.id, leadId: lead.id, stopped: true };
   }
 
   const sender = senderForAgent(agent);
@@ -1345,21 +1589,44 @@ async function processInboundEmail(db: any, event: JsonRecord) {
   await db.database.from('lead_conversations').update({
     conversation_status: confirmedBooking?.booked ? 'email_booking_confirmed' : 'auto_replied_email',
     next_action: confirmedBooking?.booked ? 'send_meeting_reminders' : 'await_lead_email_reply',
-    human_review_required: false,
+    human_review_required: Boolean(draft?.needsHumanReview),
+    last_intent: draft?.detectedIntent || (confirmedBooking?.booked ? 'booking_request' : 'email_reply'),
+    last_intent_at: nowIso(),
+    last_summary: draft?.reason || (confirmedBooking?.booked ? 'Email reply confirmed a booking.' : 'Email auto-reply sent.'),
     last_outbound_at: nowIso(),
     updated_at: nowIso(),
   }).eq('tenant_id', tenant.id).eq('id', conversation.id);
   const leadPatch: JsonRecord = {
     last_contacted_at: nowIso(),
-    preferred_contact_channel: 'email',
+    preferred_contact_channel: draft?.preferredChannel || 'email',
     updated_at: nowIso(),
   };
   if (confirmedBooking?.booked) {
     leadPatch.status = 'booked';
     leadPatch.meeting_scheduled = true;
-    leadPatch.scheduling_state = 'scheduled';
+    leadPatch.lead_stage = 'booked';
+    leadPatch.scheduling_state = 'booked';
   }
   await db.database.from('leads').update(leadPatch).eq('tenant_id', tenant.id).eq('id', lead.id);
+
+  await callLifecycle(db, {
+    tenantId: tenant.id,
+    leadId: lead.id,
+    outcome: lifecycleOutcome,
+    sourceChannel: 'email',
+    requestedChannel: draft?.preferredChannel || draft?.lifecycleRecommendation?.nextActionChannel || 'email',
+    requestedCallbackAt: draft?.requestedCallbackAt || draft?.lifecycleRecommendation?.nextActionAt || null,
+    bookingIntent: Boolean(draft?.bookingIntent || confirmedBooking?.booked),
+    conversationId: conversation?.id || null,
+    metadata: {
+      source: 'phase29_email_reply',
+      detectedIntent: draft?.detectedIntent || (confirmedBooking?.booked ? 'booking_request' : null),
+      confidence: draft?.confidence ?? null,
+      inboundMessageId: inboundRecord.message?.id || null,
+      outboundMessageId: outbound?.message?.id || null,
+      meetingId: confirmedBooking?.meeting?.id || null,
+    },
+  });
 
   return {
     success: true,

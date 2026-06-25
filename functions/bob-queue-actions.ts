@@ -44,6 +44,21 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function firstValue(...values: any[]) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim() !== '') return value;
+  }
+  return null;
+}
+
+function consentDefaultTrue(value: any) {
+  if (value === undefined || value === null || value === '') return true;
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return true;
+  if (['0', 'false', 'no', 'n', 'denied', 'deny', 'not allowed', 'opted out', 'opt-out', 'unsubscribed'].includes(normalized)) return false;
+  return true;
+}
+
 function publicCall(call: any, session: any) {
   return {
     sid: call?.sid || null,
@@ -114,6 +129,49 @@ async function loadTenant(db: any, tenantId: string) {
     'Failed to load tenant'
   );
   return rows?.[0] || null;
+}
+
+function defaultLifecycleRules(tenantId?: string | null) {
+  return {
+    tenantId: tenantId || null,
+    maxCallAttempts: 3,
+    channelOrder: ['call', 'sms', 'whatsapp', 'email'],
+    voicemailAllowed: false,
+    noAnswerPolicy: {
+      first: { afterAttempt: 1, actionType: 'send_sms', channel: 'sms', delayMinutes: 10, requiresConsent: true },
+      second: { afterAttempt: 2, actionType: 'queue_call_attempt', channel: 'call', delayBusinessDays: 1, respectBusinessHours: true },
+      third: { afterAttempt: 3, actionType: 'enter_nurture', preferredChannels: ['email', 'whatsapp', 'sms'] },
+    },
+    busyPolicy: { actionType: 'schedule_callback', defaultDelayMinutes: 60, askForConvenientTime: true, respectBusinessHours: true },
+    notAvailablePolicy: { actionType: 'schedule_callback', askForConvenientTime: true, askForPreferredChannel: true, respectBusinessHours: true },
+    voicemailPolicy: { actionType: 'send_recap', delayMinutes: 5, preferredChannels: ['sms', 'email', 'whatsapp'], requiresConsent: true },
+    nurturePolicy: { notInterestedNowDelayDays: 30, checkupCadenceDays: [7, 14, 30], maxCheckups: 3, preferredChannels: ['email', 'whatsapp', 'sms'] },
+    humanReviewTriggers: { missingConsent: true, missingChannelSetup: true, ambiguousIntent: true, providerFailureLimit: 2, repeatedFailedAttempts: true },
+    offDutyCallPolicy: { behavior: 'defer_to_next_business_window', respectTenantBusinessHours: true },
+  };
+}
+
+function normalizeLifecycleRules(raw: any, tenantId?: string | null) {
+  const base = defaultLifecycleRules(tenantId);
+  const source = raw && typeof raw === 'object' ? raw : {};
+  return {
+    ...base,
+    ...source,
+    maxCallAttempts: Math.min(Math.max(Number(source.maxCallAttempts ?? source.max_call_attempts ?? base.maxCallAttempts) || 3, 1), 10),
+    channelOrder: Array.isArray(source.channelOrder || source.channel_order)
+      ? (source.channelOrder || source.channel_order).filter((channel: any) => ['call', 'sms', 'whatsapp', 'email'].includes(String(channel)))
+      : base.channelOrder,
+  };
+}
+
+async function loadEffectiveLifecycleRules(db: any, tenantId: string) {
+  if (!tenantId) return defaultLifecycleRules(null);
+  const result = await db.database.rpc('get_effective_tenant_lifecycle_rules', { p_tenant_id: tenantId });
+  if (result?.error) {
+    console.warn('Failed to load tenant lifecycle rules; using defaults', result.error.message || result.error);
+    return defaultLifecycleRules(tenantId);
+  }
+  return normalizeLifecycleRules(result?.data, tenantId);
 }
 
 function parseBusinessTime(value: any, fallback: string) {
@@ -322,6 +380,13 @@ function leadAllowsChannel(lead: any, channel: string) {
   const normalized = channel === 'phone' || channel === 'voice' ? 'call' : channel;
   const consentColumn = channelConsentColumn(normalized);
   if (!consentColumn) return { allowed: false, reason: 'Unsupported outreach channel' };
+  if (lead?.automation_paused) return { allowed: false, reason: 'Lead automation is paused' };
+  if (lead?.meeting_scheduled || lead?.lead_stage === 'booked' || lead?.scheduling_state === 'booked' || ['booked', 'scheduled'].includes(String(lead?.status || '').toLowerCase())) {
+    return { allowed: false, reason: 'Lead is already booked' };
+  }
+  if (['closed_won', 'closed_lost', 'do_not_contact'].includes(String(lead?.lead_stage || '').toLowerCase())) {
+    return { allowed: false, reason: 'Lead is in a stop state' };
+  }
   if (lead?.do_not_contact) return { allowed: false, reason: 'Lead is marked do not contact' };
   if (lead?.opted_out_at && (!lead.opt_out_channel || lead.opt_out_channel === 'all' || lead.opt_out_channel === normalized)) {
     return { allowed: false, reason: 'Lead opted out of this channel' };
@@ -357,6 +422,904 @@ function leadPreferredContactChannel(lead: any) {
 
 function leadPrefersEmail(lead: any) {
   return leadPreferredContactChannel(lead) === 'email';
+}
+
+async function campaignLeadAttemptCount(db: any, action: any) {
+  if (!action?.campaign_lead_id) return Number(action?.result?.attemptCount || action?.payload?.attemptCount || 0);
+  const rows = await unwrap(
+    await db.database
+      .from('campaign_leads')
+      .select('attempt_count')
+      .eq('tenant_id', action.tenant_id)
+      .eq('id', action.campaign_lead_id)
+      .limit(1),
+    'Failed to load campaign lead attempt count'
+  );
+  return Number(rows?.[0]?.attempt_count || action?.result?.attemptCount || action?.payload?.attemptCount || 0);
+}
+
+async function recordLifecycleBlockedEvent(db: any, input: {
+  tenantId: string;
+  lead: any;
+  action?: any;
+  outcome?: string;
+  reason: string;
+  blockedReason: string;
+  metadata?: JsonRecord;
+}) {
+  if (!input.tenantId || !input.lead?.id) return;
+  const { error } = await db.database.from('lead_lifecycle_events').insert([{
+    tenant_id: input.tenantId,
+    lead_id: input.lead.id,
+    source_action_id: input.action?.id || null,
+    source_channel: input.action?.channel === 'phone' ? 'call' : (input.action?.channel || 'system'),
+    previous_stage: input.lead.lead_stage || null,
+    next_stage: input.lead.lead_stage || null,
+    previous_scheduling_state: input.lead.scheduling_state || null,
+    next_scheduling_state: input.lead.scheduling_state || null,
+    outcome: input.outcome || 'needs_human_review',
+    reason: input.reason,
+    blocked_reason: input.blockedReason,
+    metadata: {
+      source: 'phase22_rule_guard',
+      ...(input.metadata || {}),
+    },
+  }]);
+  if (error) console.warn('Failed to record Phase 22 lifecycle blocked event', error.message || error);
+}
+
+async function recordNurtureLifecycleEvent(db: any, input: {
+  tenantId: string;
+  lead: any;
+  action?: any;
+  outcome?: string;
+  nextAction?: JsonRecord | null;
+  nextActionType?: string | null;
+  nextActionChannel?: string | null;
+  nextActionAt?: string | null;
+  reason: string;
+  blockedReason?: string | null;
+  metadata?: JsonRecord;
+}) {
+  if (!input.tenantId || !input.lead?.id) return null;
+  const event = {
+    id: crypto.randomUUID(),
+    tenant_id: input.tenantId,
+    lead_id: input.lead.id,
+    source_action_id: input.action?.id || null,
+    source_channel: canonicalEventChannel(input.action?.channel || input.nextActionChannel || 'system'),
+    previous_stage: input.lead.lead_stage || null,
+    next_stage: input.blockedReason ? (input.lead.lead_stage || 'nurture') : 'nurture',
+    previous_scheduling_state: input.lead.scheduling_state || null,
+    next_scheduling_state: input.blockedReason ? (input.lead.scheduling_state || 'needs_follow_up') : 'needs_follow_up',
+    outcome: input.outcome || 'not_interested_now',
+    next_action_type: input.nextActionType || input.nextAction?.action_type || null,
+    next_action_channel: input.nextActionChannel || input.nextAction?.channel || null,
+    next_action_at: input.nextActionAt || input.nextAction?.scheduled_for || null,
+    reason: input.reason,
+    blocked_reason: input.blockedReason || null,
+    metadata: {
+      source: 'phase31_nurture_scheduler',
+      ruleVersion: 'phase31',
+      ...(input.metadata || {}),
+    },
+  };
+  const { error } = await db.database.from('lead_lifecycle_events').insert([event]);
+  if (error) {
+    console.warn('Failed to record Phase 31 nurture lifecycle event', error.message || error);
+    return null;
+  }
+  return event;
+}
+
+async function findExistingNurtureFollowup(db: any, tenantId: string, leadId: string, actionId: string) {
+  const rows = await unwrap(
+    await db.database
+      .from('bob_actions')
+      .select('*')
+      .eq('tenant_id', tenantId)
+      .eq('lead_id', leadId)
+      .in('status', ['pending', 'awaiting_call', 'calling'])
+      .order('created_at', { ascending: false })
+      .limit(50),
+    'Failed to inspect existing nurture follow-ups'
+  );
+  return (rows || []).find((row: any) => row?.payload?.nurture?.previousActionId === actionId) || null;
+}
+
+async function stopNurtureActionIfBlocked(db: any, action: any, lead: any) {
+  if (!isNurtureAction(action)) return false;
+  const blockedReason = nurtureStopReason(lead);
+  if (!blockedReason) return false;
+  const reason = `Nurture stopped because ${blockedReason.replace(/_/g, ' ')}.`;
+  await db.database.from('bob_actions').update({
+    status: 'skipped',
+    executed_at: nowIso(),
+    updated_at: nowIso(),
+    result: {
+      ...(action.result || {}),
+      skipped: true,
+      blockedReason,
+      phase31Nurture: { stoppedAt: nowIso(), reason },
+    },
+  }).eq('tenant_id', action.tenant_id).eq('id', action.id);
+  await recordNurtureLifecycleEvent(db, {
+    tenantId: action.tenant_id,
+    lead,
+    action,
+    reason,
+    blockedReason,
+    metadata: { actionStatus: action.status, nurtureStep: nurtureStepFromAction(action) },
+  });
+  if (action.campaign_lead_id) {
+    await db.database.from('campaign_leads').update({
+      status: 'stopped',
+      current_step: 'nurture_stopped',
+      next_action_at: null,
+      stop_reason: reason,
+      updated_at: nowIso(),
+    }).eq('tenant_id', action.tenant_id).eq('id', action.campaign_lead_id);
+  }
+  return true;
+}
+
+async function scheduleNextNurtureCheckup(db: any, input: { tenantId: string; lead: any; action: any; rules: any; sentChannel: string }) {
+  if (!isNurtureAction(input.action)) return null;
+  const lead = await loadLead(db, input.tenantId, input.lead.id);
+  const blockedReason = nurtureStopReason(lead);
+  if (blockedReason) {
+    await recordNurtureLifecycleEvent(db, {
+      tenantId: input.tenantId,
+      lead: lead || input.lead,
+      action: input.action,
+      reason: `Nurture did not schedule another checkup because ${blockedReason.replace(/_/g, ' ')}.`,
+      blockedReason,
+      metadata: { sentChannel: input.sentChannel, nurtureStep: nurtureStepFromAction(input.action) },
+    });
+    return null;
+  }
+
+  const existing = await findExistingNurtureFollowup(db, input.tenantId, lead.id, input.action.id);
+  if (existing) return existing;
+
+  const policy = nurturePolicyFromRules(input.rules);
+  const currentStep = nurtureStepFromAction(input.action);
+  if (currentStep >= policy.maxCheckups) {
+    const reason = `Nurture checkup limit reached (${currentStep}/${policy.maxCheckups}); human review is required before more outreach.`;
+    await db.database.from('leads').update({
+      requires_human_review: true,
+      escalation_reason: 'nurture_limit_reached',
+      next_contact_at: null,
+      updated_at: nowIso(),
+    }).eq('tenant_id', input.tenantId).eq('id', lead.id);
+    await recordNurtureLifecycleEvent(db, {
+      tenantId: input.tenantId,
+      lead,
+      action: input.action,
+      reason,
+      blockedReason: 'nurture_limit_reached',
+      metadata: { sentChannel: input.sentChannel, nurtureStep: currentStep, maxCheckups: policy.maxCheckups },
+    });
+    if (input.action.campaign_lead_id) {
+      await db.database.from('campaign_leads').update({
+        status: 'stopped',
+        current_step: 'nurture_limit_reached',
+        next_action_at: null,
+        stop_reason: reason,
+        updated_at: nowIso(),
+      }).eq('tenant_id', input.tenantId).eq('id', input.action.campaign_lead_id);
+    }
+    return null;
+  }
+
+  const nextStep = currentStep + 1;
+  const delayDays = policy.cadenceDays[Math.min(nextStep - 1, policy.cadenceDays.length - 1)] || 30;
+  const selected = await chooseAllowedChannel(db, input.tenantId, lead, nurtureChannelCandidates(lead, input.rules));
+  if (!selected) {
+    const reason = 'Nurture could not schedule another checkup because no consented and configured channel is available.';
+    await db.database.from('leads').update({
+      requires_human_review: true,
+      escalation_reason: 'missing_consent_or_channel_setup',
+      next_contact_at: null,
+      updated_at: nowIso(),
+    }).eq('tenant_id', input.tenantId).eq('id', lead.id);
+    await recordNurtureLifecycleEvent(db, {
+      tenantId: input.tenantId,
+      lead,
+      action: input.action,
+      reason,
+      blockedReason: 'missing_consent_or_channel_setup',
+      metadata: { sentChannel: input.sentChannel, nurtureStep: currentStep, maxCheckups: policy.maxCheckups },
+    });
+    if (input.action.campaign_lead_id) {
+      await db.database.from('campaign_leads').update({
+        status: 'stopped',
+        current_step: 'nurture_channel_blocked',
+        next_action_at: null,
+        stop_reason: reason,
+        updated_at: nowIso(),
+      }).eq('tenant_id', input.tenantId).eq('id', input.action.campaign_lead_id);
+    }
+    return null;
+  }
+
+  const tenant = selected.channel === 'call' ? await loadTenant(db, input.tenantId) : null;
+  let scheduledFor = addDays(new Date(), delayDays);
+  if (selected.channel === 'call' && tenant?.id) {
+    const hours = businessHoursStatus(tenant, scheduledFor);
+    if (!hours.allowed) scheduledFor = new Date(hours.nextAllowedAt);
+  }
+  const reason = `Schedule nurture checkup ${nextStep}/${policy.maxCheckups} in ${delayDays} day(s) through ${selected.channel}.`;
+  const rows = await unwrap(
+    await db.database.from('bob_actions').insert([{
+      tenant_id: input.tenantId,
+      campaign_id: input.action.campaign_id || null,
+      campaign_lead_id: input.action.campaign_lead_id || null,
+      lead_id: lead.id,
+      conversation_id: input.action.conversation_id || null,
+      action_type: channelActionType(selected.channel),
+      channel: actionChannel(selected.channel),
+      status: actionStatusForChannel(selected.channel),
+      reason,
+      scheduled_for: scheduledFor.toISOString(),
+      payload: {
+        source: 'phase31_nurture_scheduler',
+        sourceActionId: input.action.id,
+        sourceOutcome: input.action.payload?.sourceOutcome || 'not_interested_now',
+        tenantAgentId: input.action.payload?.tenantAgentId || input.action.payload?.tenant_agent_id || lead.assigned_tenant_agent_id || null,
+        nurture: {
+          active: true,
+          step: nextStep,
+          maxCheckups: policy.maxCheckups,
+          cadenceDays: policy.cadenceDays,
+          previousActionId: input.action.id,
+          previousChannel: input.sentChannel,
+        },
+        lifecycle: {
+          stage: 'nurture',
+          schedulingState: 'needs_follow_up',
+          channel: selected.channel,
+          actionAt: scheduledFor.toISOString(),
+          reason,
+          nurtureStep: nextStep,
+        },
+      },
+    }]).select(),
+    'Failed to create nurture follow-up action'
+  );
+  const nextAction = rows?.[0] || null;
+  await db.database.from('leads').update({
+    lead_stage: 'nurture',
+    scheduling_state: 'needs_follow_up',
+    next_contact_at: scheduledFor.toISOString(),
+    requires_human_review: false,
+    escalation_reason: null,
+    updated_at: nowIso(),
+  }).eq('tenant_id', input.tenantId).eq('id', lead.id);
+  if (input.action.campaign_lead_id) {
+    await db.database.from('campaign_leads').update({
+      status: 'queued',
+      current_step: `nurture_checkup_${nextStep}`,
+      next_action_at: scheduledFor.toISOString(),
+      stop_reason: null,
+      updated_at: nowIso(),
+    }).eq('tenant_id', input.tenantId).eq('id', input.action.campaign_lead_id);
+  }
+  await recordNurtureLifecycleEvent(db, {
+    tenantId: input.tenantId,
+    lead,
+    action: input.action,
+    nextAction,
+    nextActionType: nextAction?.action_type || null,
+    nextActionChannel: selected.channel,
+    nextActionAt: scheduledFor.toISOString(),
+    reason,
+    metadata: {
+      sentChannel: input.sentChannel,
+      previousNurtureStep: currentStep,
+      nextNurtureStep: nextStep,
+      maxCheckups: policy.maxCheckups,
+      delayDays,
+      channelSetup: selected.setup,
+    },
+  });
+  return nextAction;
+}
+
+async function safeScheduleNextNurtureCheckup(db: any, input: { tenantId: string; lead: any; action: any; rules: any; sentChannel: string }) {
+  if (!isNurtureAction(input.action)) return { action: null, error: null };
+  try {
+    const action = await scheduleNextNurtureCheckup(db, input);
+    return { action, error: null };
+  } catch (error) {
+    const message = String(error?.message || 'Nurture scheduling failed');
+    console.warn('Phase 31 nurture scheduling failed', message);
+    return { action: null, error: message };
+  }
+}
+
+function addMinutes(date: Date, minutes: number) {
+  return new Date(date.getTime() + Math.max(0, Number(minutes) || 0) * 60 * 1000);
+}
+
+function addDays(date: Date, days: number) {
+  return new Date(date.getTime() + Math.max(0, Number(days) || 0) * 24 * 60 * 60 * 1000);
+}
+
+function normalizeLifecycleOutcome(value: any) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  const aliases: JsonRecord = {
+    noanswer: 'no_answer',
+    no_answered: 'no_answer',
+    unanswered: 'no_answer',
+    completed: 'answered',
+    canceled: 'failed',
+    cancelled: 'failed',
+    human_review: 'needs_human_review',
+    not_available_now: 'not_available',
+    channel_switch: 'channel_switch_requested',
+    callback: 'callback_requested',
+    opt_out: 'opted_out',
+    dnc: 'opted_out',
+    do_not_contact: 'opted_out',
+    booked_meeting: 'booked',
+    left_voicemail: 'voicemail_left',
+    voicemail: 'voicemail_left',
+    answering_machine: 'voicemail_left',
+    machine: 'voicemail_left',
+    machine_answered: 'voicemail_left',
+  };
+  const outcome = aliases[normalized] || normalized;
+  const allowed = new Set([
+    'answered',
+    'no_answer',
+    'busy',
+    'voicemail_left',
+    'callback_requested',
+    'not_available',
+    'channel_switch_requested',
+    'not_interested_now',
+    'not_interested_final',
+    'wrong_number',
+    'opted_out',
+    'booked',
+    'failed',
+    'interrupted',
+    'needs_human_review',
+  ]);
+  return allowed.has(outcome) ? outcome : 'needs_human_review';
+}
+
+function canonicalEventChannel(channel: any) {
+  const normalized = normalizePreferredContactChannel(channel);
+  if (normalized === 'call') return 'call';
+  if (['sms', 'whatsapp', 'email', 'messenger'].includes(normalized)) return normalized;
+  return 'system';
+}
+
+function actionChannel(channel: string) {
+  return channel === 'call' ? 'phone' : channel;
+}
+
+function channelActionType(channel: string) {
+  if (channel === 'call') return 'queue_call_attempt';
+  if (channel === 'sms') return 'send_sms';
+  if (channel === 'whatsapp') return 'send_whatsapp';
+  if (channel === 'email') return 'send_email';
+  return 'human_review';
+}
+
+function actionStatusForChannel(channel: string) {
+  return channel === 'call' ? 'awaiting_call' : 'pending';
+}
+
+function parseIsoDate(value: any) {
+  if (!value) return null;
+  const date = new Date(String(value));
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function scheduledAtBusinessWindow(tenant: any, baseDate: Date, dayOffset = 0) {
+  const timeZone = normalizedTimeZone(tenant?.default_timezone);
+  const start = parseBusinessTime(tenant?.business_hours_start, '10:00');
+  const local = timeZoneParts(baseDate, timeZone);
+  const targetMidnight = new Date(Date.UTC(local.year, local.month - 1, local.day + Math.max(0, Number(dayOffset) || 0)));
+  const target = zonedLocalTimeToUtc({
+    year: targetMidnight.getUTCFullYear(),
+    month: targetMidnight.getUTCMonth() + 1,
+    day: targetMidnight.getUTCDate(),
+    hour: start.hour,
+    minute: start.minute,
+  }, timeZone);
+  return target <= baseDate ? scheduledAtBusinessWindow(tenant, baseDate, dayOffset + 1) : target;
+}
+
+function normalizeRequestedChannel(value: any) {
+  const channel = normalizePreferredContactChannel(value);
+  return ['call', 'sms', 'whatsapp', 'email'].includes(channel) ? channel : '';
+}
+
+async function channelSetupStatus(db: any, tenantId: string, lead: any, channel: string) {
+  const consent = leadAllowsChannel(lead, channel);
+  if (!consent.allowed) return { allowed: false, blockedReason: 'missing_consent_or_stop_state', reason: consent.reason };
+
+  if (channel === 'email') {
+    if (!lead?.email) return { allowed: false, blockedReason: 'missing_channel_setup', reason: 'Lead email address is missing' };
+    return { allowed: true, reason: consent.reason };
+  }
+
+  if (channel === 'call') {
+    if (!lead?.phone) return { allowed: false, blockedReason: 'missing_channel_setup', reason: 'Lead phone number is missing' };
+    const phone = await getTenantPhoneNumberForChannel(db, tenantId, 'voice');
+    if (!phone?.id) return { allowed: false, blockedReason: 'missing_channel_setup', reason: 'Tenant has no active voice sender' };
+    return { allowed: true, reason: consent.reason };
+  }
+
+  if (channel === 'sms') {
+    if (!lead?.phone) return { allowed: false, blockedReason: 'missing_channel_setup', reason: 'Lead phone number is missing' };
+    const phone = await getTenantPhoneNumberForChannel(db, tenantId, 'sms');
+    if (!phone?.id) return { allowed: false, blockedReason: 'missing_channel_setup', reason: 'Tenant has no active SMS sender' };
+    return { allowed: true, reason: consent.reason };
+  }
+
+  if (channel === 'whatsapp') {
+    if (!lead?.phone) return { allowed: false, blockedReason: 'missing_channel_setup', reason: 'Lead phone number is missing' };
+    if (globalWhatsappSenderPhone()) return { allowed: true, reason: consent.reason };
+    const phone = await getTenantPhoneNumberForChannel(db, tenantId, 'whatsapp');
+    if (!phone?.id) return { allowed: false, blockedReason: 'missing_channel_setup', reason: 'Tenant WhatsApp sender is not active' };
+    return { allowed: true, reason: consent.reason };
+  }
+
+  return { allowed: false, blockedReason: 'unsupported_channel', reason: 'Unsupported lifecycle channel' };
+}
+
+async function chooseAllowedChannel(db: any, tenantId: string, lead: any, channels: string[]) {
+  for (const rawChannel of channels) {
+    const channel = normalizeRequestedChannel(rawChannel);
+    if (!channel) continue;
+    const setup = await channelSetupStatus(db, tenantId, lead, channel);
+    if (setup.allowed) return { channel, setup };
+  }
+  return null;
+}
+
+async function loadBobAction(db: any, tenantId: string | null, actionId: string | null) {
+  if (!actionId) return null;
+  let query = db.database.from('bob_actions').select('*').eq('id', actionId).limit(1);
+  if (tenantId) query = query.eq('tenant_id', tenantId);
+  const rows = await unwrap(await query, 'Failed to load lifecycle source action');
+  return rows?.[0] || null;
+}
+
+async function existingPhase23Event(db: any, tenantId: string, sourceActionId?: string | null) {
+  if (!sourceActionId) return null;
+  const rows = await unwrap(
+    await db.database
+      .from('lead_lifecycle_events')
+      .select('*')
+      .eq('tenant_id', tenantId)
+      .eq('source_action_id', sourceActionId)
+      .order('created_at', { ascending: false })
+      .limit(10),
+    'Failed to inspect lifecycle events'
+  );
+  return (rows || []).find((row: any) => row?.metadata?.source === 'phase23_lifecycle_evaluator') || null;
+}
+
+async function findExistingLifecycleAction(db: any, tenantId: string, leadId: string, eventId: string) {
+  const rows = await unwrap(
+    await db.database
+      .from('bob_actions')
+      .select('*')
+      .eq('tenant_id', tenantId)
+      .eq('lead_id', leadId)
+      .in('status', ['pending', 'awaiting_call', 'calling'])
+      .order('created_at', { ascending: false })
+      .limit(50),
+    'Failed to inspect existing lifecycle actions'
+  );
+  return (rows || []).find((row: any) => row?.payload?.sourceLifecycleEventId === eventId) || null;
+}
+
+async function countLeadCallAttempts(db: any, tenantId: string, leadId: string, action?: any) {
+  if (action?.campaign_lead_id) return campaignLeadAttemptCount(db, action);
+  const rows = await unwrap(
+    await db.database
+      .from('bob_actions')
+      .select('id,status,result,action_type')
+      .eq('tenant_id', tenantId)
+      .eq('lead_id', leadId)
+      .eq('action_type', 'queue_call_attempt')
+      .in('status', ['calling', 'completed', 'failed', 'skipped', 'awaiting_human'])
+      .limit(100),
+    'Failed to count lead call attempts'
+  );
+  return rows?.length || 0;
+}
+
+async function insertLifecycleEvent(db: any, input: {
+  tenantId: string;
+  lead: any;
+  sourceAction?: any;
+  sourceChannel: string;
+  outcome: string;
+  nextStage: string;
+  nextSchedulingState: string;
+  nextActionType?: string | null;
+  nextActionChannel?: string | null;
+  nextActionAt?: string | null;
+  reason: string;
+  blockedReason?: string | null;
+  metadata?: JsonRecord;
+}) {
+  const event = {
+      id: crypto.randomUUID(),
+      tenant_id: input.tenantId,
+      lead_id: input.lead.id,
+      source_action_id: input.sourceAction?.id || null,
+      source_channel: canonicalEventChannel(input.sourceChannel),
+      previous_stage: input.lead.lead_stage || null,
+      next_stage: input.nextStage || input.lead.lead_stage || null,
+      previous_scheduling_state: input.lead.scheduling_state || null,
+      next_scheduling_state: input.nextSchedulingState || input.lead.scheduling_state || null,
+      outcome: input.outcome,
+      next_action_type: input.nextActionType || null,
+      next_action_channel: input.nextActionChannel || null,
+      next_action_at: input.nextActionAt || null,
+      reason: input.reason,
+      blocked_reason: input.blockedReason || null,
+      metadata: {
+        source: 'phase23_lifecycle_evaluator',
+        ruleVersion: 'phase23',
+        ...(input.metadata || {}),
+      },
+    };
+  await unwrap(
+    await db.database.from('lead_lifecycle_events').insert([event]),
+    'Failed to write lifecycle event'
+  );
+  return event;
+}
+
+async function evaluateLeadLifecycle(db: any, body: JsonRecord) {
+  const inputTenantId = body.tenantId || body.tenant_id || null;
+  const sourceActionId = body.actionId || body.action_id || body.sourceActionId || body.source_action_id || null;
+  const sourceAction = await loadBobAction(db, inputTenantId ? String(inputTenantId) : null, sourceActionId ? String(sourceActionId) : null);
+  const tenantId = String(inputTenantId || sourceAction?.tenant_id || '');
+  if (!tenantId) throw new Error('tenantId is required');
+
+  const leadId = String(body.leadId || body.lead_id || sourceAction?.lead_id || '');
+  if (!leadId) throw new Error('leadId is required');
+
+  const existingEvent = await existingPhase23Event(db, tenantId, sourceAction?.id || sourceActionId);
+  if (existingEvent) {
+    const existingAction = await findExistingLifecycleAction(db, tenantId, leadId, existingEvent.id);
+    return { idempotent: true, event: existingEvent, action: existingAction };
+  }
+
+  const lead = await loadLead(db, tenantId, leadId);
+  if (!lead?.id) throw new Error('Tenant lead was not found');
+  const tenant = await loadTenant(db, tenantId);
+  if (!tenant?.id) throw new Error('Tenant was not found');
+
+  const rules = await loadEffectiveLifecycleRules(db, tenantId);
+  const outcome = normalizeLifecycleOutcome(body.outcome || sourceAction?.result?.outcome || sourceAction?.result?.callStatus || sourceAction?.result?.status);
+  const requestedChannel = normalizeRequestedChannel(body.requestedChannel || body.requested_channel || body.preferredChannel || body.preferred_channel);
+  const requestedAt = parseIsoDate(body.requestedCallbackAt || body.requested_callback_at || body.nextActionAt || body.next_action_at);
+  const sourceChannel = body.sourceChannel || body.source_channel || sourceAction?.channel || 'system';
+  const attemptCount = Number(body.attemptCount || body.attempt_count || await countLeadCallAttempts(db, tenantId, leadId, sourceAction));
+  const now = new Date();
+
+  let decision: JsonRecord = {
+    allowed: false,
+    nextStage: lead.lead_stage || 'new',
+    nextSchedulingState: lead.scheduling_state || 'not_started',
+    nextActionType: null,
+    nextActionChannel: null,
+    nextActionAt: null,
+    reason: 'Lifecycle evaluator could not select an automated next action.',
+    blockedReason: 'needs_human_review',
+    requiresHumanReview: true,
+    leadPatch: {},
+    payload: {},
+  };
+
+  const stopPatch = (stage: string, schedulingState: string, reason: string, extra: JsonRecord = {}) => {
+    decision = {
+      ...decision,
+      allowed: false,
+      nextStage: stage,
+      nextSchedulingState: schedulingState,
+      reason,
+      blockedReason: null,
+      requiresHumanReview: false,
+      leadPatch: {
+        lead_stage: stage,
+        scheduling_state: schedulingState,
+        next_contact_at: null,
+        requires_human_review: false,
+        escalation_reason: null,
+        ...extra,
+      },
+    };
+  };
+
+  const setHumanReview = (reason: string, blockedReason: string, stage = lead.lead_stage || 'new', schedulingState = lead.scheduling_state || 'not_started') => {
+    decision = {
+      ...decision,
+      allowed: false,
+      nextStage: stage,
+      nextSchedulingState: schedulingState,
+      reason,
+      blockedReason,
+      requiresHumanReview: true,
+      leadPatch: {
+        requires_human_review: true,
+        escalation_reason: blockedReason,
+        next_contact_at: null,
+      },
+    };
+  };
+
+  const setAction = async (input: {
+    stage: string;
+    schedulingState: string;
+    channels: string[];
+    scheduledFor: Date;
+    reason: string;
+    payload?: JsonRecord;
+  }) => {
+    const selected = await chooseAllowedChannel(db, tenantId, lead, input.channels);
+    if (!selected) {
+      setHumanReview('No consented and configured channel is available for the lifecycle next action.', 'missing_consent_or_channel_setup', input.stage, input.schedulingState);
+      return;
+    }
+    let scheduledFor = input.scheduledFor;
+    if (selected.channel === 'call') {
+      const hours = businessHoursStatus(tenant, scheduledFor);
+      if (!hours.allowed) scheduledFor = new Date(hours.nextAllowedAt);
+    }
+    decision = {
+      ...decision,
+      allowed: true,
+      nextStage: input.stage,
+      nextSchedulingState: input.schedulingState,
+      nextActionType: channelActionType(selected.channel),
+      nextActionChannel: selected.channel,
+      nextActionAt: scheduledFor.toISOString(),
+      reason: input.reason,
+      blockedReason: null,
+      requiresHumanReview: false,
+      leadPatch: {
+        lead_stage: input.stage,
+        scheduling_state: input.schedulingState,
+        next_contact_at: scheduledFor.toISOString(),
+        requires_human_review: false,
+        escalation_reason: null,
+      },
+      payload: {
+        ...(input.payload || {}),
+        channelSetup: selected.setup,
+      },
+    };
+  };
+
+  if (lead?.do_not_contact || lead?.lead_stage === 'do_not_contact') {
+    stopPatch('do_not_contact', lead.scheduling_state || 'not_started', 'Lead is marked do-not-contact; automation remains stopped.', { do_not_contact: true });
+  } else if (lead?.meeting_scheduled || lead?.lead_stage === 'booked' || lead?.scheduling_state === 'booked') {
+    stopPatch('booked', 'booked', 'Lead is already booked; sales outreach is stopped.');
+  } else if (outcome === 'booked') {
+    stopPatch('booked', 'booked', 'Booking is confirmed; sales outreach is stopped.');
+  } else if (outcome === 'opted_out' || outcome === 'wrong_number' || outcome === 'not_interested_final') {
+    const optOutChannel = canonicalEventChannel(sourceChannel);
+    stopPatch('do_not_contact', lead.scheduling_state || 'not_started', 'Lead reached a final stop outcome; automation is stopped.', {
+      do_not_contact: true,
+      opted_out_at: outcome === 'opted_out' ? now.toISOString() : lead.opted_out_at || null,
+      opt_out_channel: outcome === 'opted_out' ? (['call', 'sms', 'whatsapp', 'email'].includes(optOutChannel) ? optOutChannel : 'all') : lead.opt_out_channel || null,
+    });
+  } else if (lead?.automation_paused) {
+    setHumanReview('Lead automation is paused; lifecycle scheduling is blocked.', 'automation_paused');
+  } else if (outcome === 'no_answer') {
+    const nextAttempt = attemptCount + 1;
+    if (nextAttempt >= Number(rules.maxCallAttempts || 3)) {
+      const nurtureChannels = rules?.noAnswerPolicy?.third?.preferredChannels || rules?.nurturePolicy?.preferredChannels || ['email', 'whatsapp', 'sms'];
+      const nurturePolicy = nurturePolicyFromRules(rules);
+      const delayDays = nurturePolicy.cadenceDays[0] || 7;
+      await setAction({
+        stage: 'nurture',
+        schedulingState: 'needs_follow_up',
+        channels: nurtureChannels,
+        scheduledFor: addDays(now, delayDays),
+        reason: `No answer after ${nextAttempt} call attempt(s); move to nurture and check in after ${delayDays} day(s) through the best consented channel.`,
+        payload: {
+          outcome,
+          attemptCount,
+          nextAttempt,
+          lifecyclePath: 'no_answer_third_nurture',
+          nurture: { active: true, step: 1, maxCheckups: nurturePolicy.maxCheckups, cadenceDays: nurturePolicy.cadenceDays },
+        },
+      });
+    } else if (nextAttempt === 1) {
+      const policy = rules?.noAnswerPolicy?.first || {};
+      await setAction({
+        stage: 'attempting_contact',
+        schedulingState: 'needs_follow_up',
+        channels: [policy.channel || 'sms'],
+        scheduledFor: addMinutes(now, Number(policy.delayMinutes || 10)),
+        reason: policy.reason || 'First no-answer: send a short SMS follow-up when allowed.',
+        payload: { outcome, attemptCount, nextAttempt, lifecyclePath: 'no_answer_first_sms' },
+      });
+    } else {
+      const policy = rules?.noAnswerPolicy?.second || {};
+      await setAction({
+        stage: 'attempting_contact',
+        schedulingState: 'needs_follow_up',
+        channels: [policy.channel || 'call'],
+        scheduledFor: scheduledAtBusinessWindow(tenant, now, Number(policy.delayBusinessDays || 1)),
+        reason: policy.reason || 'Second no-answer: retry the call next business day inside tenant calling hours.',
+        payload: { outcome, attemptCount, nextAttempt, lifecyclePath: 'no_answer_second_call' },
+      });
+    }
+  } else if (outcome === 'busy' || outcome === 'not_available' || outcome === 'callback_requested') {
+    const scheduledFor = requestedAt || addMinutes(now, Number(rules?.busyPolicy?.defaultDelayMinutes || 60));
+    await setAction({
+      stage: 'callback_scheduled',
+      schedulingState: 'callback_requested',
+      channels: [requestedChannel || 'call', ...(rules.channelOrder || ['call', 'sms', 'whatsapp', 'email'])],
+      scheduledFor,
+      reason: requestedAt ? 'Lead requested a callback time; schedule the next consent-safe action.' : 'Lead was busy or unavailable; schedule a conservative callback.',
+      payload: { outcome, requestedChannel: requestedChannel || null, requestedAt: requestedAt?.toISOString() || null, lifecyclePath: 'callback' },
+    });
+  } else if (outcome === 'channel_switch_requested') {
+    await setAction({
+      stage: 'engaged',
+      schedulingState: 'needs_follow_up',
+      channels: [requestedChannel, ...(rules.channelOrder || ['sms', 'email', 'whatsapp', 'call'])].filter(Boolean),
+      scheduledFor: requestedAt || addMinutes(now, 5),
+      reason: requestedChannel ? `Lead requested ${requestedChannel}; schedule follow-up only if consent and setup allow it.` : 'Lead requested a channel switch; choose the best consented configured channel.',
+      payload: { outcome, requestedChannel: requestedChannel || null, lifecyclePath: 'channel_switch' },
+    });
+  } else if (outcome === 'voicemail_left') {
+    const policy = rules?.voicemailPolicy || {};
+    await setAction({
+      stage: 'attempting_contact',
+      schedulingState: 'needs_follow_up',
+      channels: policy.preferredChannels || ['sms', 'email', 'whatsapp'],
+      scheduledFor: addMinutes(now, Number(policy.delayMinutes || 5)),
+      reason: policy.reason || 'Voicemail left: send a short recap through the best consented channel.',
+      payload: { outcome, lifecyclePath: 'voicemail_recap' },
+    });
+  } else if (outcome === 'not_interested_now') {
+    const days = Number(rules?.nurturePolicy?.notInterestedNowDelayDays || 30);
+    const nurturePolicy = nurturePolicyFromRules(rules);
+    await setAction({
+      stage: 'nurture',
+      schedulingState: 'needs_follow_up',
+      channels: rules?.nurturePolicy?.preferredChannels || ['email', 'whatsapp', 'sms'],
+      scheduledFor: addDays(now, days),
+      reason: `Lead is not ready now; move to nurture and follow up in ${days} day(s) if consent remains valid.`,
+      payload: {
+        outcome,
+        lifecyclePath: 'not_interested_now_nurture',
+        nurtureDelayDays: days,
+        nurture: { active: true, step: 1, maxCheckups: nurturePolicy.maxCheckups, cadenceDays: nurturePolicy.cadenceDays },
+      },
+    });
+  } else if (outcome === 'answered' && body.bookingIntent) {
+    stopPatch('booking_offered', 'booking_requested', 'Lead requested booking details; wait for date/time or continue the active booking flow.', {
+      preferred_contact_channel: requestedChannel || lead.preferred_contact_channel || null,
+    });
+  } else if (outcome === 'answered') {
+    stopPatch('contacted', lead.scheduling_state || 'not_started', 'Lead was contacted; no autonomous recovery action is needed yet.');
+  } else {
+    setHumanReview('Lifecycle outcome needs human review before more automation is scheduled.', 'ambiguous_or_failed_outcome');
+  }
+
+  const event = await insertLifecycleEvent(db, {
+    tenantId,
+    lead,
+    sourceAction,
+    sourceChannel,
+    outcome,
+    nextStage: decision.nextStage,
+    nextSchedulingState: decision.nextSchedulingState,
+    nextActionType: decision.nextActionType,
+    nextActionChannel: decision.nextActionChannel,
+    nextActionAt: decision.nextActionAt,
+    reason: decision.reason,
+    blockedReason: decision.blockedReason,
+    metadata: {
+      attemptCount,
+      sourceActionStatus: sourceAction?.status || null,
+      requestedChannel: requestedChannel || null,
+      requestedAt: requestedAt?.toISOString() || null,
+      decisionAllowed: decision.allowed,
+      ...(decision.payload || {}),
+      ...(body.metadata && typeof body.metadata === 'object' ? body.metadata : {}),
+    },
+  });
+
+  await db.database.from('leads').update({
+    ...(decision.leadPatch || {}),
+    updated_at: nowIso(),
+  }).eq('tenant_id', tenantId).eq('id', lead.id);
+
+  let nextAction = null;
+  if (decision.allowed && decision.nextActionType && decision.nextActionAt && event?.id) {
+    const existingAction = await findExistingLifecycleAction(db, tenantId, lead.id, event.id);
+    if (existingAction) {
+      nextAction = existingAction;
+    } else {
+      const rows = await unwrap(
+        await db.database.from('bob_actions').insert([{
+          tenant_id: tenantId,
+          campaign_id: sourceAction?.campaign_id || body.campaignId || body.campaign_id || null,
+          campaign_lead_id: sourceAction?.campaign_lead_id || body.campaignLeadId || body.campaign_lead_id || null,
+          lead_id: lead.id,
+          conversation_id: sourceAction?.conversation_id || body.conversationId || body.conversation_id || null,
+          action_type: decision.nextActionType,
+          channel: actionChannel(decision.nextActionChannel),
+          status: actionStatusForChannel(decision.nextActionChannel),
+          reason: decision.reason,
+          scheduled_for: decision.nextActionAt,
+          payload: {
+            source: 'phase23_lifecycle_evaluator',
+            sourceLifecycleEventId: event.id,
+            sourceActionId: sourceAction?.id || null,
+            sourceOutcome: outcome,
+            tenantAgentId: sourceAction?.payload?.tenantAgentId || sourceAction?.payload?.tenant_agent_id || lead.assigned_tenant_agent_id || null,
+            ...(decision.payload || {}),
+            lifecycle: {
+              stage: decision.nextStage,
+              schedulingState: decision.nextSchedulingState,
+              channel: decision.nextActionChannel,
+              actionAt: decision.nextActionAt,
+              reason: decision.reason,
+              nurtureStep: decision.payload?.nurture?.step || null,
+            },
+          },
+        }]).select(),
+        'Failed to create lifecycle Bob action'
+      );
+      nextAction = rows?.[0] || null;
+    }
+  }
+
+  if (sourceAction?.campaign_lead_id) {
+    const patch = decision.allowed
+      ? {
+        status: 'queued',
+        current_step: `lifecycle_${decision.nextActionType}`,
+        next_action_at: decision.nextActionAt,
+        stop_reason: null,
+        updated_at: nowIso(),
+      }
+      : {
+        status: decision.requiresHumanReview ? 'stopped' : 'completed',
+        current_step: decision.requiresHumanReview ? 'lifecycle_human_review' : `lifecycle_${decision.nextStage}`,
+        next_action_at: null,
+        stop_reason: decision.requiresHumanReview ? decision.reason : null,
+        updated_at: nowIso(),
+      };
+    await db.database.from('campaign_leads').update(patch).eq('tenant_id', tenantId).eq('id', sourceAction.campaign_lead_id);
+  }
+
+  return {
+    idempotent: false,
+    decision: {
+      outcome,
+      nextStage: decision.nextStage,
+      nextSchedulingState: decision.nextSchedulingState,
+      nextActionType: decision.nextActionType,
+      nextActionChannel: decision.nextActionChannel,
+      nextActionAt: decision.nextActionAt,
+      reason: decision.reason,
+      blockedReason: decision.blockedReason,
+      requiresHumanReview: decision.requiresHumanReview,
+    },
+    event,
+    action: nextAction,
+  };
 }
 
 function getTwilioClient() {
@@ -449,6 +1412,14 @@ function whatsappAddress(phone: string) {
   return normalized ? `whatsapp:${normalized}` : '';
 }
 
+function globalWhatsappSenderPhone() {
+  return normalizePhone(
+    Deno.env.get('TWILIO_WHATSAPP_PHONE_NUMBER')
+    || Deno.env.get('TWILIO_WHATSAPP_FROM')
+    || ''
+  );
+}
+
 function whatsappTemplateVariables(lead: any) {
   return JSON.stringify({
     '1': leadName(lead),
@@ -465,13 +1436,13 @@ async function sendDashboardTestWhatsapp(db: any, body: JsonRecord) {
   const policy = leadAllowsChannel(lead, 'whatsapp');
   if (!policy.allowed) throw new Error(policy.reason);
 
+  const globalFrom = globalWhatsappSenderPhone();
   const primaryPhone = await getTenantPhoneNumberForChannel(db, tenantId, 'whatsapp');
-  if (!primaryPhone?.phone_number || primaryPhone.status !== 'active') throw new Error('Tenant primary phone number is not active');
-  if (primaryPhone.whatsapp_status !== 'active') throw new Error('Tenant WhatsApp account is not active');
-  const from = whatsappAddress(primaryPhone.phone_number);
+  const tenantFrom = primaryPhone?.status === 'active' && primaryPhone?.whatsapp_status === 'active' ? normalizePhone(primaryPhone.phone_number) : '';
+  const from = whatsappAddress(globalFrom || tenantFrom);
   const to = whatsappAddress(lead.phone || '');
   const message = String(body.message || 'This is a tenant WhatsApp test message. Reply STOP to opt out.').trim();
-  if (!from) throw new Error('Tenant WhatsApp sender is not configured');
+  if (!from) throw new Error('No global or tenant WhatsApp sender is configured');
   if (!to) throw new Error('Lead WhatsApp phone number is required');
   if (!message) throw new Error('WhatsApp message body is required');
 
@@ -496,7 +1467,7 @@ async function sendDashboardTestWhatsapp(db: any, body: JsonRecord) {
       provider_status: whatsapp.status || 'queued',
       status: whatsapp.status || 'queued',
       sent_at: nowIso(),
-      metadata: { source: 'admin_dashboard_test_whatsapp', senderResolution: 'tenant_primary', contentSid: contentSid || null },
+      metadata: { source: 'admin_dashboard_test_whatsapp', senderResolution: globalFrom ? 'global_whatsapp_secret' : 'tenant_active', contentSid: contentSid || null },
     }]).select(),
     'Failed to record WhatsApp test message'
   );
@@ -553,6 +1524,185 @@ function defaultCampaignEmailMessage(input: { tenant?: any; agent?: any; lead: a
     input.lead?.preferred_meeting_window ? `Preferred meeting window: ${input.lead.preferred_meeting_window}.` : '',
     'Do not ask long qualification questions. Keep it warm, specific, and action-oriented.',
   ].filter(Boolean).join(' ');
+}
+
+function normalizePositiveInteger(value: any, fallback: number, min = 1, max = 30) {
+  const number = Math.floor(Number(value));
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(Math.max(number, min), max);
+}
+
+function normalizeCadenceDays(value: any) {
+  const source = Array.isArray(value) ? value : [7, 14, 30];
+  const days = source
+    .map((item) => normalizePositiveInteger(item, 0, 1, 365))
+    .filter(Boolean);
+  return days.length ? days : [7, 14, 30];
+}
+
+function nurturePolicyFromRules(rules: any) {
+  const policy = rules?.nurturePolicy || {};
+  return {
+    cadenceDays: normalizeCadenceDays(policy.checkupCadenceDays),
+    maxCheckups: normalizePositiveInteger(policy.maxCheckups, 3, 1, 12),
+    preferredChannels: Array.isArray(policy.preferredChannels) && policy.preferredChannels.length
+      ? policy.preferredChannels
+      : ['email', 'whatsapp', 'sms'],
+  };
+}
+
+function isNurtureAction(action: any) {
+  const payload = action?.payload || {};
+  const lifecycle = payload.lifecycle || {};
+  return lifecycle.stage === 'nurture'
+    || payload.nurture?.active === true
+    || String(payload.lifecyclePath || '').includes('nurture')
+    || String(payload.sourceOutcome || '').includes('not_interested_now');
+}
+
+function nurtureStepFromAction(action: any) {
+  const payload = action?.payload || {};
+  return normalizePositiveInteger(
+    payload.nurture?.step
+      || payload.lifecycle?.nurtureStep
+      || payload.nurtureStep
+      || 1,
+    1,
+    1,
+    12
+  );
+}
+
+function nurtureStopReason(lead: any) {
+  if (!lead?.id) return 'lead_missing';
+  if (lead.automation_paused) return 'automation_paused';
+  if (lead.do_not_contact) return 'do_not_contact';
+  if (lead.opted_out_at) return 'opted_out';
+  if (lead.meeting_scheduled || lead.lead_stage === 'booked' || lead.scheduling_state === 'booked' || ['booked', 'scheduled'].includes(String(lead.status || '').toLowerCase())) return 'booked';
+  if (['closed_won', 'closed_lost', 'do_not_contact'].includes(String(lead.lead_stage || '').toLowerCase())) return `lead_stage_${lead.lead_stage}`;
+  return '';
+}
+
+function nurtureChannelCandidates(lead: any, rules: any) {
+  const policy = nurturePolicyFromRules(rules);
+  const preferred = normalizeRequestedChannel(leadPreferredContactChannel(lead));
+  return [...new Set([preferred, ...policy.preferredChannels].filter(Boolean))];
+}
+
+function defaultNurtureText(input: { tenant?: any; agent?: any; lead: any; channel: string; action?: any }) {
+  const agentName = input.agent?.display_name || 'the AI assistant';
+  const tenantName = input.tenant?.name || 'the team';
+  const service = spokenField(leadServiceInterest(input.lead) || 'your request');
+  const opener = `Hi ${leadName(input.lead)}, this is ${agentName} from ${tenantName}.`;
+  const body = `Just checking in about ${service}. If now is a better time, reply with a day and time that works and we can help with the next step.`;
+  const optOut = ['sms', 'whatsapp'].includes(input.channel) ? ' Reply STOP to opt out.' : '';
+  return `${opener} ${body}${optOut}`;
+}
+
+async function loadLeadMemoryContext(db: any, tenantId: string, leadId: string) {
+  if (!tenantId || !leadId) return [];
+  try {
+    const rows = await unwrap(
+      await db.database
+        .from('lead_memory_entries')
+        .select('title,summary,memory_payload,follow_up_recommendation,status,created_at,updated_at')
+        .eq('tenant_id', tenantId)
+        .eq('lead_id', leadId)
+        .in('status', ['approved', 'active'])
+        .order('updated_at', { ascending: false })
+        .limit(5),
+      'Failed to load lead memory context'
+    );
+    return (rows || []).map((row: any) => ({
+      title: row.title || 'Lead memory',
+      summary: compactText(row.summary || '', 600),
+      facts: row.memory_payload || null,
+      followUp: row.follow_up_recommendation || null,
+      status: row.status || null,
+      createdAt: row.created_at || null,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function draftNurtureText(input: {
+  tenant?: any;
+  agent?: any;
+  lead: any;
+  channel: string;
+  action?: any;
+  rules?: any;
+  knowledgeContext?: JsonRecord[];
+  leadMemoryContext?: JsonRecord[];
+}) {
+  const fallback = defaultNurtureText(input);
+  const apiKey = Deno.env.get('OPENAI_API_KEY');
+  if (!apiKey) return { text: fallback, model: 'deterministic-nurture-text-fallback', responseId: null, generatedBy: 'template', generationError: null };
+
+  const step = nurtureStepFromAction(input.action);
+  const policy = nurturePolicyFromRules(input.rules);
+  const model = Deno.env.get('OPENAI_TEXT_MODEL') || Deno.env.get('OPENAI_EMAIL_MODEL') || 'gpt-5.5';
+  const response = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      instructions: [
+        'You write short, friendly nurture follow-up messages for service-business leads.',
+        'Return only valid JSON with key text.',
+        'The lead is not ready now or did not respond earlier; be gentle and useful, never pushy.',
+        'Ask for a simple reply with a good day/time only if they are ready.',
+        'Use tenant, agent, service interest, lead memory, and knowledge context when available.',
+        'Do not invent prices, guarantees, discounts, availability, or policy details.',
+        input.channel === 'sms' || input.channel === 'whatsapp'
+          ? 'Keep it under 320 characters and include STOP opt-out wording.'
+          : 'Keep it concise.',
+      ].join(' '),
+      input: JSON.stringify({
+        channel: input.channel,
+        nurture: {
+          step,
+          maxCheckups: policy.maxCheckups,
+          cadenceDays: policy.cadenceDays,
+          sourceOutcome: input.action?.payload?.sourceOutcome || null,
+        },
+        tenant: { name: input.tenant?.name || null, industry: input.tenant?.industry || null },
+        agent: { name: input.agent?.display_name || 'the AI assistant' },
+        lead: {
+          name: leadName(input.lead),
+          serviceInterest: leadServiceInterest(input.lead) || null,
+          preferredContactChannel: leadPreferredContactChannel(input.lead) || null,
+          qualificationNotes: input.lead?.qualification_notes || null,
+          importedLeadData: input.lead?.custom_fields?.importedLeadData || null,
+        },
+        leadMemory: input.leadMemoryContext || [],
+        knowledgeContext: input.knowledgeContext || [],
+      }),
+      text: {
+        format: {
+          type: 'json_schema',
+          name: 'nurture_text_message',
+          strict: true,
+          schema: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['text'],
+            properties: { text: { type: 'string' } },
+          },
+        },
+      },
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) return { text: fallback, model, responseId: data?.id || null, generatedBy: 'template', generationError: data?.error?.message || `OpenAI nurture draft failed with ${response.status}` };
+  try {
+    const draft = JSON.parse(extractOutputText(data));
+    if (draft?.text) return { text: String(draft.text).trim(), model, responseId: data.id || null, generatedBy: 'openai', generationError: null };
+  } catch {
+    // Fall through to deterministic copy.
+  }
+  return { text: fallback, model, responseId: data?.id || null, generatedBy: 'template', generationError: 'OpenAI returned an invalid nurture draft' };
 }
 
 function escapeHtml(value: unknown) {
@@ -702,18 +1852,35 @@ function extractOutputText(response: any) {
     .join('');
 }
 
-async function draftQueuedEmail(input: { tenant?: any; agent?: any; lead: any; message: string; knowledgeContext?: JsonRecord[] }) {
+async function draftQueuedEmail(input: {
+  tenant?: any;
+  agent?: any;
+  lead: any;
+  message: string;
+  knowledgeContext?: JsonRecord[];
+  purpose?: string;
+  lifecycle?: JsonRecord;
+  leadMemoryContext?: JsonRecord[];
+}) {
   const apiKey = Deno.env.get('OPENAI_API_KEY');
   const service = spokenField(leadServiceInterest(input.lead) || 'insurance coverage');
-  const fallbackSubject = `Consultation about ${service}`;
-  const fallbackText = [
-    `Hi ${leadName(input.lead)},`,
-    `I’m ${input.agent?.display_name || 'the AI assistant'}. You filled our form on insurance, and I see you’re interested in ${service}. Would you like to book a consultation with one of our experts?`,
-    input.lead?.preferred_meeting_window
-      ? `I saw your preferred time is ${input.lead.preferred_meeting_window}. Does that still work for you?`
-      : 'If yes, what day and time will you be available?',
-    'Thank you.',
-  ].join('\n\n');
+  const isNurture = input.purpose === 'nurture';
+  const fallbackSubject = isNurture ? `Checking in about ${service}` : `Consultation about ${service}`;
+  const fallbackText = isNurture
+    ? [
+      `Hi ${leadName(input.lead)},`,
+      `I’m ${input.agent?.display_name || 'the AI assistant'}. Just checking in about ${service}.`,
+      `If now is a better time, reply with a day and time that works and we can help with the next step.`,
+      `Thank you.`,
+    ].join('\n\n')
+    : [
+      `Hi ${leadName(input.lead)},`,
+      `I’m ${input.agent?.display_name || 'the AI assistant'}. You filled our form on insurance, and I see you’re interested in ${service}. Would you like to book a consultation with one of our experts?`,
+      input.lead?.preferred_meeting_window
+        ? `I saw your preferred time is ${input.lead.preferred_meeting_window}. Does that still work for you?`
+        : 'If yes, what day and time will you be available?',
+      'Thank you.',
+    ].join('\n\n');
   const fallback = {
     subject: fallbackSubject,
     text: fallbackText,
@@ -734,9 +1901,15 @@ async function draftQueuedEmail(input: { tenant?: any; agent?: any; lead: any; m
       instructions: [
         'You write concise, accurate automated business emails.',
         'Return only valid JSON with keys subject, text, and html.',
-        'This is the AI agent starting the conversation by email first, so do not imply the lead emailed first.',
-        'Primary goal: use this intro format: "I’m [agent name]. You filled our form on insurance, and I see you’re interested in [service_interest or coverage_type_needed]. Would you like to book a consultation with one of our experts?"',
-        'If the lead replies yes later, ask what day and time they will be available.',
+        isNurture
+          ? 'This is a nurture/checkup email after a lead was not ready or did not respond. Be friendly, low-pressure, and useful.'
+          : 'This is the AI agent starting the conversation by email first, so do not imply the lead emailed first.',
+        isNurture
+          ? 'Primary goal: gently check whether now is a better time and invite the lead to reply with a good day/time if they want help.'
+          : 'Primary goal: use this intro format: "I’m [agent name]. You filled our form on insurance, and I see you’re interested in [service_interest or coverage_type_needed]. Would you like to book a consultation with one of our experts?"',
+        isNurture
+          ? 'Do not restart long qualification; use any lead memory to make the check-in relevant.'
+          : 'If the lead replies yes later, ask what day and time they will be available.',
         'Do not ask long qualification questions when the lead already provided context.',
         'Use knowledgeContext as source-of-truth context for services, policies, objections, offers, qualification guidance, and booking rules.',
         'If a knowledge item is only a file or URL reference without an excerpt, do not claim details from its unseen contents.',
@@ -756,6 +1929,8 @@ async function draftQueuedEmail(input: { tenant?: any; agent?: any; lead: any; m
           preferredContactChannel: input.lead?.preferred_contact_channel || null,
         },
         knowledgeContext: input.knowledgeContext || [],
+        leadMemory: input.leadMemoryContext || [],
+        lifecycle: input.lifecycle || null,
         requestedMessage: input.message,
       }),
       text: {
@@ -829,7 +2004,18 @@ async function sendTenantEmailDirect(db: any, input: {
   const conversationId = input.conversationId || conversation?.id || null;
   const sender = platformEmailSender(input.agent);
   const knowledgeContext = await loadKnowledgeContext(db, input.tenant, input.agent);
-  const draft = await draftQueuedEmail({ tenant: input.tenant, agent: input.agent, lead: input.lead, message: input.message, knowledgeContext });
+  const purpose = String(input.metadata?.purpose || input.metadata?.lifecyclePurpose || '').trim();
+  const leadMemoryContext = purpose === 'nurture' ? await loadLeadMemoryContext(db, input.tenantId, input.lead.id) : [];
+  const draft = await draftQueuedEmail({
+    tenant: input.tenant,
+    agent: input.agent,
+    lead: input.lead,
+    message: input.message,
+    knowledgeContext,
+    purpose,
+    lifecycle: input.metadata?.lifecycle || null,
+    leadMemoryContext,
+  });
   const resend = await sendResendEmail({ sender, to: input.lead.email, draft });
   const now = nowIso();
 
@@ -951,11 +2137,61 @@ async function sendTenantSms(db: any, input: { tenantId: string; lead: any; mess
   return { providerMessageId: sms.sid || null, status: sms.status || 'queued', message: rows?.[0] || null };
 }
 
+async function sendTenantWhatsapp(db: any, input: { tenantId: string; lead: any; message: string; source: string; conversationId?: string | null; metadata?: JsonRecord }) {
+  const policy = leadAllowsChannel(input.lead, 'whatsapp');
+  if (!policy.allowed) throw new Error(policy.reason);
+
+  const globalFrom = globalWhatsappSenderPhone();
+  const primaryPhone = await getTenantPhoneNumberForChannel(db, input.tenantId, 'whatsapp');
+  const tenantFrom = primaryPhone?.status === 'active' && primaryPhone?.whatsapp_status === 'active' ? normalizePhone(primaryPhone.phone_number) : '';
+  const from = whatsappAddress(globalFrom || tenantFrom);
+  const to = whatsappAddress(input.lead.phone || '');
+  const message = String(input.message || '').trim();
+  if (!from) throw new Error('No global or tenant WhatsApp sender is configured');
+  if (!to) throw new Error('Lead WhatsApp phone number is required');
+  if (!message) throw new Error('WhatsApp message body is required');
+
+  const callback = new URL('/twilio-sms-webhook', functionBaseUrl());
+  callback.searchParams.set('mode', 'status');
+  const contentSid = Deno.env.get('TWILIO_WHATSAPP_TEMPLATE_CONTENT_SID');
+  const whatsappPayload: any = contentSid
+    ? { from, to, contentSid, contentVariables: whatsappTemplateVariables(input.lead), statusCallback: callback.toString() }
+    : { from, to, body: message, statusCallback: callback.toString() };
+  const whatsapp = await getTwilioClient().messages.create(whatsappPayload);
+  const conversation = input.conversationId
+    ? { id: input.conversationId }
+    : await ensureLeadConversation(db, input.tenantId, input.lead, 'whatsapp');
+  const rows = await unwrap(
+    await db.database.from('lead_conversation_messages').insert([{
+      tenant_id: input.tenantId,
+      conversation_id: conversation?.id || null,
+      lead_id: input.lead.id,
+      direction: 'outbound',
+      channel: 'whatsapp',
+      message_type: 'whatsapp',
+      body_text: contentSid ? `WhatsApp template sent: ${contentSid}` : message,
+      provider_message_id: whatsapp.sid || null,
+      provider_status: whatsapp.status || 'queued',
+      status: whatsapp.status || 'queued',
+      sent_at: nowIso(),
+      metadata: {
+        source: input.source,
+        senderResolution: globalFrom ? 'global_whatsapp_secret' : 'tenant_active',
+        contentSid: contentSid || null,
+        ...(input.metadata || {}),
+      },
+    }]).select(),
+    'Failed to record WhatsApp message'
+  );
+  return { providerMessageId: whatsapp.sid || null, status: whatsapp.status || 'queued', message: rows?.[0] || null };
+}
+
 async function createVoiceCallSession(db: any, input: JsonRecord) {
   const tenantId = requiredTenantId(input);
   const leadId = input.leadId || input.lead_id || null;
   const tenant = await loadTenant(db, tenantId);
   if (!tenant?.id) throw new Error('Tenant was not found for voice call');
+  const lifecycleRules = await loadEffectiveLifecycleRules(db, tenantId);
   const hours = businessHoursStatus(tenant);
   if (!hours.allowed && input.enforceBusinessHours !== false && input.enforce_business_hours !== false) {
     throw new Error(businessHoursBlockedMessage(hours));
@@ -969,7 +2205,7 @@ async function createVoiceCallSession(db: any, input: JsonRecord) {
     }
     const policy = leadAllowsChannel(lead, 'call');
     if (!policy.allowed) throw new Error(policy.reason);
-  } else if (!input.callConsent) {
+  } else if (!consentDefaultTrue(input.callConsent)) {
     throw new Error('Call consent is required for direct test calls');
   }
 
@@ -1017,6 +2253,12 @@ async function createVoiceCallSession(db: any, input: JsonRecord) {
           timezone: hours.timeZone,
           start: hours.start.label,
           end: hours.end.label,
+        },
+        tenantLifecycleRules: {
+          maxCallAttempts: lifecycleRules.maxCallAttempts,
+          channelOrder: lifecycleRules.channelOrder,
+          voicemailAllowed: lifecycleRules.voicemailAllowed,
+          offDutyCallPolicy: lifecycleRules.offDutyCallPolicy,
         },
         ...(input.reboundCall || input.rebound_call
           ? {
@@ -1105,7 +2347,7 @@ async function launchVoiceCall(db: any, input: JsonRecord) {
   return publicCall(call, session);
 }
 
-const bobQueueActions = ['status', 'tick', 'start-calls', 'skip', 'campaign-pause', 'campaign-resume', 'campaign-stop', 'test-lead', 'test-call', 'test-sms', 'test-whatsapp', 'live-start', 'live-status'];
+const bobQueueActions = ['status', 'lifecycle-rules', 'evaluate-lifecycle', 'tick', 'start-calls', 'skip', 'campaign-pause', 'campaign-resume', 'campaign-stop', 'test-lead', 'test-call', 'test-sms', 'test-whatsapp', 'live-start', 'live-status'];
 
 async function getBobRunStatus(db: any, tenantId: string, leadId: string, conversationId?: string) {
   const { data: leads } = await db.database.from('leads').select('*').eq('tenant_id', tenantId).eq('id', leadId).limit(1);
@@ -1147,7 +2389,7 @@ async function createLiveLeadRun(db: any, body: any) {
     priority: body.priority || 'medium',
     qualification_status: body.qualificationStatus || 'unqualified',
     qualification_score: Number(body.qualificationScore || 0),
-    lead_stage: body.leadStage || 'new_inquiry',
+    lead_stage: body.leadStage || 'new',
     scheduling_state: body.schedulingState || 'not_started',
     preferred_contact_channel: body.preferredContactChannel || 'email',
     preferred_language: body.preferredLanguage || body.preferred_language || null,
@@ -1157,10 +2399,10 @@ async function createLiveLeadRun(db: any, body: any) {
     budget_range: body.budgetRange || null,
     location_summary: body.locationSummary || null,
     qualification_notes: body.qualificationNotes || null,
-    call_consent: Boolean(body.callConsent),
-    sms_consent: Boolean(body.smsConsent),
-    whatsapp_consent: Boolean(body.whatsappConsent),
-    email_consent: Boolean(body.emailConsent || body.includeEmail !== false),
+    call_consent: consentDefaultTrue(body.callConsent),
+    sms_consent: consentDefaultTrue(body.smsConsent),
+    whatsapp_consent: consentDefaultTrue(body.whatsappConsent),
+    email_consent: body.includeEmail === false ? false : consentDefaultTrue(body.emailConsent),
     do_not_contact: Boolean(body.doNotContact),
     assigned_tenant_agent_id: tenantAgent?.id || body.tenantAgentId || body.tenant_agent_id || null,
     status: 'new',
@@ -1306,9 +2548,22 @@ async function sendQueuedSmsActions(db: any, body: JsonRecord) {
       const tenantId = action.tenant_id;
       const lead = await loadLead(db, tenantId, action.lead_id);
       if (!lead) throw new Error('Lead not found for queued SMS');
+      if (await stopNurtureActionIfBlocked(db, action, lead)) {
+        results.push({ actionId: action.id, success: true, skipped: true, reason: 'nurture_stop_state' });
+        continue;
+      }
       const tenant = await loadTenant(db, tenantId);
       const agent = await resolveEmailTenantAgent(db, tenantId, lead, action.payload?.tenantAgentId || action.payload?.tenant_agent_id || lead.assigned_tenant_agent_id);
-      const message = String(action.payload?.message || action.payload?.body || '').trim() || defaultCampaignSmsBody({ tenant, agent, lead });
+      const rules = isNurtureAction(action) ? await loadEffectiveLifecycleRules(db, tenantId) : null;
+      const explicitMessage = String(action.payload?.message || action.payload?.body || '').trim();
+      let message = explicitMessage || defaultCampaignSmsBody({ tenant, agent, lead });
+      let generation: JsonRecord | null = null;
+      if (!explicitMessage && isNurtureAction(action)) {
+        const knowledgeContext = await loadKnowledgeContext(db, tenant, agent);
+        const leadMemoryContext = await loadLeadMemoryContext(db, tenantId, lead.id);
+        generation = await draftNurtureText({ tenant, agent, lead, channel: 'sms', action, rules, knowledgeContext, leadMemoryContext });
+        message = generation.text || message;
+      }
       const sms = await sendTenantSms(db, {
         tenantId,
         lead,
@@ -1319,9 +2574,15 @@ async function sendQueuedSmsActions(db: any, body: JsonRecord) {
           bobActionId: action.id,
           campaignId: action.campaign_id || null,
           campaignLeadId: action.campaign_lead_id || null,
+          purpose: isNurtureAction(action) ? 'nurture' : null,
+          nurture: isNurtureAction(action) ? action.payload?.nurture || null : null,
+          generation,
         },
       });
 
+      const nextNurture = isNurtureAction(action)
+        ? await safeScheduleNextNurtureCheckup(db, { tenantId, lead, action, rules: rules || await loadEffectiveLifecycleRules(db, tenantId), sentChannel: 'sms' })
+        : { action: null, error: null };
       await db.database.from('bob_actions').update({
         status: 'completed',
         executed_at: nowIso(),
@@ -1330,16 +2591,19 @@ async function sendQueuedSmsActions(db: any, body: JsonRecord) {
           providerMessageId: sms.providerMessageId,
           providerStatus: sms.status,
           messageId: sms.message?.id || null,
+          nextNurtureActionId: nextNurture.action?.id || null,
+          nurtureScheduleError: nextNurture.error || null,
+          nurtureStep: isNurtureAction(action) ? nurtureStepFromAction(action) : null,
         },
       }).eq('id', action.id).eq('tenant_id', tenantId);
-      if (action.campaign_lead_id) {
+      if (action.campaign_lead_id && !isNurtureAction(action)) {
         await db.database.from('campaign_leads').update({
           status: 'running',
           current_step: 'sms_sent',
           updated_at: nowIso(),
         }).eq('tenant_id', tenantId).eq('id', action.campaign_lead_id);
       }
-      results.push({ actionId: action.id, success: true, sms });
+      results.push({ actionId: action.id, success: true, sms, nextNurtureAction: nextNurture.action, nurtureScheduleError: nextNurture.error });
     } catch (error) {
       await db.database.from('bob_actions').update({
         status: 'failed',
@@ -1356,6 +2620,104 @@ async function sendQueuedSmsActions(db: any, body: JsonRecord) {
         }).eq('tenant_id', action.tenant_id).eq('id', action.campaign_lead_id);
       }
       results.push({ actionId: action.id, success: false, error: String(error?.message || 'Queued SMS failed') });
+    }
+  }
+  return results;
+}
+
+async function sendQueuedWhatsappActions(db: any, body: JsonRecord) {
+  let query = db.database
+    .from('bob_actions')
+    .select('*')
+    .eq('action_type', 'send_whatsapp')
+    .eq('status', 'pending')
+    .lte('scheduled_for', nowIso())
+    .order('scheduled_for', { ascending: true })
+    .limit(Number(body.whatsappLimit || body.limit || 3));
+  if (body.tenantId || body.tenant_id) query = query.eq('tenant_id', body.tenantId || body.tenant_id);
+  if (body.leadId || body.lead_id) query = query.eq('lead_id', body.leadId || body.lead_id);
+  if (body.conversationId || body.conversation_id) query = query.eq('conversation_id', body.conversationId || body.conversation_id);
+  if (body.campaignId || body.campaign_id) query = query.eq('campaign_id', body.campaignId || body.campaign_id);
+
+  const actions = await unwrap(await query, 'Failed to load queued WhatsApp actions');
+  const results = [];
+  for (const action of actions || []) {
+    try {
+      const tenantId = action.tenant_id;
+      const lead = await loadLead(db, tenantId, action.lead_id);
+      if (!lead) throw new Error('Lead not found for queued WhatsApp');
+      if (await stopNurtureActionIfBlocked(db, action, lead)) {
+        results.push({ actionId: action.id, success: true, skipped: true, reason: 'nurture_stop_state' });
+        continue;
+      }
+      const tenant = await loadTenant(db, tenantId);
+      const agent = await resolveEmailTenantAgent(db, tenantId, lead, action.payload?.tenantAgentId || action.payload?.tenant_agent_id || lead.assigned_tenant_agent_id);
+      const rules = isNurtureAction(action) ? await loadEffectiveLifecycleRules(db, tenantId) : null;
+      const explicitMessage = String(action.payload?.message || action.payload?.body || '').trim();
+      let message = explicitMessage || defaultCampaignSmsBody({ tenant, agent, lead });
+      let generation: JsonRecord | null = null;
+      if (!explicitMessage && isNurtureAction(action)) {
+        const knowledgeContext = await loadKnowledgeContext(db, tenant, agent);
+        const leadMemoryContext = await loadLeadMemoryContext(db, tenantId, lead.id);
+        generation = await draftNurtureText({ tenant, agent, lead, channel: 'whatsapp', action, rules, knowledgeContext, leadMemoryContext });
+        message = generation.text || message;
+      }
+      const whatsapp = await sendTenantWhatsapp(db, {
+        tenantId,
+        lead,
+        conversationId: action.conversation_id || null,
+        message,
+        source: action.payload?.source || 'queued_bob_action',
+        metadata: {
+          bobActionId: action.id,
+          campaignId: action.campaign_id || null,
+          campaignLeadId: action.campaign_lead_id || null,
+          purpose: isNurtureAction(action) ? 'nurture' : null,
+          nurture: isNurtureAction(action) ? action.payload?.nurture || null : null,
+          generation,
+        },
+      });
+
+      const nextNurture = isNurtureAction(action)
+        ? await safeScheduleNextNurtureCheckup(db, { tenantId, lead, action, rules: rules || await loadEffectiveLifecycleRules(db, tenantId), sentChannel: 'whatsapp' })
+        : { action: null, error: null };
+      await db.database.from('bob_actions').update({
+        status: 'completed',
+        executed_at: nowIso(),
+        updated_at: nowIso(),
+        result: {
+          providerMessageId: whatsapp.providerMessageId,
+          providerStatus: whatsapp.status,
+          messageId: whatsapp.message?.id || null,
+          nextNurtureActionId: nextNurture.action?.id || null,
+          nurtureScheduleError: nextNurture.error || null,
+          nurtureStep: isNurtureAction(action) ? nurtureStepFromAction(action) : null,
+        },
+      }).eq('id', action.id).eq('tenant_id', tenantId);
+      if (action.campaign_lead_id && !isNurtureAction(action)) {
+        await db.database.from('campaign_leads').update({
+          status: 'running',
+          current_step: 'whatsapp_sent',
+          updated_at: nowIso(),
+        }).eq('tenant_id', tenantId).eq('id', action.campaign_lead_id);
+      }
+      results.push({ actionId: action.id, success: true, whatsapp, nextNurtureAction: nextNurture.action, nurtureScheduleError: nextNurture.error });
+    } catch (error) {
+      await db.database.from('bob_actions').update({
+        status: 'failed',
+        executed_at: nowIso(),
+        updated_at: nowIso(),
+        result: { error: String(error?.message || 'Queued WhatsApp failed') },
+      }).eq('id', action.id).eq('tenant_id', action.tenant_id);
+      if (action.campaign_lead_id) {
+        await db.database.from('campaign_leads').update({
+          status: 'failed',
+          current_step: 'whatsapp_failed',
+          stop_reason: String(error?.message || 'Queued WhatsApp failed'),
+          updated_at: nowIso(),
+        }).eq('tenant_id', action.tenant_id).eq('id', action.campaign_lead_id);
+      }
+      results.push({ actionId: action.id, success: false, error: String(error?.message || 'Queued WhatsApp failed') });
     }
   }
   return results;
@@ -1382,9 +2744,17 @@ async function sendQueuedEmailActions(db: any, body: JsonRecord) {
       const tenantId = action.tenant_id;
       const lead = await loadLead(db, tenantId, action.lead_id);
       if (!lead) throw new Error('Lead not found for queued email');
+      if (await stopNurtureActionIfBlocked(db, action, lead)) {
+        results.push({ actionId: action.id, success: true, skipped: true, reason: 'nurture_stop_state' });
+        continue;
+      }
       const tenant = await loadTenant(db, tenantId);
       const agent = await loadTenantAgent(db, tenantId, action.payload?.tenantAgentId || action.payload?.tenant_agent_id || lead.assigned_tenant_agent_id);
-      const message = String(action.payload?.message || action.payload?.body || '').trim() || defaultCampaignEmailMessage({ tenant, agent, lead });
+      const rules = isNurtureAction(action) ? await loadEffectiveLifecycleRules(db, tenantId) : null;
+      const message = String(action.payload?.message || action.payload?.body || '').trim()
+        || (isNurtureAction(action)
+          ? `Write nurture checkup ${nurtureStepFromAction(action)} for this lead.`
+          : defaultCampaignEmailMessage({ tenant, agent, lead }));
       const email = await sendTenantEmailDirect(db, {
         tenantId,
         lead,
@@ -1398,9 +2768,16 @@ async function sendQueuedEmailActions(db: any, body: JsonRecord) {
           campaignId: action.campaign_id || null,
           campaignLeadId: action.campaign_lead_id || null,
           preferredContactChannel: leadPreferredContactChannel(lead),
+          purpose: isNurtureAction(action) ? 'nurture' : null,
+          lifecyclePurpose: isNurtureAction(action) ? 'nurture' : null,
+          nurture: isNurtureAction(action) ? action.payload?.nurture || null : null,
+          lifecycle: action.payload?.lifecycle || null,
         },
       });
 
+      const nextNurture = isNurtureAction(action)
+        ? await safeScheduleNextNurtureCheckup(db, { tenantId, lead, action, rules: rules || await loadEffectiveLifecycleRules(db, tenantId), sentChannel: 'email' })
+        : { action: null, error: null };
       await db.database.from('bob_actions').update({
         status: 'completed',
         executed_at: nowIso(),
@@ -1410,16 +2787,19 @@ async function sendQueuedEmailActions(db: any, body: JsonRecord) {
           providerMessageId: email.resend?.id || null,
           fromEmail: email.sender?.fromEmail || null,
           subject: email.draft?.subject || null,
+          nextNurtureActionId: nextNurture.action?.id || null,
+          nurtureScheduleError: nextNurture.error || null,
+          nurtureStep: isNurtureAction(action) ? nurtureStepFromAction(action) : null,
         },
       }).eq('id', action.id).eq('tenant_id', tenantId);
-      if (action.campaign_lead_id) {
+      if (action.campaign_lead_id && !isNurtureAction(action)) {
         await db.database.from('campaign_leads').update({
           status: 'running',
           current_step: 'email_sent',
           updated_at: nowIso(),
         }).eq('tenant_id', tenantId).eq('id', action.campaign_lead_id);
       }
-      results.push({ actionId: action.id, success: true, email });
+      results.push({ actionId: action.id, success: true, email, nextNurtureAction: nextNurture.action, nurtureScheduleError: nextNurture.error });
     } catch (error) {
       await db.database.from('bob_actions').update({
         status: 'failed',
@@ -1441,10 +2821,152 @@ async function sendQueuedEmailActions(db: any, body: JsonRecord) {
   return results;
 }
 
+function voiceLifecycleOutcomeFromAction(action: JsonRecord) {
+  const result = action?.result || {};
+  const payload = action?.payload || {};
+  const metadata = action?.metadata || {};
+  const explicitOutcome = firstValue(
+    result.callOutcome,
+    result.outcome,
+    result.lifecycleOutcome,
+    result.voiceOutcome,
+    payload.callOutcome,
+    payload.outcome,
+    metadata.callOutcome,
+    metadata.outcome
+  );
+  const machineSignal = firstValue(
+    result.answeredBy,
+    result.answered_by,
+    result.machineDetection,
+    result.machine_detection,
+    metadata.answeredBy,
+    metadata.answered_by,
+    metadata.machineDetection,
+    metadata.machine_detection
+  );
+  if (machineSignal && /voice\s*mail|voicemail|answering.?machine|machine/i.test(String(machineSignal))) {
+    return 'voicemail_left';
+  }
+  if (result.interrupted || payload.interrupted || metadata.interrupted) return 'interrupted';
+  if (explicitOutcome) return normalizeLifecycleOutcome(explicitOutcome);
+  const twilioStatus = firstValue(result.callStatus, result.providerStatus, result.status);
+  if (twilioStatus) return normalizeLifecycleOutcome(twilioStatus);
+  if (action.status === 'completed') return 'answered';
+  if (action.status === 'failed') return 'failed';
+  if (action.status === 'skipped' && result.reboundActionId) return 'interrupted';
+  return 'needs_human_review';
+}
+
+async function terminalCallAttemptCount(db: any, action: JsonRecord) {
+  let query = db.database
+    .from('bob_actions')
+    .select('id')
+    .eq('tenant_id', action.tenant_id)
+    .eq('lead_id', action.lead_id)
+    .eq('action_type', 'queue_call_attempt')
+    .in('status', ['completed', 'failed', 'skipped', 'awaiting_human']);
+  if (action.campaign_lead_id) query = query.eq('campaign_lead_id', action.campaign_lead_id);
+  const rows = await unwrap(await query.limit(100), 'Failed to count terminal voice actions');
+  return rows?.length || 0;
+}
+
+async function markVoiceLifecycleRecovery(db: any, action: JsonRecord, patch: JsonRecord) {
+  await db.database.from('bob_actions').update({
+    updated_at: nowIso(),
+    result: {
+      ...(action.result || {}),
+      phase24LifecycleRecovery: {
+        processedAt: nowIso(),
+        ...(patch || {}),
+      },
+    },
+  }).eq('tenant_id', action.tenant_id).eq('id', action.id);
+}
+
+async function processVoiceLifecycleRecoveries(db: any, body: JsonRecord) {
+  let query = db.database
+    .from('bob_actions')
+    .select('*')
+    .eq('action_type', 'queue_call_attempt')
+    .in('status', ['completed', 'failed', 'skipped'])
+    .order('updated_at', { ascending: false })
+    .limit(Number(body.voiceLifecycleLimit || body.lifecycleLimit || body.limit || 10));
+  if (body.tenantId || body.tenant_id) query = query.eq('tenant_id', body.tenantId || body.tenant_id);
+  if (body.leadId || body.lead_id) query = query.eq('lead_id', body.leadId || body.lead_id);
+  if (body.conversationId || body.conversation_id) query = query.eq('conversation_id', body.conversationId || body.conversation_id);
+  if (body.campaignId || body.campaign_id) query = query.eq('campaign_id', body.campaignId || body.campaign_id);
+
+  const actions = await unwrap(await query, 'Failed to load terminal voice actions for lifecycle recovery') || [];
+  const results = [];
+  const processedLeadKeys = new Set<string>();
+  for (const action of actions) {
+    try {
+      if (!action.lead_id) continue;
+      if (action.result?.phase24LifecycleRecovery?.processedAt) {
+        results.push({ actionId: action.id, skipped: true, reason: 'phase24_lifecycle_recovery_already_processed' });
+        continue;
+      }
+      const leadKey = `${action.tenant_id}:${action.campaign_lead_id || action.lead_id}`;
+      if (processedLeadKeys.has(leadKey)) {
+        await markVoiceLifecycleRecovery(db, action, { skipped: true, reason: 'newer_terminal_voice_action_processed_for_lead' });
+        results.push({ actionId: action.id, skipped: true, reason: 'newer_terminal_voice_action_processed_for_lead' });
+        continue;
+      }
+      const existingEvent = await existingPhase23Event(db, action.tenant_id, action.id);
+      if (existingEvent) {
+        await markVoiceLifecycleRecovery(db, action, { skipped: true, reason: 'phase23_event_exists', eventId: existingEvent.id });
+        results.push({ actionId: action.id, skipped: true, reason: 'phase23_event_exists', eventId: existingEvent.id });
+        continue;
+      }
+
+      const outcome = voiceLifecycleOutcomeFromAction(action);
+      if (outcome === 'interrupted' && action.result?.reboundActionId) {
+        await markVoiceLifecycleRecovery(db, action, { skipped: true, outcome, reason: 'interrupted_rebound_already_queued', reboundActionId: action.result.reboundActionId });
+        results.push({ actionId: action.id, skipped: true, outcome, reason: 'interrupted_rebound_already_queued', reboundActionId: action.result.reboundActionId });
+        continue;
+      }
+
+      const terminalAttempts = await terminalCallAttemptCount(db, action);
+      const evaluation = await evaluateLeadLifecycle(db, {
+        tenantId: action.tenant_id,
+        leadId: action.lead_id,
+        actionId: action.id,
+        outcome,
+        sourceChannel: 'call',
+        attemptCount: Math.max(0, terminalAttempts - 1),
+        metadata: {
+          source: 'phase24_voice_outcome_recovery',
+          sourceActionStatus: action.status,
+          sourceActionResult: action.result || null,
+          sourceActionPayload: action.payload || null,
+          terminalCallAttempts: terminalAttempts,
+          campaignId: action.campaign_id || null,
+          campaignLeadId: action.campaign_lead_id || null,
+        },
+      });
+      processedLeadKeys.add(leadKey);
+      await markVoiceLifecycleRecovery(db, action, {
+        skipped: false,
+        outcome,
+        eventId: evaluation?.event?.id || null,
+        nextActionId: evaluation?.action?.id || null,
+        decision: evaluation?.decision || null,
+      });
+      results.push({ actionId: action.id, success: true, outcome, evaluation });
+    } catch (error) {
+      results.push({ actionId: action.id, success: false, error: String(error?.message || 'Voice lifecycle recovery failed') });
+    }
+  }
+  return results;
+}
+
 async function startQueuedCalls(db: any, body: JsonRecord) {
   await ensureCampaignCallActions(db, body);
+  const voiceLifecycleResults = await processVoiceLifecycleRecoveries(db, body);
   const emailResults = await sendQueuedEmailActions(db, body);
   const smsResults = await sendQueuedSmsActions(db, body);
+  const whatsappResults = await sendQueuedWhatsappActions(db, body);
   let query = db.database
     .from('bob_actions')
     .select('*')
@@ -1462,6 +2984,54 @@ async function startQueuedCalls(db: any, body: JsonRecord) {
   for (const action of actions || []) {
     try {
       const lead = await loadLead(db, action.tenant_id, action.lead_id);
+      const lifecycleRules = await loadEffectiveLifecycleRules(db, action.tenant_id);
+      const attemptCount = await campaignLeadAttemptCount(db, action);
+      if (attemptCount >= lifecycleRules.maxCallAttempts) {
+        const reason = `Max call attempts reached (${attemptCount}/${lifecycleRules.maxCallAttempts}); automation requires human review before another call.`;
+        await db.database.from('bob_actions').update({
+          status: 'awaiting_human',
+          reason,
+          updated_at: nowIso(),
+          result: {
+            ...(action.result || {}),
+            blockedReason: 'max_call_attempts',
+            attemptCount,
+            maxCallAttempts: lifecycleRules.maxCallAttempts,
+          },
+        }).eq('id', action.id).eq('tenant_id', action.tenant_id);
+        if (lead?.id) {
+          await db.database.from('leads').update({
+            requires_human_review: true,
+            escalation_reason: 'max_call_attempts_reached',
+            next_contact_at: null,
+            updated_at: nowIso(),
+          }).eq('tenant_id', action.tenant_id).eq('id', lead.id);
+          await recordLifecycleBlockedEvent(db, {
+            tenantId: action.tenant_id,
+            lead,
+            action,
+            outcome: 'needs_human_review',
+            reason,
+            blockedReason: 'max_call_attempts',
+            metadata: {
+              attemptCount,
+              maxCallAttempts: lifecycleRules.maxCallAttempts,
+              ruleVersion: 'phase22',
+            },
+          });
+        }
+        if (action.campaign_lead_id) {
+          await db.database.from('campaign_leads').update({
+            status: 'stopped',
+            current_step: 'call_attempt_limit_reached',
+            stop_reason: reason,
+            next_action_at: null,
+            updated_at: nowIso(),
+          }).eq('tenant_id', action.tenant_id).eq('id', action.campaign_lead_id);
+        }
+        results.push({ actionId: action.id, success: false, blocked: true, blockedReason: 'max_call_attempts', reason });
+        continue;
+      }
       if (leadPrefersEmail(lead)) {
         const emailPolicy = leadAllowsChannel(lead, 'email');
         await db.database.from('bob_actions').update({
@@ -1539,7 +3109,7 @@ async function startQueuedCalls(db: any, body: JsonRecord) {
     }
   }
   const convertedEmailResults = await sendQueuedEmailActions(db, body);
-  return { voiceResults: results, smsResults, emailResults: [...emailResults, ...convertedEmailResults] };
+  return { voiceResults: results, voiceLifecycleResults, smsResults, whatsappResults, emailResults: [...emailResults, ...convertedEmailResults] };
 }
 
 async function createFunctionTestLead(db: any, body: any) {
@@ -1555,10 +3125,10 @@ async function createFunctionTestLead(db: any, body: any) {
     preferred_contact_channel: body.preferredContactChannel || body.preferred_contact_channel || 'email',
     location_summary: body.locationSummary || body.location_summary || null,
     preferred_meeting_window: body.preferredMeetingWindow || body.preferred_meeting_window || null,
-    call_consent: Boolean(body.callConsent),
-    sms_consent: Boolean(body.smsConsent),
-    whatsapp_consent: Boolean(body.whatsappConsent),
-    email_consent: Boolean(body.emailConsent),
+    call_consent: consentDefaultTrue(body.callConsent),
+    sms_consent: consentDefaultTrue(body.smsConsent),
+    whatsapp_consent: consentDefaultTrue(body.whatsappConsent),
+    email_consent: consentDefaultTrue(body.emailConsent),
     do_not_contact: Boolean(body.doNotContact),
     assigned_tenant_agent_id: tenantAgent?.id || body.tenantAgentId || body.tenant_agent_id || null,
     status: 'new',
@@ -1600,8 +3170,18 @@ export default async function(req: Request): Promise<Response> {
       });
     }
 
+    if (action === 'lifecycle-rules') {
+      const tenantId = body.tenantId || body.tenant_id || url.searchParams.get('tenantId') || url.searchParams.get('tenant_id');
+      if (!tenantId) return jsonResponse({ success: false, error: 'tenantId is required' }, 400);
+      return jsonResponse({ success: true, rules: await loadEffectiveLifecycleRules(db, String(tenantId)) });
+    }
+
+    if (action === 'evaluate-lifecycle') {
+      return jsonResponse({ success: true, ...(await evaluateLeadLifecycle(db, body)) });
+    }
+
     if (action === 'tick' || action === 'start-calls') {
-      const { voiceResults, smsResults, emailResults } = await startQueuedCalls(db, body);
+      const { voiceResults, voiceLifecycleResults, smsResults, whatsappResults, emailResults } = await startQueuedCalls(db, body);
       if (body.leadId || body.lead_id) {
         const tenantId = requiredTenantId(body);
         const leadId = body.leadId || body.lead_id;
@@ -1611,13 +3191,15 @@ export default async function(req: Request): Promise<Response> {
             processedAt: nowIso(),
             mode: 'function_tick',
             voice: { started: voiceResults.filter((row) => row.success).length, results: voiceResults },
+            voiceLifecycle: { evaluated: voiceLifecycleResults.filter((row) => row.success).length, results: voiceLifecycleResults },
             sms: { sent: smsResults.filter((row) => row.success).length, results: smsResults },
+            whatsapp: { sent: whatsappResults.filter((row) => row.success).length, results: whatsappResults },
             email: { sent: emailResults.filter((row) => row.success && row.email).length, results: emailResults },
           },
           status: await getBobRunStatus(db, tenantId, leadId, body.conversationId || body.conversation_id),
         });
       }
-      return jsonResponse({ success: true, queued: await inspectQueuedBobActions(db), voice: { results: voiceResults }, sms: { results: smsResults }, email: { results: emailResults }, mode: 'function_tick' });
+      return jsonResponse({ success: true, queued: await inspectQueuedBobActions(db), voice: { results: voiceResults }, voiceLifecycle: { results: voiceLifecycleResults }, sms: { results: smsResults }, whatsapp: { results: whatsappResults }, email: { results: emailResults }, mode: 'function_tick' });
     }
 
     if (action === 'test-lead') {
@@ -1636,6 +3218,8 @@ export default async function(req: Request): Promise<Response> {
       return jsonResponse({ success: true, message: await sendDashboardTestWhatsapp(db, body) });
     }
 
+    const statusTenantId = body.tenantId || body.tenant_id || url.searchParams.get('tenantId') || url.searchParams.get('tenant_id');
+    const lifecycleRules = statusTenantId ? await loadEffectiveLifecycleRules(db, String(statusTenantId)) : null;
     return jsonResponse({
       success: true,
       service: 'bob-queue-actions',
@@ -1643,6 +3227,7 @@ export default async function(req: Request): Promise<Response> {
         configured: Boolean(Deno.env.get('VOICE_MEDIA_BRIDGE_WS_URL') && Deno.env.get('INSFORGE_FUNCTION_BASE_URL')),
         bridgeUrlConfigured: Boolean(Deno.env.get('VOICE_MEDIA_BRIDGE_WS_URL')),
       },
+      lifecycleRules,
       actions: bobQueueActions,
     });
   } catch (error) {

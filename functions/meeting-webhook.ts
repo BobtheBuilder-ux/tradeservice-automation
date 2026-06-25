@@ -473,6 +473,8 @@ export default async function(req: Request): Promise<Response> {
   const patch = {
     status: 'scheduled',
     meeting_scheduled: true,
+    lead_stage: 'booked',
+    scheduling_state: 'booked',
     scheduled_at: data.startTime || data.start_time || null,
     meeting_location: data.meetingUrl || data.meeting_url || data.location || null,
     updated_at: new Date().toISOString(),

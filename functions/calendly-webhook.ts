@@ -79,6 +79,8 @@ async function processCalendlyWebhook(db: any, raw: any) {
     await db.database.from('leads').update({
       status: cancelled ? 'cancelled' : 'scheduled',
       meeting_scheduled: !cancelled,
+      lead_stage: cancelled ? lead.lead_stage : 'booked',
+      scheduling_state: cancelled ? lead.scheduling_state : 'booked',
       scheduled_at: start,
       calendly_event_uri: payload?.event?.uri || null,
       calendly_invitee_uri: invitee?.uri || null,

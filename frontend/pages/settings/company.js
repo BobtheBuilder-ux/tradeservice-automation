@@ -7,7 +7,9 @@ import {
   Building2,
   Calendar,
   Check,
+  ExternalLink,
   Mail,
+  MessageCircle,
   Phone,
   Plus,
   Save,
@@ -30,6 +32,12 @@ import {
   listElevenLabsVoices,
   getCalendlyConnectUrl,
   listCalendlyEventTypes,
+  disconnectMetaIntegration,
+  getMetaConnectUrl,
+  getMetaStatus,
+  listMetaAssets,
+  saveMetaSelection,
+  testMetaSetup,
 } from '../../lib/insforge-functions';
 
 const emptyAgentForm = {
@@ -88,6 +96,17 @@ const emptyBookingForm = {
   defaultMeetingType: 'phone',
 };
 
+const emptyMetaForm = {
+  pageId: '',
+  adAccountId: '',
+  assignedAgentId: '',
+  sourceLabel: 'Facebook',
+  selectedFormIds: [],
+  twilioSenderId: '',
+  twilioChannelId: '',
+  messengerStatus: 'pending',
+};
+
 const statusTone = {
   live: 'bg-success-soft text-success',
   active: 'bg-success-soft text-success',
@@ -100,6 +119,10 @@ const statusTone = {
   unverified: 'bg-warning-soft text-warning',
   disconnected: 'bg-surface-secondary text-text-secondary',
   needs_attention: 'bg-warning-soft text-warning',
+  needs_reconnect: 'bg-warning-soft text-warning',
+  revoked: 'bg-error-soft text-error',
+  expired: 'bg-error-soft text-error',
+  missing: 'bg-warning-soft text-warning',
   archived: 'bg-error-soft text-error',
   released: 'bg-surface-secondary text-text-secondary',
   suspended: 'bg-error-soft text-error',
@@ -151,11 +174,18 @@ export default function CompanySettingsPage() {
     primaryPhoneNumber: null,
     emailIdentity: null,
     bookingIntegration: null,
+    metaIntegration: null,
+    facebookLeadForms: [],
+    messengerChannels: [],
+    primaryMessengerChannel: null,
   });
   const [agentForm, setAgentForm] = useState(emptyAgentForm);
   const [phoneForm, setPhoneForm] = useState(emptyPhoneForm);
   const [emailForm, setEmailForm] = useState(emptyEmailForm);
   const [bookingForm, setBookingForm] = useState(emptyBookingForm);
+  const [metaForm, setMetaForm] = useState(emptyMetaForm);
+  const [metaAssets, setMetaAssets] = useState({ pages: [], adAccounts: [], forms: [] });
+  const [metaConfigured, setMetaConfigured] = useState(false);
   const [calendlyEventTypes, setCalendlyEventTypes] = useState([]);
 
   useEffect(() => {
@@ -174,32 +204,37 @@ export default function CompanySettingsPage() {
   useEffect(() => {
     if (!user || typeof window === 'undefined') return undefined;
 
-    async function handleCalendlyCompleted(payload = {}) {
-      if (payload.provider !== 'calendly' || payload.target !== 'settings') return;
+    async function handleIntegrationCompleted(payload = {}) {
+      if (!['calendly', 'meta'].includes(payload.provider) || payload.target !== 'settings') return;
       if (payload.status === 'error') {
-        setError(payload.error || 'Calendly connection was not completed');
+        setError(payload.error || 'Integration connection was not completed');
         return;
       }
       setError(null);
-      setNotice('Calendly connected');
+      setNotice(payload.provider === 'meta' ? 'Meta connected' : 'Calendly connected');
       await fetchSettings();
-      const result = await listCalendlyEventTypes().catch(() => ({ eventTypes: [] }));
-      setCalendlyEventTypes(result.eventTypes || []);
+      if (payload.provider === 'calendly') {
+        const result = await listCalendlyEventTypes().catch(() => ({ eventTypes: [] }));
+        setCalendlyEventTypes(result.eventTypes || []);
+      }
+      if (payload.provider === 'meta') {
+        await handleLoadMetaAssets();
+      }
     }
 
     function handleStorage(event) {
       if (event.key !== 'bob:integration-connected' || !event.newValue) return;
       try {
-        handleCalendlyCompleted(JSON.parse(event.newValue));
+        handleIntegrationCompleted(JSON.parse(event.newValue));
       } catch {
-        setError('Calendly connection status could not be read');
+        setError('Integration connection status could not be read');
       }
     }
 
     let channel = null;
     if ('BroadcastChannel' in window) {
       channel = new BroadcastChannel('bob-integrations');
-      channel.onmessage = (event) => handleCalendlyCompleted(event.data || {});
+      channel.onmessage = (event) => handleIntegrationCompleted(event.data || {});
     }
     window.addEventListener('storage', handleStorage);
 
@@ -221,6 +256,10 @@ export default function CompanySettingsPage() {
         primaryPhoneNumber: data.primaryPhoneNumber || null,
         emailIdentity: data.emailIdentity || null,
         bookingIntegration: data.bookingIntegration || null,
+        metaIntegration: data.metaIntegration || null,
+        facebookLeadForms: data.facebookLeadForms || [],
+        messengerChannels: data.messengerChannels || [],
+        primaryMessengerChannel: data.primaryMessengerChannel || null,
       });
       if (data.emailIdentity) {
         setEmailForm({
@@ -239,6 +278,32 @@ export default function CompanySettingsPage() {
           defaultMeetingType: data.bookingIntegration.defaultMeetingType || 'phone',
         });
       }
+      if (data.metaIntegration || data.facebookLeadForms?.length || data.primaryMessengerChannel) {
+        setMetaForm({
+          pageId: data.metaIntegration?.pageId || data.primaryMessengerChannel?.pageId || '',
+          adAccountId: data.metaIntegration?.adAccountId || '',
+          assignedAgentId: data.primaryMessengerChannel?.assignedAgentId || data.facebookLeadForms?.[0]?.assignedAgentId || '',
+          sourceLabel: data.primaryMessengerChannel?.sourceLabel || data.facebookLeadForms?.[0]?.sourceLabel || data.metaIntegration?.metadata?.sourceLabel || 'Facebook',
+          selectedFormIds: (data.facebookLeadForms || []).filter((form) => form.status === 'active').map((form) => form.formId),
+          twilioSenderId: data.primaryMessengerChannel?.twilioSenderId || '',
+          twilioChannelId: data.primaryMessengerChannel?.twilioChannelId || '',
+          messengerStatus: data.primaryMessengerChannel?.status || 'pending',
+        });
+      }
+      getMetaStatus()
+        .then((result) => {
+          setMetaConfigured(Boolean(result.configured));
+          if (result.integration || result.forms?.length || result.messengerChannels?.length) {
+            setSummary((current) => ({
+              ...current,
+              metaIntegration: result.integration || current.metaIntegration,
+              facebookLeadForms: result.forms || current.facebookLeadForms,
+              messengerChannels: result.messengerChannels || current.messengerChannels,
+              primaryMessengerChannel: (result.messengerChannels || []).find((channel) => channel.status === 'active') || result.messengerChannels?.[0] || current.primaryMessengerChannel,
+            }));
+          }
+        })
+        .catch(() => setMetaConfigured(false));
       fetchVoiceOptions();
     } catch (err) {
       setError(err.message || 'Failed to load settings');
@@ -451,6 +516,119 @@ export default function CompanySettingsPage() {
     }
   }
 
+  async function handleMetaConnect() {
+    try {
+      setSaving('meta-connect');
+      setError(null);
+      const popup = window.open('/integration-callback?platform=meta&target=settings&status=processing', '_blank', 'width=720,height=780');
+      if (!popup) throw new Error('Allow pop-ups to connect Meta in a separate page');
+      const result = await getMetaConnectUrl({
+        returnTo: '/integration-callback?platform=meta&target=settings',
+      });
+      try { popup.opener = null; } catch {}
+      popup.location.href = result.authorizeUrl;
+      popup.focus();
+      setNotice('Meta opened in a separate page. Return here after approving the connection.');
+    } catch (err) {
+      setError(err.message || 'Unable to start Meta connection');
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function handleLoadMetaAssets(pageId = metaForm.pageId) {
+    try {
+      setSaving('meta-assets');
+      setError(null);
+      const result = await listMetaAssets({ pageId });
+      setMetaAssets({
+        pages: result.pages || [],
+        adAccounts: result.adAccounts || [],
+        forms: result.forms || [],
+      });
+      if (!metaForm.pageId && result.pages?.[0]?.id) {
+        setMetaForm((current) => ({ ...current, pageId: result.pages[0].id }));
+      }
+      setNotice('Meta assets loaded');
+    } catch (err) {
+      setError(err.message || 'Unable to load Meta assets');
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function handleSaveMeta(event) {
+    event.preventDefault();
+    try {
+      setSaving('meta');
+      setError(null);
+      setNotice(null);
+      const page = metaAssets.pages.find((item) => item.id === metaForm.pageId);
+      const adAccount = metaAssets.adAccounts.find((item) => item.id === metaForm.adAccountId);
+      const selectedForms = metaAssets.forms
+        .filter((form) => metaForm.selectedFormIds.includes(form.id))
+        .map((form) => ({
+          id: form.id,
+          name: form.name,
+          providerStatus: form.status,
+          status: 'active',
+        }));
+      await saveMetaSelection({
+        pageId: metaForm.pageId,
+        pageName: page?.name || summary.metaIntegration?.pageName || null,
+        adAccountId: metaForm.adAccountId || null,
+        adAccountName: adAccount?.name || summary.metaIntegration?.adAccountName || null,
+        assignedAgentId: metaForm.assignedAgentId || null,
+        sourceLabel: metaForm.sourceLabel,
+        forms: selectedForms,
+        messenger: {
+          enabled: Boolean(metaForm.twilioSenderId || metaForm.twilioChannelId),
+          twilioSenderId: metaForm.twilioSenderId || null,
+          twilioChannelId: metaForm.twilioChannelId || null,
+          status: metaForm.messengerStatus,
+        },
+      });
+      setNotice('Facebook and Messenger setup saved');
+      await fetchSettings();
+    } catch (err) {
+      setError(err.message || 'Failed to save Meta setup');
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function handleDisconnectMeta() {
+    try {
+      setSaving('meta-disconnect');
+      setError(null);
+      setNotice(null);
+      await disconnectMetaIntegration();
+      setMetaAssets({ pages: [], adAccounts: [], forms: [] });
+      setMetaForm(emptyMetaForm);
+      setNotice('Meta disconnected');
+      await fetchSettings();
+    } catch (err) {
+      setError(err.message || 'Failed to disconnect Meta');
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  async function handleTestMetaSetup() {
+    try {
+      setSaving('meta-test');
+      setError(null);
+      const result = await testMetaSetup();
+      const status = result.health?.status || 'needs_attention';
+      setNotice(`Meta setup check: ${pretty(status)}`);
+      await fetchSettings();
+    } catch (err) {
+      setError(err.message || 'Failed to test Meta setup');
+    } finally {
+      setSaving(null);
+    }
+  }
+
   const activeAgents = useMemo(
     () => summary.agents.filter((agent) => agent.status !== 'archived'),
     [summary.agents]
@@ -478,6 +656,14 @@ export default function CompanySettingsPage() {
   const selectedVoice = useMemo(
     () => voiceOptions.find((voice) => voice.voiceId === agentForm.voiceId) || null,
     [agentForm.voiceId, voiceOptions]
+  );
+  const selectedMetaPage = useMemo(
+    () => metaAssets.pages.find((page) => page.id === metaForm.pageId) || null,
+    [metaAssets.pages, metaForm.pageId]
+  );
+  const selectedMetaAdAccount = useMemo(
+    () => metaAssets.adAccounts.find((account) => account.id === metaForm.adAccountId) || null,
+    [metaAssets.adAccounts, metaForm.adAccountId]
   );
 
   if (loading || authLoading) {
@@ -946,6 +1132,167 @@ export default function CompanySettingsPage() {
                     <Save className="h-4 w-4" aria-hidden="true" />
                     Save Booking
                   </button>
+                </form>
+              </Panel>
+
+              <Panel
+                icon={MessageCircle}
+                title="Facebook & Messenger"
+                badge={<StatusBadge value={summary.metaIntegration?.status || 'disconnected'} />}
+              >
+                <div className="grid gap-2 text-xs sm:grid-cols-2">
+                  <div className="rounded-lg border border-border bg-surface-secondary px-3 py-2">
+                    <p className="font-medium text-text-muted">Token</p>
+                    <p className="mt-1 text-text-primary">{pretty(summary.metaIntegration?.tokenStatus || 'needs_reconnect')}</p>
+                  </div>
+                  <div className="rounded-lg border border-border bg-surface-secondary px-3 py-2">
+                    <p className="font-medium text-text-muted">Page</p>
+                    <p className="mt-1 truncate text-text-primary">{summary.metaIntegration?.pageName || selectedMetaPage?.name || 'Not selected'}</p>
+                  </div>
+                  <div className="rounded-lg border border-border bg-surface-secondary px-3 py-2">
+                    <p className="font-medium text-text-muted">Ad account</p>
+                    <p className="mt-1 truncate text-text-primary">{summary.metaIntegration?.adAccountName || selectedMetaAdAccount?.name || 'Not selected'}</p>
+                  </div>
+                  <div className="rounded-lg border border-border bg-surface-secondary px-3 py-2">
+                    <p className="font-medium text-text-muted">Lead forms</p>
+                    <p className="mt-1 text-text-primary">{summary.facebookLeadForms.filter((form) => form.status === 'active').length} active</p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" className="ops-button-secondary" onClick={handleMetaConnect} disabled={saving === 'meta-connect'}>
+                    <ExternalLink className="h-4 w-4" aria-hidden="true" />
+                    {summary.metaIntegration?.status === 'connected' ? 'Reconnect Meta' : 'Connect Meta'}
+                  </button>
+                  <button type="button" className="ops-button-secondary" onClick={() => handleLoadMetaAssets()} disabled={saving === 'meta-assets' || summary.metaIntegration?.status !== 'connected'}>
+                    {saving === 'meta-assets' ? 'Loading…' : 'Load assets'}
+                  </button>
+                  <button type="button" className="ops-button-secondary" onClick={handleTestMetaSetup} disabled={saving === 'meta-test' || !summary.metaIntegration}>
+                    {saving === 'meta-test' ? 'Checking…' : 'Check setup'}
+                  </button>
+                </div>
+
+                {!metaConfigured ? (
+                  <div className="rounded-lg border border-border bg-warning-soft px-3 py-2 text-xs font-medium text-warning">
+                    Meta OAuth secrets are not configured in the function runtime.
+                  </div>
+                ) : null}
+
+                <form className="space-y-3" onSubmit={handleSaveMeta}>
+                  <select
+                    className="ops-select"
+                    value={metaForm.pageId}
+                    onChange={(event) => {
+                      const pageId = event.target.value;
+                      setMetaForm({ ...metaForm, pageId });
+                      if (pageId) handleLoadMetaAssets(pageId);
+                    }}
+                  >
+                    <option value="">{summary.metaIntegration?.pageName || 'Select Facebook Page'}</option>
+                    {metaAssets.pages.map((page) => (
+                      <option key={page.id} value={page.id}>{page.name}</option>
+                    ))}
+                  </select>
+
+                  <select
+                    className="ops-select"
+                    value={metaForm.adAccountId}
+                    onChange={(event) => setMetaForm({ ...metaForm, adAccountId: event.target.value })}
+                  >
+                    <option value="">{summary.metaIntegration?.adAccountName || 'Select ad account'}</option>
+                    {metaAssets.adAccounts.map((account) => (
+                      <option key={account.id} value={account.id}>{account.name || account.accountId}</option>
+                    ))}
+                  </select>
+
+                  <select
+                    className="ops-select"
+                    value={metaForm.assignedAgentId}
+                    onChange={(event) => setMetaForm({ ...metaForm, assignedAgentId: event.target.value })}
+                  >
+                    <option value="">Assign AI agent</option>
+                    {activeAgents.map((agent) => (
+                      <option key={agent.id} value={agent.id}>{agent.displayName}</option>
+                    ))}
+                  </select>
+
+                  <input
+                    className="ops-input"
+                    placeholder="Source label"
+                    value={metaForm.sourceLabel}
+                    onChange={(event) => setMetaForm({ ...metaForm, sourceLabel: event.target.value })}
+                  />
+
+                  <div className="space-y-2 rounded-lg border border-border bg-surface-secondary p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-medium text-text-muted">Lead forms</p>
+                      <span className="text-xs text-text-muted">{metaAssets.forms.length || summary.facebookLeadForms.length} available</span>
+                    </div>
+                    {metaAssets.forms.length ? (
+                      <div className="max-h-40 space-y-2 overflow-auto">
+                        {metaAssets.forms.map((form) => (
+                          <label key={form.id} className="flex items-center justify-between gap-3 rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text-secondary">
+                            <span className="min-w-0 truncate">{form.name || form.id}</span>
+                            <input
+                              type="checkbox"
+                              checked={metaForm.selectedFormIds.includes(form.id)}
+                              onChange={(event) => {
+                                const selected = new Set(metaForm.selectedFormIds);
+                                if (event.target.checked) selected.add(form.id);
+                                else selected.delete(form.id);
+                                setMetaForm({ ...metaForm, selectedFormIds: Array.from(selected) });
+                              }}
+                            />
+                          </label>
+                        ))}
+                      </div>
+                    ) : summary.facebookLeadForms.length ? (
+                      <div className="flex flex-wrap gap-2">
+                        {summary.facebookLeadForms.map((form) => (
+                          <span key={form.id} className="ops-badge bg-surface text-text-secondary">{form.formName || form.formId}</span>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-text-muted">No forms loaded.</p>
+                    )}
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <input
+                      className="ops-input"
+                      placeholder="Twilio Messenger sender ID"
+                      value={metaForm.twilioSenderId}
+                      onChange={(event) => setMetaForm({ ...metaForm, twilioSenderId: event.target.value })}
+                    />
+                    <input
+                      className="ops-input"
+                      placeholder="Twilio Messenger channel ID"
+                      value={metaForm.twilioChannelId}
+                      onChange={(event) => setMetaForm({ ...metaForm, twilioChannelId: event.target.value })}
+                    />
+                  </div>
+
+                  <select
+                    className="ops-select"
+                    value={metaForm.messengerStatus}
+                    onChange={(event) => setMetaForm({ ...metaForm, messengerStatus: event.target.value })}
+                  >
+                    <option value="pending">Messenger pending</option>
+                    <option value="active">Messenger live</option>
+                    <option value="needs_attention">Needs attention</option>
+                  </select>
+
+                  <div className="flex flex-wrap gap-2">
+                    <button type="submit" className="ops-button-primary" disabled={saving === 'meta' || summary.metaIntegration?.status !== 'connected'}>
+                      <Save className="h-4 w-4" aria-hidden="true" />
+                      {saving === 'meta' ? 'Saving…' : 'Save Facebook Setup'}
+                    </button>
+                    {summary.metaIntegration ? (
+                      <button type="button" className="ops-button-secondary" onClick={handleDisconnectMeta} disabled={saving === 'meta-disconnect'}>
+                        {saving === 'meta-disconnect' ? 'Disconnecting…' : 'Disconnect'}
+                      </button>
+                    ) : null}
+                  </div>
                 </form>
               </Panel>
             </div>

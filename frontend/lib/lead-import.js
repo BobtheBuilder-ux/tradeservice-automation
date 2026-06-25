@@ -272,7 +272,7 @@ export function buildLeadImportPreview(csvText, existingLeads = []) {
       optOutReason: cell(row, headerMap, 'optOutReason') || null,
       qualificationStatus: 'unqualified',
       qualificationScore: 0,
-      leadStage: 'new_inquiry',
+      leadStage: 'new',
       schedulingState: 'not_started',
       status: 'new',
       customFields: Object.keys(additionalFields).length

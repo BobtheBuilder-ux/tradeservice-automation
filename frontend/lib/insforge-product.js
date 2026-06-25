@@ -59,6 +59,27 @@ const CAMEL_TO_SNAKE = {
   businessHoursStart: 'business_hours_start',
   businessHoursEnd: 'business_hours_end',
   businessNiche: 'business_niche',
+  connectedByUserId: 'connected_by_user_id',
+  metaUserId: 'meta_user_id',
+  businessId: 'business_id',
+  pageId: 'page_id',
+  pageName: 'page_name',
+  adAccountId: 'ad_account_id',
+  adAccountName: 'ad_account_name',
+  grantedPermissions: 'granted_permissions',
+  tokenStatus: 'token_status',
+  setupHealth: 'setup_health',
+  oauthConnectedAt: 'oauth_connected_at',
+  tokenExpiresAt: 'token_expires_at',
+  lastHealthCheckedAt: 'last_health_checked_at',
+  metaIntegrationId: 'meta_integration_id',
+  formId: 'form_id',
+  formName: 'form_name',
+  defaultCampaignId: 'default_campaign_id',
+  sourceLabel: 'source_label',
+  fieldMapping: 'field_mapping',
+  twilioSenderId: 'twilio_sender_id',
+  twilioChannelId: 'twilio_channel_id',
   assignedAgentId: 'assigned_agent_id',
   assignedTenantAgentId: 'assigned_tenant_agent_id',
   leadImportBatchId: 'lead_import_batch_id',
@@ -1062,7 +1083,16 @@ export async function getSuperAdminDashboardData() {
 
 export async function getTenantSettingsSummary(user) {
   const tenantId = tenantIdFromUser(user);
-  const [tenantData, agents, phoneNumbers, emailIdentities, bookingIntegrations] = await Promise.all([
+  const [
+    tenantData,
+    agents,
+    phoneNumbers,
+    emailIdentities,
+    bookingIntegrations,
+    metaIntegrations,
+    facebookLeadForms,
+    messengerChannels,
+  ] = await Promise.all([
     unwrap(
       await insforge.database.from('tenants').select('*').eq('id', tenantId).limit(1),
       'Failed to load tenant'
@@ -1071,6 +1101,9 @@ export async function getTenantSettingsSummary(user) {
     selectTenantRows('tenant_phone_numbers', user, { order: { column: 'created_at', ascending: false } }),
     selectTenantRows('tenant_email_identities', user, { order: { column: 'created_at', ascending: false } }),
     selectTenantRows('tenant_booking_integrations', user, { order: { column: 'created_at', ascending: false } }),
+    selectTenantRows('tenant_meta_integrations', user, { order: { column: 'updated_at', ascending: false } }).catch(() => []),
+    selectTenantRows('tenant_facebook_lead_forms', user, { order: { column: 'created_at', ascending: false } }).catch(() => []),
+    selectTenantRows('tenant_messenger_channels', user, { order: { column: 'created_at', ascending: false } }).catch(() => []),
   ]);
 
   return {
@@ -1080,6 +1113,10 @@ export async function getTenantSettingsSummary(user) {
     primaryPhoneNumber: primaryActive(phoneNumbers),
     emailIdentity: primaryActive(emailIdentities),
     bookingIntegration: primaryActive(bookingIntegrations),
+    metaIntegration: metaIntegrations[0] || null,
+    facebookLeadForms,
+    messengerChannels,
+    primaryMessengerChannel: messengerChannels.find((channel) => channel.status === 'active') || messengerChannels[0] || null,
   };
 }
 
@@ -1682,9 +1719,7 @@ export function getLeadContactPolicySummary(lead) {
 }
 
 export async function updateLeadSuppression(user, leadId, input = {}) {
-  const patch = {
-    lastUpdatedBy: user?.authUserId || user?.id || null,
-  };
+  const patch = {};
 
   if (typeof input.doNotContact === 'boolean') patch.doNotContact = input.doNotContact;
   if (input.optOutChannel !== undefined) patch.optOutChannel = input.optOutChannel || null;
@@ -1722,8 +1757,77 @@ export async function updateLeadReview(user, leadId, updates = {}) {
   if (typeof updates.preferredLanguage === 'string') {
     patch.preferredLanguage = updates.preferredLanguage.trim() || null;
   }
-  patch.lastUpdatedBy = user?.authUserId || user?.id || null;
   return updateTenantRow('leads', user, leadId, patch);
+}
+
+export async function listLeadLifecycleEvents(user, options = {}) {
+  const tenantId = tenantIdFromUser(user);
+  let query = insforge.database
+    .from('lead_lifecycle_events')
+    .select('*')
+    .eq('tenant_id', tenantId)
+    .order('created_at', { ascending: false });
+
+  if (options.leadId) {
+    query = query.eq('lead_id', options.leadId);
+  }
+
+  query = query.limit(options.limit || 200);
+  return fromDbRows(await unwrap(await query, 'Failed to load lifecycle events') || []);
+}
+
+export async function getTenantLifecycleRules(user) {
+  const tenantId = tenantIdFromUser(user);
+  let rows = await selectTenantRows('tenant_lifecycle_rules', user, { limit: 1 });
+
+  if (!rows.length) {
+    await unwrap(
+      await insforge.database.rpc('ensure_tenant_lifecycle_rules', { p_tenant_id: tenantId }),
+      'Failed to prepare lifecycle rules'
+    );
+    rows = await selectTenantRows('tenant_lifecycle_rules', user, { limit: 1 });
+  }
+
+  return rows[0] || null;
+}
+
+export async function updateTenantLifecycleRules(user, input = {}) {
+  const current = await getTenantLifecycleRules(user);
+  if (!current?.id) throw new Error('Lifecycle rules are not available');
+
+  const patch = {};
+
+  if (input.maxCallAttempts !== undefined) {
+    const attempts = Number(input.maxCallAttempts);
+    if (!Number.isInteger(attempts) || attempts < 1 || attempts > 10) {
+      throw new Error('Max call attempts must be between 1 and 10');
+    }
+    patch.maxCallAttempts = attempts;
+  }
+
+  if (Array.isArray(input.channelOrder)) {
+    const allowedChannels = ['call', 'sms', 'whatsapp', 'email'];
+    const channelOrder = Array.from(new Set(input.channelOrder.filter((channel) => allowedChannels.includes(channel))));
+    if (!channelOrder.length) throw new Error('Choose at least one lifecycle channel');
+    patch.channelOrder = channelOrder;
+  }
+
+  if (typeof input.voicemailAllowed === 'boolean') patch.voicemailAllowed = input.voicemailAllowed;
+  if (input.noAnswerPolicy && typeof input.noAnswerPolicy === 'object') patch.noAnswerPolicy = input.noAnswerPolicy;
+  if (input.busyPolicy && typeof input.busyPolicy === 'object') patch.busyPolicy = input.busyPolicy;
+  if (input.notAvailablePolicy && typeof input.notAvailablePolicy === 'object') patch.notAvailablePolicy = input.notAvailablePolicy;
+  if (input.voicemailPolicy && typeof input.voicemailPolicy === 'object') patch.voicemailPolicy = input.voicemailPolicy;
+  if (input.nurturePolicy && typeof input.nurturePolicy === 'object') patch.nurturePolicy = input.nurturePolicy;
+  if (input.humanReviewTriggers && typeof input.humanReviewTriggers === 'object') patch.humanReviewTriggers = input.humanReviewTriggers;
+  if (input.offDutyCallPolicy && typeof input.offDutyCallPolicy === 'object') patch.offDutyCallPolicy = input.offDutyCallPolicy;
+
+  patch.metadata = {
+    ...(current.metadata || {}),
+    phase30UpdatedAt: new Date().toISOString(),
+    phase30UpdatedBy: user?.authUserId || user?.id || null,
+  };
+
+  return updateTenantRow('tenant_lifecycle_rules', user, current.id, patch);
 }
 
 export async function listCampaigns(user) {
@@ -1850,7 +1954,6 @@ export async function updateLeadQualification(user, leadId, input = {}) {
     requiresHumanReview: Boolean(input.requiresHumanReview),
     automationPaused: Boolean(input.automationPaused),
     escalationReason: input.escalationReason || null,
-    lastUpdatedBy: user?.authUserId || user?.id || null,
   });
 }
 
@@ -2330,8 +2433,5 @@ export async function recordCallOutcome(user, actionId, { outcome, notes }) {
     },
   });
 
-  return updateTenantRow('leads', user, action.leadId, {
-    lastUpdatedBy: user?.authUserId || user?.id || null,
-    lastContactedAt: now,
-  });
+  return updateTenantRow('leads', user, action.leadId, { lastContactedAt: now });
 }

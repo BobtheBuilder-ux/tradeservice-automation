@@ -17,7 +17,7 @@ export default function IntegrationCallback() {
   const [target, setTarget] = useState('dashboard');
 
   const title = useMemo(() => {
-    const name = provider === 'calendly' ? 'Calendly' : provider;
+    const name = provider === 'calendly' ? 'Calendly' : provider === 'meta' ? 'Meta' : provider;
     return `${name} Integration`;
   }, [provider]);
 
@@ -48,7 +48,7 @@ export default function IntegrationCallback() {
     setTarget(targetParam);
     setStatus(nextStatus);
     setMessage(nextStatus === 'success'
-      ? `${providerParam === 'calendly' ? 'Calendly' : providerParam} connected.`
+      ? `${providerParam === 'calendly' ? 'Calendly' : providerParam === 'meta' ? 'Meta' : providerParam} connected.`
       : errorParam || 'Integration connection was not completed.');
 
     try {

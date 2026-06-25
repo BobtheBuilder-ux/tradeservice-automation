@@ -24,12 +24,13 @@ Read in this exact order before any implementation:
 6. context/code-standards.md
 7. context/library-docs.md
 8. context/build-plan.md
-9. context/progress-tracker.md
+9. context/progress-tracker-v2.md (V2 work) and context/progress-tracker.md (legacy frontend/runtime)
 
 ## Rules That Never Change
 
 - Never use hardcoded hex values or raw Tailwind color classes
 - Update `progress-tracker.md` and `ui-registry.md` after every feature
+- If working on the V2 frontend migration in `setmymeet/`, update `context/progress-tracker-v2.md` after every V2 feature
 - Before any third party library — load its installed skill first,
   then read `context/library-docs.md` for project-specific rules
 - If the same problem persists after one corrective prompt —

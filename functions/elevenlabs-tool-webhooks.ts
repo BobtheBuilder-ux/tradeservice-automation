@@ -123,6 +123,222 @@ function firstValue(...values: any[]) {
   return null;
 }
 
+function globalWhatsappSenderPhone() {
+  return normalizePhone(
+    Deno.env.get('TWILIO_WHATSAPP_PHONE_NUMBER')
+    || Deno.env.get('TWILIO_WHATSAPP_FROM')
+    || ''
+  );
+}
+
+function canonicalLeadStage(value: any) {
+  const normalized = String(value || '').trim().toLowerCase();
+  const aliases: Record<string, string> = {
+    new_inquiry: 'new',
+    awaiting_information: 'engaged',
+    ready_to_book: 'booking_offered',
+    nurturing: 'nurture',
+    escalated: 'contacted',
+    interested: 'engaged',
+    not_interested: 'not_interested_now',
+    scheduled: 'booked',
+  };
+  const canonical = [
+    'new',
+    'attempting_contact',
+    'contacted',
+    'engaged',
+    'qualified',
+    'booking_offered',
+    'booked',
+    'callback_scheduled',
+    'nurture',
+    'not_interested_now',
+    'unqualified',
+    'closed_won',
+    'closed_lost',
+    'do_not_contact',
+  ];
+  return aliases[normalized] || (canonical.includes(normalized) ? normalized : 'new');
+}
+
+function canonicalSchedulingState(value: any) {
+  const normalized = String(value || '').trim().toLowerCase();
+  const aliases: Record<string, string> = {
+    scheduled: 'booked',
+    booking_link_sent: 'booking_offered',
+    interested: 'booking_requested',
+    not_interested: 'needs_follow_up',
+  };
+  const canonical = [
+    'not_started',
+    'callback_requested',
+    'booking_requested',
+    'booking_offered',
+    'booked',
+    'reschedule_requested',
+    'needs_follow_up',
+  ];
+  return aliases[normalized] || (canonical.includes(normalized) ? normalized : 'not_started');
+}
+
+function canonicalLifecycleOutcome(value: any) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/-/g, '_');
+  const aliases: Record<string, string> = {
+    completed: 'answered',
+    scheduled: 'booked',
+    call_later: 'callback_requested',
+    callback: 'callback_requested',
+    follow_up_later: 'callback_requested',
+    unavailable: 'not_available',
+    not_now: 'not_interested_now',
+    later: 'not_interested_now',
+    send_info: 'channel_switch_requested',
+    send_information: 'channel_switch_requested',
+    send_details: 'channel_switch_requested',
+    text_me: 'channel_switch_requested',
+    sms_me: 'channel_switch_requested',
+    whatsapp_me: 'channel_switch_requested',
+    email_me: 'channel_switch_requested',
+    channel_switch: 'channel_switch_requested',
+    not_interested: 'not_interested_now',
+    human_review: 'needs_human_review',
+    needs_human_follow_up: 'needs_human_review',
+  };
+  const canonical = [
+    'answered',
+    'no_answer',
+    'busy',
+    'voicemail_left',
+    'callback_requested',
+    'not_available',
+    'channel_switch_requested',
+    'not_interested_now',
+    'not_interested_final',
+    'wrong_number',
+    'opted_out',
+    'booked',
+    'failed',
+    'interrupted',
+    'needs_human_review',
+  ];
+  const mapped = aliases[normalized] || normalized;
+  return canonical.includes(mapped) ? mapped : 'answered';
+}
+
+function normalizeLifecycleChannel(value: any) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[_\s-]+/g, '_');
+  const aliases: Record<string, string> = {
+    phone: 'call',
+    voice: 'call',
+    telephone: 'call',
+    phone_call: 'call',
+    text: 'sms',
+    message: 'sms',
+    sms_text: 'sms',
+    wa: 'whatsapp',
+    whats_app: 'whatsapp',
+    mail: 'email',
+  };
+  const channel = aliases[normalized] || normalized;
+  return ['call', 'sms', 'whatsapp', 'email'].includes(channel) ? channel : null;
+}
+
+function lifecycleIntentInput(input: JsonRecord) {
+  const rawOutcome = firstValue(
+    input.lifecycleOutcome,
+    input.lifecycle_outcome,
+    input.outcome,
+    input.intent,
+    input.leadIntent,
+    input.lead_intent,
+    input.status
+  );
+  const requestedAt = firstValue(
+    input.requestedCallbackAt,
+    input.requested_callback_at,
+    input.nextContactAt,
+    input.next_contact_at,
+    input.callbackAt,
+    input.callback_at
+  );
+  const requestedChannel = normalizeLifecycleChannel(firstValue(
+    input.requestedChannel,
+    input.requested_channel,
+    input.preferredContactChannel,
+    input.preferred_contact_channel,
+    input.preferredChannel,
+    input.preferred_channel
+  ));
+  if (!rawOutcome && !requestedAt && !requestedChannel) return null;
+  const outcome = rawOutcome ? canonicalLifecycleOutcome(rawOutcome) : requestedAt ? 'callback_requested' : requestedChannel ? 'channel_switch_requested' : null;
+  if (!outcome || ['answered', 'booked', 'failed', 'interrupted'].includes(outcome)) return null;
+  return {
+    outcome,
+    requestedAt: requestedAt || null,
+    requestedChannel,
+  };
+}
+
+async function evaluateLifecycleIntent(context: JsonRecord, input: JsonRecord, sourceTool: string) {
+  const intent = lifecycleIntentInput(input);
+  if (!intent) return null;
+  const functionBaseUrl = Deno.env.get('INSFORGE_FUNCTION_BASE_URL');
+  if (!functionBaseUrl) return { success: false, error: 'INSFORGE_FUNCTION_BASE_URL is not configured' };
+  try {
+    const response = await fetch(`${functionBaseUrl.replace(/\/$/, '')}/bob-queue-actions?action=evaluate-lifecycle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tenantId: context.tenantId,
+        leadId: context.leadId,
+        outcome: intent.outcome,
+        requestedCallbackAt: intent.requestedAt,
+        requestedChannel: intent.requestedChannel,
+        sourceChannel: 'call',
+        metadata: {
+          source: `phase25_${sourceTool}`,
+          externalConversationId: context.externalConversationId || null,
+          agentId: context.agentId || null,
+        },
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data?.success === false) {
+      return { success: false, error: data?.error || `Lifecycle evaluator failed with ${response.status}` };
+    }
+    return { success: true, ...data };
+  } catch (error: any) {
+    return { success: false, error: safeError(error, 'Lifecycle evaluator failed') };
+  }
+}
+
+async function recordLifecycleEvent(db: any, event: JsonRecord) {
+  const tenantId = event.tenantId || event.tenant_id;
+  const leadId = event.leadId || event.lead_id;
+  if (!tenantId || !leadId) return null;
+  const row = {
+    tenant_id: tenantId,
+    lead_id: leadId,
+    source_action_id: event.sourceActionId || event.source_action_id || null,
+    source_channel: event.sourceChannel || event.source_channel || 'system',
+    previous_stage: event.previousStage ? canonicalLeadStage(event.previousStage) : null,
+    next_stage: event.nextStage ? canonicalLeadStage(event.nextStage) : null,
+    previous_scheduling_state: event.previousSchedulingState ? canonicalSchedulingState(event.previousSchedulingState) : null,
+    next_scheduling_state: event.nextSchedulingState ? canonicalSchedulingState(event.nextSchedulingState) : null,
+    outcome: event.outcome ? canonicalLifecycleOutcome(event.outcome) : null,
+    next_action_type: event.nextActionType || event.next_action_type || null,
+    next_action_channel: event.nextActionChannel || event.next_action_channel || null,
+    next_action_at: event.nextActionAt || event.next_action_at || null,
+    reason: event.reason || null,
+    blocked_reason: event.blockedReason || event.blocked_reason || null,
+    metadata: event.metadata || {},
+  };
+  const { error } = await db.database.from('lead_lifecycle_events').insert([row]);
+  if (error) console.warn('Failed to record lifecycle event', error.message || error);
+  return !error;
+}
+
 function nestedBody(body: JsonRecord) {
   return body?.payload || body?.data || body?.parameters || body?.arguments || body || {};
 }
@@ -360,11 +576,11 @@ async function getTenantPhoneNumberForChannel(db: any, tenantId: string, channel
 
 async function sendDirectTenantTextMessage(db: any, context: JsonRecord, channel: 'sms' | 'whatsapp', body: string) {
   const phoneNumber = await getTenantPhoneNumberForChannel(db, context.tenantId, channel);
-  const fallbackSender = normalizePhone(Deno.env.get('TWILIO_PHONE_NUMBER') || '');
+  const fallbackSender = channel === 'whatsapp' ? globalWhatsappSenderPhone() : normalizePhone(Deno.env.get('TWILIO_PHONE_NUMBER') || '');
   const tenantSender = normalizePhone(phoneNumber?.phone_number || '');
-  const fromPhone = tenantSender || fallbackSender;
+  const fromPhone = channel === 'whatsapp' ? (fallbackSender || tenantSender) : (tenantSender || fallbackSender);
   const toPhone = normalizePhone(context.lead.phone || '');
-  if (!fromPhone) throw new Error('No tenant or fallback SMS sender is configured');
+  if (!fromPhone) throw new Error(channel === 'whatsapp' ? 'No global or tenant WhatsApp sender is configured' : 'No tenant or fallback SMS sender is configured');
   if (!toPhone) throw new Error('Lead phone number is required');
   const accountSid = Deno.env.get('TWILIO_ACCOUNT_SID');
   const authToken = Deno.env.get('TWILIO_AUTH_TOKEN');
@@ -394,7 +610,7 @@ async function sendDirectTenantTextMessage(db: any, context: JsonRecord, channel
     providerMessageId: result.sid || null,
     status: result.status || 'queued',
     sentAt: nowIso(),
-    metadata: { source: 'elevenlabs_tool', providerStatus: result.status || null, senderResolution: tenantSender ? 'tenant_active' : 'fallback_secret' },
+    metadata: { source: 'elevenlabs_tool', providerStatus: result.status || null, senderResolution: channel === 'whatsapp' && fallbackSender ? 'global_whatsapp_secret' : tenantSender ? 'tenant_active' : 'fallback_secret' },
   });
 
   return { success: true, providerMessageId: result.sid || null, status: result.status || 'queued' };
@@ -642,6 +858,8 @@ function sanitizeLeadPatch(input: JsonRecord) {
   for (const [key, column] of Object.entries(allowed)) {
     if (input[key] !== undefined) patch[column] = input[key];
   }
+  if (patch.lead_stage !== undefined) patch.lead_stage = canonicalLeadStage(patch.lead_stage);
+  if (patch.scheduling_state !== undefined) patch.scheduling_state = canonicalSchedulingState(patch.scheduling_state);
   if (Object.keys(patch).length) patch.updated_at = nowIso();
   return patch;
 }
@@ -664,6 +882,7 @@ function qualificationUpdate(input: JsonRecord, context: JsonRecord) {
 async function updateLeadStatus(db: any, context: JsonRecord, input: JsonRecord) {
   const patch = sanitizeLeadPatch(input);
   const qualification = qualificationUpdate(input, context);
+  const lifecycleIntent = lifecycleIntentInput(input);
   if (qualification) {
     const customFields = context.lead?.custom_fields || {};
     const existing = customFields.aiQualification || {};
@@ -685,20 +904,55 @@ async function updateLeadStatus(db: any, context: JsonRecord, input: JsonRecord)
       patch.qualification_notes = qualification.summary;
     }
   }
-  if (!Object.keys(patch).length) throw new Error('No supported lead status fields were provided');
-  const data = await unwrap(
-    await db.database.from('leads').update(patch).eq('tenant_id', context.tenantId).eq('id', context.leadId).select(),
-    'Failed to update lead status'
-  );
-  await logTimelineMessage(db, {
-    tenantId: context.tenantId,
-    leadId: context.leadId,
-    channel: 'voice',
-    messageType: 'lead_status_update',
-    bodyText: `ElevenLabs tool updated lead fields: ${Object.keys(patch).filter((key) => key !== 'updated_at').join(', ')}`,
-    metadata: { patch },
-  });
-  return { success: true, lead: publicLead(data?.[0] || context.lead) };
+  if (!Object.keys(patch).length && !lifecycleIntent) throw new Error('No supported lead status fields were provided');
+
+  let data: JsonRecord[] = [];
+  if (Object.keys(patch).length) {
+    data = await unwrap(
+      await db.database.from('leads').update(patch).eq('tenant_id', context.tenantId).eq('id', context.leadId).select(),
+      'Failed to update lead status'
+    );
+    await logTimelineMessage(db, {
+      tenantId: context.tenantId,
+      leadId: context.leadId,
+      channel: 'voice',
+      messageType: 'lead_status_update',
+      bodyText: `ElevenLabs tool updated lead fields: ${Object.keys(patch).filter((key) => key !== 'updated_at').join(', ')}`,
+      metadata: { patch },
+    });
+  }
+
+  let lifecycleEvaluation = null;
+  if (lifecycleIntent) {
+    lifecycleEvaluation = await evaluateLifecycleIntent(context, input, 'update_lead_status');
+    await logTimelineMessage(db, {
+      tenantId: context.tenantId,
+      leadId: context.leadId,
+      channel: 'voice',
+      messageType: 'lifecycle_intent',
+      bodyText: `AI agent captured lifecycle intent: ${lifecycleIntent.outcome}`,
+      metadata: {
+        intent: lifecycleIntent,
+        evaluation: lifecycleEvaluation,
+      },
+    });
+  } else if (patch.lead_stage || patch.scheduling_state || patch.next_contact_at || patch.requires_human_review) {
+    await recordLifecycleEvent(db, {
+      tenantId: context.tenantId,
+      leadId: context.leadId,
+      sourceChannel: 'call',
+      previousStage: context.lead?.lead_stage || null,
+      nextStage: data?.[0]?.lead_stage || patch.lead_stage || null,
+      previousSchedulingState: context.lead?.scheduling_state || null,
+      nextSchedulingState: data?.[0]?.scheduling_state || patch.scheduling_state || null,
+      outcome: patch.requires_human_review ? 'needs_human_review' : firstValue(input.outcome, input.status, null),
+      nextActionAt: patch.next_contact_at || null,
+      reason: 'AI agent updated lead lifecycle fields.',
+      blockedReason: patch.requires_human_review ? String(patch.escalation_reason || 'human_review') : null,
+      metadata: { source: 'elevenlabs_update_lead_status', changedFields: Object.keys(patch).filter((key) => key !== 'updated_at') },
+    });
+  }
+  return { success: true, lead: publicLead(data?.[0] || context.lead), lifecycle: lifecycleEvaluation };
 }
 
 async function getLeadContext(db: any, context: JsonRecord) {
@@ -780,7 +1034,8 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
 
   if ((!start || Number.isNaN(start.getTime())) && booking.booking_url) {
     await db.database.from('leads').update({
-      scheduling_state: 'booking_link_sent',
+      lead_stage: 'booking_offered',
+      scheduling_state: 'booking_offered',
       updated_at: nowIso(),
     }).eq('tenant_id', context.tenantId).eq('id', context.leadId);
 
@@ -791,6 +1046,20 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
       messageType: 'booking_link_offered',
       bodyText: `Booking link offered: ${booking.booking_url}`,
       metadata: { provider: booking.provider, bookingUrl: booking.booking_url, eventTypeId: booking.event_type_id || null },
+    });
+    await recordLifecycleEvent(db, {
+      tenantId: context.tenantId,
+      leadId: context.leadId,
+      sourceChannel: 'call',
+      previousStage: context.lead?.lead_stage || null,
+      nextStage: 'booking_offered',
+      previousSchedulingState: context.lead?.scheduling_state || null,
+      nextSchedulingState: 'booking_offered',
+      outcome: 'answered',
+      nextActionType: 'lead_self_schedule',
+      nextActionChannel: context.lead?.preferred_contact_channel || null,
+      reason: 'Booking link offered because no concrete future booking time was provided.',
+      metadata: { source: 'elevenlabs_create_booking', provider: booking.provider, bookingUrl: booking.booking_url },
     });
 
     return {
@@ -889,12 +1158,25 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
   await db.database.from('leads').update({
     status: 'booked',
     meeting_scheduled: true,
-    scheduling_state: 'scheduled',
+    lead_stage: 'booked',
+    scheduling_state: 'booked',
     scheduled_at: start.toISOString(),
     meeting_end_time: endTime,
     meeting_location: meetingUrl,
     updated_at: nowIso(),
   }).eq('tenant_id', context.tenantId).eq('id', context.leadId);
+  await recordLifecycleEvent(db, {
+    tenantId: context.tenantId,
+    leadId: context.leadId,
+    sourceChannel: 'call',
+    previousStage: context.lead?.lead_stage || null,
+    nextStage: 'booked',
+    previousSchedulingState: context.lead?.scheduling_state || null,
+    nextSchedulingState: 'booked',
+    outcome: 'booked',
+    reason: 'Booking was confirmed during the conversation.',
+    metadata: { source: 'elevenlabs_create_booking', meetingId: meeting?.id || null, provider: booking.provider },
+  });
 
   await logTimelineMessage(db, {
     tenantId: context.tenantId,
@@ -1064,21 +1346,22 @@ async function sendEmail(db: any, context: JsonRecord, input: JsonRecord) {
 }
 
 async function recordCallOutcome(db: any, context: JsonRecord, input: JsonRecord) {
-  const outcome = String(firstValue(input.outcome, input.status, 'completed'));
+  const rawOutcome = String(firstValue(input.outcome, input.status, 'completed'));
+  const outcome = canonicalLifecycleOutcome(rawOutcome);
   const summary = String(firstValue(input.summary, input.callSummary, input.call_summary, '') || '');
   const transcript = firstValue(input.transcript, input.transcriptText, input.transcript_text);
   const conversation = await ensureConversation(db, context.tenantId, context.leadId, 'voice');
 
   await db.database.from('lead_conversations').update({
-    conversation_status: outcome,
+    conversation_status: rawOutcome,
     last_summary: summary || `Call outcome recorded: ${outcome}`,
-    last_intent: outcome,
+    last_intent: rawOutcome,
     last_intent_at: nowIso(),
     last_inbound_at: nowIso(),
     updated_at: nowIso(),
     metadata: {
       ...(conversation?.metadata || {}),
-      elevenlabsOutcome: outcome,
+      elevenlabsOutcome: rawOutcome,
       elevenlabsConversationId: firstValue(input.elevenlabsConversationId, input.elevenlabs_conversation_id, input.conversationId, input.conversation_id),
       transcript,
     },
@@ -1086,9 +1369,23 @@ async function recordCallOutcome(db: any, context: JsonRecord, input: JsonRecord
 
   await db.database.from('leads').update({
     status: outcome === 'booked' ? 'booked' : context.lead.status,
+    lead_stage: outcome === 'booked' ? 'booked' : context.lead.lead_stage,
+    scheduling_state: outcome === 'booked' ? 'booked' : context.lead.scheduling_state,
     last_contacted_at: nowIso(),
     updated_at: nowIso(),
   }).eq('tenant_id', context.tenantId).eq('id', context.leadId);
+  await recordLifecycleEvent(db, {
+    tenantId: context.tenantId,
+    leadId: context.leadId,
+    sourceChannel: 'call',
+    previousStage: context.lead?.lead_stage || null,
+    nextStage: outcome === 'booked' ? 'booked' : context.lead?.lead_stage || null,
+    previousSchedulingState: context.lead?.scheduling_state || null,
+    nextSchedulingState: outcome === 'booked' ? 'booked' : context.lead?.scheduling_state || null,
+    outcome,
+    reason: summary || `Call outcome recorded: ${outcome}`,
+    metadata: { source: 'elevenlabs_record_call_outcome', transcriptPresent: Boolean(transcript) },
+  });
 
   await logTimelineMessage(db, {
     tenantId: context.tenantId,
@@ -1100,16 +1397,21 @@ async function recordCallOutcome(db: any, context: JsonRecord, input: JsonRecord
     metadata: { outcome, transcript },
   });
 
-  return { success: true, outcome, conversationId: conversation.id };
+  const lifecycleEvaluation = await evaluateLifecycleIntent(context, {
+    ...input,
+    outcome,
+  }, 'record_call_outcome');
+
+  return { success: true, outcome, conversationId: conversation.id, lifecycle: lifecycleEvaluation };
 }
 
 async function escalateToHuman(db: any, context: JsonRecord, input: JsonRecord) {
   const reason = String(firstValue(input.reason, input.escalationReason, input.escalation_reason, 'AI agent requested human review'));
   const rows = await unwrap(
     await db.database.from('leads').update({
-      requires_human_review: true,
-      automation_paused: true,
-      escalation_reason: reason,
+    requires_human_review: true,
+    automation_paused: true,
+    escalation_reason: reason,
       updated_at: nowIso(),
     }).eq('tenant_id', context.tenantId).eq('id', context.leadId).select(),
     'Failed to escalate lead'
@@ -1121,6 +1423,19 @@ async function escalateToHuman(db: any, context: JsonRecord, input: JsonRecord) 
     messageType: 'human_escalation',
     bodyText: reason,
     metadata: { source: 'elevenlabs_tool' },
+  });
+  await recordLifecycleEvent(db, {
+    tenantId: context.tenantId,
+    leadId: context.leadId,
+    sourceChannel: 'call',
+    previousStage: context.lead?.lead_stage || null,
+    nextStage: context.lead?.lead_stage || null,
+    previousSchedulingState: context.lead?.scheduling_state || null,
+    nextSchedulingState: context.lead?.scheduling_state || null,
+    outcome: 'needs_human_review',
+    reason,
+    blockedReason: 'human_review',
+    metadata: { source: 'elevenlabs_escalate_to_human' },
   });
   return { success: true, lead: publicLead(rows?.[0] || context.lead) };
 }
@@ -1137,6 +1452,7 @@ async function markOptOut(db: any, context: JsonRecord, input: JsonRecord) {
   };
   if (channel === 'all') {
     patch.do_not_contact = true;
+    patch.lead_stage = 'do_not_contact';
     patch.call_consent = false;
     patch.sms_consent = false;
     patch.whatsapp_consent = false;
@@ -1156,6 +1472,19 @@ async function markOptOut(db: any, context: JsonRecord, input: JsonRecord) {
     messageType: 'opt_out',
     bodyText: `Lead opted out of ${channel}.`,
     metadata: { reason: patch.opt_out_reason },
+  });
+  await recordLifecycleEvent(db, {
+    tenantId: context.tenantId,
+    leadId: context.leadId,
+    sourceChannel: channel === 'sms' || channel === 'whatsapp' || channel === 'email' ? channel : 'call',
+    previousStage: context.lead?.lead_stage || null,
+    nextStage: rows?.[0]?.lead_stage || context.lead?.lead_stage || null,
+    previousSchedulingState: context.lead?.scheduling_state || null,
+    nextSchedulingState: rows?.[0]?.scheduling_state || context.lead?.scheduling_state || null,
+    outcome: 'opted_out',
+    reason: patch.opt_out_reason,
+    blockedReason: channel === 'all' ? 'do_not_contact' : `${channel}_opt_out`,
+    metadata: { source: 'elevenlabs_mark_opt_out', optOutChannel: channel },
   });
   return { success: true, lead: publicLead(rows?.[0] || context.lead) };
 }

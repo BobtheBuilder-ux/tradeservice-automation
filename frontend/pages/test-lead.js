@@ -15,7 +15,7 @@ const initialForm = {
   assignedAgentId: '',
   qualificationStatus: 'unqualified',
   qualificationScore: '',
-  leadStage: 'new_inquiry',
+  leadStage: 'new',
   schedulingState: 'not_started',
   preferredContactChannel: 'email',
   preferredMeetingWindow: 'Weekday afternoon',
@@ -30,8 +30,8 @@ const initialForm = {
 const selectOptions = {
   priority: ['low', 'medium', 'high', 'urgent'],
   qualificationStatus: ['unqualified', 'partially_qualified', 'qualified'],
-  leadStage: ['new_inquiry', 'awaiting_information', 'nurturing', 'ready_to_book', 'booked', 'escalated'],
-  schedulingState: ['not_started', 'needs_follow_up', 'scheduled', 'not_interested'],
+  leadStage: ['new', 'attempting_contact', 'contacted', 'engaged', 'qualified', 'booking_offered', 'booked', 'callback_scheduled', 'nurture', 'not_interested_now', 'unqualified', 'closed_won', 'closed_lost', 'do_not_contact'],
+  schedulingState: ['not_started', 'callback_requested', 'booking_requested', 'booking_offered', 'booked', 'reschedule_requested', 'needs_follow_up'],
   preferredContactChannel: ['email', 'sms', 'phone'],
 };
 

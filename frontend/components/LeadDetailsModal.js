@@ -20,8 +20,8 @@ import {
 import { updateLeadQualification } from '../lib/insforge-product';
 
 const qualificationOptions = ['unqualified', 'partially_qualified', 'qualified', 'disqualified'];
-const leadStageOptions = ['new_inquiry', 'awaiting_information', 'ready_to_book', 'nurturing', 'escalated'];
-const schedulingOptions = ['not_started', 'needs_follow_up', 'booking_invited', 'booking_requested', 'booked', 'reschedule_requested'];
+const leadStageOptions = ['new', 'attempting_contact', 'contacted', 'engaged', 'qualified', 'booking_offered', 'booked', 'callback_scheduled', 'nurture', 'not_interested_now', 'unqualified', 'closed_won', 'closed_lost', 'do_not_contact'];
+const schedulingOptions = ['not_started', 'callback_requested', 'booking_requested', 'booking_offered', 'booked', 'reschedule_requested', 'needs_follow_up'];
 const contactChannelOptions = ['email', 'phone', 'whatsapp', 'sms'];
 
 export default function LeadDetailsModal({ isOpen, onClose, lead, user, onLeadUpdate }) {
@@ -35,7 +35,7 @@ export default function LeadDetailsModal({ isOpen, onClose, lead, user, onLeadUp
     setFormData({
       qualificationStatus: lead.qualificationStatus || 'unqualified',
       qualificationScore: lead.qualificationScore ?? 0,
-      leadStage: lead.leadStage || 'new_inquiry',
+      leadStage: lead.leadStage || 'new',
       schedulingState: lead.schedulingState || 'not_started',
       preferredContactChannel: lead.preferredContactChannel || 'email',
       preferredMeetingWindow: lead.preferredMeetingWindow || '',
@@ -161,7 +161,7 @@ export default function LeadDetailsModal({ isOpen, onClose, lead, user, onLeadUp
                 <div className="flex justify-between"><span className="font-medium text-gray-600">Source:</span><span className="text-gray-900">{lead.source || 'N/A'}</span></div>
                 <div className="flex justify-between"><span className="font-medium text-gray-600">Processing Status:</span><span className="text-gray-900">{lead.processingStatus || 'N/A'}</span></div>
                 <div className="flex justify-between items-center"><span className="font-medium text-gray-600">Qualification:</span><span className={`px-3 py-1 text-xs font-bold rounded-full border ${getQualificationColor(lead.qualificationStatus)}`}>{(lead.qualificationStatus || 'unqualified').replace(/_/g, ' ')}</span></div>
-                <div className="flex justify-between"><span className="font-medium text-gray-600">Lead Stage:</span><span className="text-gray-900">{(lead.leadStage || 'new_inquiry').replace(/_/g, ' ')}</span></div>
+                <div className="flex justify-between"><span className="font-medium text-gray-600">Lead Stage:</span><span className="text-gray-900">{(lead.leadStage || 'new').replace(/_/g, ' ')}</span></div>
                 <div className="flex justify-between"><span className="font-medium text-gray-600">Scheduling State:</span><span className="text-gray-900">{(lead.schedulingState || 'not_started').replace(/_/g, ' ')}</span></div>
               </div>
             </div>

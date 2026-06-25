@@ -2,7 +2,9 @@ import { createClient } from 'npm:@insforge/sdk';
 import twilio from 'npm:twilio';
 
 const FAILURE_STATUSES = new Set(['failed', 'undelivered']);
-const STOP_PATTERNS = [/\bstop\b/i, /unsubscribe/i, /do not contact/i, /don't text/i, /don't call/i, /not interested/i];
+const STOP_PATTERNS = [/\bstop\b/i, /unsubscribe/i, /do not contact/i, /don't text/i, /don't call/i, /wrong number/i, /never contact/i];
+const TEXT_INTENTS = ['general_question', 'booking_request', 'callback_request', 'channel_switch', 'not_interested_now', 'not_interested_final', 'opt_out', 'wrong_number', 'pricing_question', 'service_question', 'human_review', 'other'];
+const TEXT_LIFECYCLE_OUTCOMES = ['answered', 'callback_requested', 'channel_switch_requested', 'not_interested_now', 'not_interested_final', 'wrong_number', 'opted_out', 'booked', 'needs_human_review'];
 type JsonRecord = Record<string, any>;
 
 const corsHeaders = {
@@ -50,6 +52,14 @@ function normalizePhone(value: unknown) {
 function whatsappAddress(value: unknown) {
   const phone = normalizePhone(value);
   return phone ? `whatsapp:${phone}` : '';
+}
+
+function globalWhatsappSenderPhone() {
+  return normalizePhone(
+    Deno.env.get('TWILIO_WHATSAPP_PHONE_NUMBER')
+    || Deno.env.get('TWILIO_WHATSAPP_FROM')
+    || ''
+  );
 }
 
 function safeError(error: unknown) {
@@ -110,6 +120,19 @@ async function getTenantPhoneNumberForChannel(db: any, tenantId: string, channel
   if (channel === 'whatsapp') query = query.eq('whatsapp_status', 'active');
   const { data, error } = await query.order('is_primary', { ascending: false }).order('created_at', { ascending: true }).limit(1);
   if (error) throw new Error(error.message || `Failed to load tenant ${channel} phone number`);
+  return data?.[0] || null;
+}
+
+async function resolveGlobalWhatsappLead(db: any, peerPhone: unknown) {
+  const normalized = normalizePhone(peerPhone);
+  if (!normalized) return null;
+  const { data, error } = await db.database.from('leads').select('*')
+    .or(`phone.eq.${normalized},phone.eq.${normalized.slice(1)}`)
+    .eq('whatsapp_consent', true)
+    .eq('do_not_contact', false)
+    .order('updated_at', { ascending: false })
+    .limit(1);
+  if (error) throw new Error(error.message || 'Failed to resolve WhatsApp lead');
   return data?.[0] || null;
 }
 
@@ -231,39 +254,207 @@ function extractOutputText(response: any) {
     .filter((item: any) => item?.type === 'output_text').map((item: any) => item.text).join('');
 }
 
-async function draftTextReply(db: any, tenantId: string, lead: any, channel: 'sms' | 'whatsapp', inboundText: string) {
+function normalizeTextPreferredChannel(value: unknown) {
+  const channel = String(value || '').toLowerCase();
+  return ['call', 'voice', 'phone', 'sms', 'whatsapp', 'email', 'messenger'].includes(channel) ? channel : null;
+}
+
+function normalizeTextBrainOutput(raw: any) {
+  const recommendation = raw?.lifecycleRecommendation || {};
+  return {
+    reply: String(raw?.replyText || raw?.reply || '').trim().slice(0, 1500),
+    needsHumanReview: Boolean(raw?.needsHumanReview ?? raw?.needs_human_review),
+    humanReviewReason: raw?.humanReviewReason ? String(raw.humanReviewReason).slice(0, 500) : null,
+    detectedIntent: TEXT_INTENTS.includes(raw?.detectedIntent) ? raw.detectedIntent : 'other',
+    preferredChannel: normalizeTextPreferredChannel(raw?.preferredChannel),
+    callbackRequested: Boolean(raw?.callbackRequested),
+    requestedCallbackAt: raw?.requestedCallbackAt ? String(raw.requestedCallbackAt) : null,
+    bookingIntent: Boolean(raw?.bookingIntent),
+    optOutIntent: Boolean(raw?.optOutIntent || raw?.detectedIntent === 'opt_out'),
+    confidence: Number.isFinite(Number(raw?.confidence)) ? Math.max(0, Math.min(1, Number(raw.confidence))) : 0,
+    lifecycleRecommendation: {
+      outcome: TEXT_LIFECYCLE_OUTCOMES.includes(recommendation?.outcome) ? recommendation.outcome : null,
+      nextActionType: recommendation?.nextActionType ? String(recommendation.nextActionType).slice(0, 100) : null,
+      nextActionChannel: normalizeTextPreferredChannel(recommendation?.nextActionChannel) || (recommendation?.nextActionChannel === 'human' ? 'human' : recommendation?.nextActionChannel === 'system' ? 'system' : null),
+      nextActionAt: recommendation?.nextActionAt ? String(recommendation.nextActionAt) : null,
+      reason: recommendation?.reason ? String(recommendation.reason).slice(0, 700) : null,
+    },
+    allowedActionHints: Array.isArray(raw?.allowedActionHints) ? raw.allowedActionHints.filter((item: any) => typeof item === 'string').slice(0, 8) : [],
+    reason: raw?.reason ? String(raw.reason).slice(0, 800) : '',
+  };
+}
+
+async function writeMessagingBrainAudit(db: any, row: JsonRecord) {
+  try {
+    await db.database.from('openai_messaging_brain_audit_logs').insert([row]);
+  } catch {
+    // Audit should never block provider webhooks.
+  }
+}
+
+function textLifecycleOutcome(draft: any, fallback = 'answered') {
+  if (draft?.optOutIntent || ['opt_out', 'wrong_number', 'not_interested_final'].includes(draft?.detectedIntent)) {
+    if (draft?.detectedIntent === 'wrong_number') return 'wrong_number';
+    if (draft?.detectedIntent === 'not_interested_final') return 'not_interested_final';
+    return 'opted_out';
+  }
+  return draft?.lifecycleRecommendation?.outcome || fallback;
+}
+
+async function callLifecycle(db: any, input: JsonRecord) {
+  const base = functionBaseUrl();
+  const secret = messageActionsSecret();
+  if (!base || !secret || !input.leadId) return null;
+  try {
+    const response = await fetch(`${base}/bob-queue-actions?action=evaluate-lifecycle`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Message-Actions-Secret': secret,
+        'X-ElevenLabs-Tool-Secret': secret,
+      },
+      body: JSON.stringify(input),
+    });
+    return await response.json().catch(() => null);
+  } catch {
+    return null;
+  }
+}
+
+async function draftTextReply(db: any, tenantId: string, lead: any, channel: 'sms' | 'whatsapp', inboundText: string, messageContext: any = {}) {
+  const started = Date.now();
   const apiKey = Deno.env.get('OPENAI_API_KEY');
   if (!apiKey) throw new Error('OPENAI_API_KEY is not configured');
   const { tenant, agent, knowledgeContext } = await loadTenantContext(db, tenantId, lead);
   const model = Deno.env.get('OPENAI_TEXT_MODEL') || Deno.env.get('OPENAI_EMAIL_MODEL') || 'gpt-5.5';
   const preferredLanguage = lead?.preferred_language || null;
-  const response = await fetch('https://api.openai.com/v1/responses', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      instructions: `Write one concise, helpful business text reply. Return only valid JSON. Use knowledgeContext as source-of-truth context for services, policies, objections, offers, qualification guidance, and booking rules. If a knowledge item is only a file or URL reference without an excerpt, do not claim details from its unseen contents. Never invent prices, availability, booking links, policies, or commitments. If human help is needed, say so briefly and set needs_human_review true. Do not mention internal systems or AI unless the tenant explicitly asked you to.${preferredLanguage ? ` Write the reply in ${preferredLanguage}.` : ''}`,
-      input: JSON.stringify({
-        channel,
-        tenant: { name: tenant?.name || null, industry: tenant?.industry || null },
-        agent: { name: agent?.display_name || 'the AI assistant' },
-        lead: { name: lead?.full_name || [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || null, serviceInterest: lead?.service_interest || null, preferredLanguage },
-        knowledgeContext,
-        inboundMessage: inboundText,
+  const requestPayload = {
+    source: 'twilio-sms-webhook',
+    channel,
+    tenant: { id: tenantId, name: tenant?.name || null, businessNiche: tenant?.business_niche || null },
+    agent: { id: agent?.id || null, name: agent?.display_name || null },
+    lead: {
+      id: lead?.id || null,
+      serviceInterest: lead?.service_interest || null,
+      preferredContactChannel: lead?.preferred_contact_channel || null,
+      preferredLanguage,
+      lifecycleStage: lead?.lead_stage || null,
+      schedulingState: lead?.scheduling_state || null,
+    },
+    inboundText: compactText(inboundText, 3000),
+    knowledgeTitles: (knowledgeContext || []).map((item: any) => ({ scope: item.scope, title: item.title, hasExcerpt: item.hasExcerpt })),
+  };
+  try {
+    const response = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        instructions: [
+          'You are the OpenAI messaging brain for a service-business outreach platform. Return only the requested JSON schema.',
+          'Draft one concise, helpful business text reply and classify the lead intent.',
+          'You do not actually send messages, book meetings, mark opt-outs, or schedule actions; InsForge runtime enforces those decisions after your response.',
+          'Use knowledgeContext as source-of-truth context for services, policies, objections, offers, qualification guidance, and booking rules.',
+          'If a knowledge item is only a file or URL reference without an excerpt, do not claim details from its unseen contents.',
+          'Never invent prices, availability, booking links, policies, commitments, or provider details.',
+          'If the lead asks for a callback or channel switch, classify it and set lifecycleRecommendation, but do not assume consent.',
+          'If human help is needed, say so briefly and set needsHumanReview true.',
+          'Do not mention internal systems or AI unless the tenant explicitly asked you to.',
+          preferredLanguage ? `Write replyText in ${preferredLanguage}.` : '',
+        ].filter(Boolean).join(' '),
+        input: JSON.stringify({
+          channel,
+          tenant: { name: tenant?.name || null, industry: tenant?.industry || null, businessNiche: tenant?.business_niche || null, timezone: tenant?.default_timezone || null },
+          agent: { name: agent?.display_name || 'the AI assistant' },
+          lead: {
+            name: lead?.full_name || [lead?.first_name, lead?.last_name].filter(Boolean).join(' ') || null,
+            serviceInterest: lead?.service_interest || null,
+            preferredLanguage,
+            preferredContactChannel: lead?.preferred_contact_channel || null,
+            lifecycleStage: lead?.lead_stage || null,
+            schedulingState: lead?.scheduling_state || null,
+            customFields: lead?.custom_fields || null,
+          },
+          knowledgeContext,
+          inboundMessage: inboundText,
+          allowedActions: ['send_reply', 'book_meeting', 'schedule_callback', 'evaluate_lifecycle', 'mark_opt_out', 'escalate_to_human'],
+        }),
+        text: { format: { type: 'json_schema', name: 'openai_messaging_brain_text_reply', strict: true, schema: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['replyText', 'detectedIntent', 'preferredChannel', 'callbackRequested', 'requestedCallbackAt', 'bookingIntent', 'optOutIntent', 'needsHumanReview', 'humanReviewReason', 'confidence', 'lifecycleRecommendation', 'allowedActionHints', 'reason'],
+          properties: {
+            replyText: { type: 'string' },
+            detectedIntent: { type: 'string', enum: TEXT_INTENTS },
+            preferredChannel: { type: ['string', 'null'], enum: ['call', 'voice', 'phone', 'sms', 'whatsapp', 'email', 'messenger', null] },
+            callbackRequested: { type: 'boolean' },
+            requestedCallbackAt: { type: ['string', 'null'] },
+            bookingIntent: { type: 'boolean' },
+            optOutIntent: { type: 'boolean' },
+            needsHumanReview: { type: 'boolean' },
+            humanReviewReason: { type: ['string', 'null'] },
+            confidence: { type: 'number' },
+            lifecycleRecommendation: {
+              type: 'object', additionalProperties: false,
+              required: ['outcome', 'nextActionType', 'nextActionChannel', 'nextActionAt', 'reason'],
+              properties: {
+                outcome: { type: ['string', 'null'], enum: [...TEXT_LIFECYCLE_OUTCOMES, null] },
+                nextActionType: { type: ['string', 'null'] },
+                nextActionChannel: { type: ['string', 'null'], enum: ['call', 'voice', 'phone', 'sms', 'whatsapp', 'email', 'messenger', 'human', 'system', null] },
+                nextActionAt: { type: ['string', 'null'] },
+                reason: { type: ['string', 'null'] },
+              },
+            },
+            allowedActionHints: { type: 'array', items: { type: 'string', enum: ['send_reply', 'book_meeting', 'schedule_callback', 'evaluate_lifecycle', 'mark_opt_out', 'escalate_to_human', 'no_action'] } },
+            reason: { type: 'string' },
+          },
+        } } },
       }),
-      text: { format: { type: 'json_schema', name: 'automated_text_reply', strict: true, schema: {
-        type: 'object', additionalProperties: false, required: ['reply', 'needs_human_review'],
-        properties: { reply: { type: 'string' }, needs_human_review: { type: 'boolean' } },
-      } } },
-    }),
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data?.error?.message || `OpenAI text draft failed with ${response.status}`);
-  let draft: any;
-  try { draft = JSON.parse(extractOutputText(data)); } catch { throw new Error('OpenAI returned an invalid text draft'); }
-  const reply = String(draft?.reply || '').trim();
-  if (!reply) throw new Error('OpenAI returned an empty text draft');
-  return { reply: reply.slice(0, 1500), needsHumanReview: Boolean(draft.needs_human_review), model, responseId: data.id || null };
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data?.error?.message || `OpenAI text draft failed with ${response.status}`);
+    let draft: any;
+    try { draft = normalizeTextBrainOutput(JSON.parse(extractOutputText(data))); } catch { throw new Error('OpenAI returned an invalid text draft'); }
+    if (!draft.reply) throw new Error('OpenAI returned an empty text draft');
+    await writeMessagingBrainAudit(db, {
+      tenant_id: tenantId,
+      lead_id: lead?.id || null,
+      conversation_id: messageContext.conversationId || null,
+      message_id: messageContext.messageId || null,
+      tenant_agent_id: agent?.id || null,
+      source_channel: channel,
+      source: 'twilio-sms-webhook',
+      status: 'success',
+      model,
+      provider_response_id: data.id || null,
+      detected_intent: draft.detectedIntent,
+      recommended_outcome: draft.lifecycleRecommendation.outcome,
+      recommended_action: draft.lifecycleRecommendation.nextActionType,
+      needs_human_review: draft.needsHumanReview,
+      request_payload: requestPayload,
+      response_payload: draft,
+      duration_ms: Date.now() - started,
+    });
+    return { ...draft, model, responseId: data.id || null };
+  } catch (error) {
+    await writeMessagingBrainAudit(db, {
+      tenant_id: tenantId,
+      lead_id: lead?.id || null,
+      conversation_id: messageContext.conversationId || null,
+      message_id: messageContext.messageId || null,
+      tenant_agent_id: agent?.id || null,
+      source_channel: channel,
+      source: 'twilio-sms-webhook',
+      status: 'failed',
+      model,
+      needs_human_review: true,
+      request_payload: requestPayload,
+      response_payload: {},
+      error_message: safeError(error),
+      duration_ms: Date.now() - started,
+    });
+    throw error;
+  }
 }
 
 async function insertMessage(db: any, row: Record<string, unknown>) {
@@ -276,18 +467,19 @@ async function sendTwilioMessage(db: any, input: { tenantId: string; lead: any; 
   const policy = channelAllowed(input.lead, input.channel);
   if (!policy.allowed) throw new Error(policy.reason);
   const phoneNumber = await getTenantPhoneNumberForChannel(db, input.tenantId, input.channel);
-  const fallbackSender = normalizePhone(Deno.env.get('TWILIO_PHONE_NUMBER'));
+  const fallbackSender = input.channel === 'whatsapp' ? globalWhatsappSenderPhone() : normalizePhone(Deno.env.get('TWILIO_PHONE_NUMBER'));
   const tenantSenderActive = Boolean(phoneNumber?.phone_number && phoneNumber.status === 'active');
+  const tenantSender = tenantSenderActive ? normalizePhone(phoneNumber.phone_number) : '';
   if (input.channel === 'sms' && !tenantSenderActive && !fallbackSender) throw new Error('No tenant or fallback SMS sender is configured');
   if (input.channel === 'sms' && tenantSenderActive && !phoneNumber.sms_enabled) throw new Error('Tenant SMS is not enabled');
-  if (input.channel === 'whatsapp' && !tenantSenderActive) throw new Error('Tenant primary phone number is not active');
-  if (input.channel === 'whatsapp' && phoneNumber.whatsapp_status !== 'active') throw new Error('Tenant WhatsApp account is not active');
+  if (input.channel === 'whatsapp' && !fallbackSender && !tenantSenderActive) throw new Error('No global or tenant WhatsApp sender is configured');
+  if (input.channel === 'whatsapp' && !fallbackSender && phoneNumber.whatsapp_status !== 'active') throw new Error('Tenant WhatsApp account is not active');
   const to = normalizePhone(input.lead.phone);
   if (!to) throw new Error('Lead phone number is required');
   const accountSid = Deno.env.get('TWILIO_ACCOUNT_SID');
   const authToken = Deno.env.get('TWILIO_AUTH_TOKEN');
   if (!accountSid || !authToken) throw new Error('Twilio credentials are not configured');
-  const senderPhone = tenantSenderActive ? normalizePhone(phoneNumber.phone_number) : fallbackSender;
+  const senderPhone = input.channel === 'whatsapp' ? (fallbackSender || tenantSender) : (tenantSender || fallbackSender);
   const from = input.channel === 'whatsapp' ? whatsappAddress(senderPhone) : senderPhone;
   const recipient = input.channel === 'whatsapp' ? whatsappAddress(to) : to;
   const callback = new URL('/twilio-sms-webhook', functionBaseUrl());
@@ -322,7 +514,19 @@ async function sendTwilioMessage(db: any, input: { tenantId: string; lead: any; 
     provider_message_id: result.sid || null, provider_status: result.status || 'queued', status: result.status || 'queued',
     sent_at: new Date().toISOString(), reply_to_message_id: input.replyToMessageId || null,
     ai_model: input.ai?.model || null, ai_response_id: input.ai?.responseId || null,
-    metadata: { source: input.source, twilioStatus: result.status || null, contentSid: contentSid || null },
+    metadata: {
+      source: input.source,
+      twilioStatus: result.status || null,
+      contentSid: contentSid || null,
+      senderResolution: input.channel === 'whatsapp' && fallbackSender ? 'global_whatsapp_secret' : tenantSender ? 'tenant_active' : 'fallback_secret',
+      messagingBrain: input.ai ? {
+        detectedIntent: input.ai.detectedIntent || null,
+        confidence: input.ai.confidence ?? null,
+        needsHumanReview: Boolean(input.ai.needsHumanReview),
+        lifecycleRecommendation: input.ai.lifecycleRecommendation || null,
+        allowedActionHints: input.ai.allowedActionHints || [],
+      } : null,
+    },
   });
   await db.database.from('lead_conversations').update({ last_outbound_at: new Date().toISOString(), updated_at: new Date().toISOString() })
     .eq('tenant_id', input.tenantId).eq('id', conversation.id);
@@ -334,6 +538,7 @@ async function applyInboundOptOut(db: any, tenantId: string, lead: any, channel:
   await db.database.from('leads').update({
     [channel === 'sms' ? 'sms_consent' : 'whatsapp_consent']: false,
     opted_out_at: now, opt_out_channel: channel, opt_out_reason: `Inbound ${channel.toUpperCase()} opt-out`, automation_paused: true,
+    do_not_contact: true, lead_stage: 'do_not_contact',
     requires_human_review: false, updated_at: now,
   }).eq('tenant_id', tenantId).eq('id', lead.id);
 }
@@ -358,7 +563,18 @@ async function handleInbound(db: any, tenantId: string, lead: any, channel: 'sms
     last_inbound_at: now, last_intent: `${channel}_reply`, last_intent_at: now,
     last_summary: isStop ? `Lead opted out by ${channel} reply.` : `Lead replied by ${channel}.`, updated_at: now,
   }).eq('tenant_id', tenantId).eq('id', conversation.id);
-  if (isStop) return applyInboundOptOut(db, tenantId, lead, channel);
+  if (isStop) {
+    await applyInboundOptOut(db, tenantId, lead, channel);
+    await callLifecycle(db, {
+      tenantId,
+      leadId: lead.id,
+      outcome: 'opted_out',
+      sourceChannel: channel,
+      requestedChannel: channel,
+      metadata: { source: 'phase29_text_reply', providerMessageId, stopPattern: true, inboundMessageId: inbound?.id || null },
+    });
+    return;
+  }
   const policy = channelAllowed(lead, channel);
   if (!policy.allowed) {
     await db.database.from('leads').update({ requires_human_review: true, escalation_reason: `${channel}_reply_requires_review`, updated_at: now })
@@ -366,12 +582,63 @@ async function handleInbound(db: any, tenantId: string, lead: any, channel: 'sms
     return;
   }
   try {
-    const draft = await draftTextReply(db, tenantId, lead, channel, body);
+    const draft = await draftTextReply(db, tenantId, lead, channel, body, { conversationId: conversation?.id || null, messageId: inbound?.id || null });
+    const outcome = textLifecycleOutcome(draft);
+    if (['opted_out', 'wrong_number', 'not_interested_final'].includes(outcome)) {
+      await applyInboundOptOut(db, tenantId, lead, channel);
+      await db.database.from('lead_conversations').update({
+        conversation_status: 'closed_opted_out',
+        last_intent: draft.detectedIntent || 'opt_out',
+        last_intent_at: new Date().toISOString(),
+        last_summary: draft.reason || `Lead requested no further ${channel} outreach.`,
+        next_action: 'do_not_contact',
+        human_review_required: false,
+        updated_at: new Date().toISOString(),
+      }).eq('tenant_id', tenantId).eq('id', conversation.id);
+      await callLifecycle(db, {
+        tenantId,
+        leadId: lead.id,
+        outcome,
+        sourceChannel: channel,
+        requestedChannel: channel,
+        metadata: { source: 'phase29_text_reply', detectedIntent: draft.detectedIntent || null, providerMessageId, inboundMessageId: inbound?.id || null },
+      });
+      return;
+    }
+    await db.database.from('lead_conversations').update({
+      last_intent: draft.detectedIntent || `${channel}_reply`,
+      last_intent_at: new Date().toISOString(),
+      last_summary: draft.reason || `Lead replied by ${channel}.`,
+      next_action: draft.lifecycleRecommendation?.nextActionType || 'openai_text_reply',
+      human_review_required: Boolean(draft.needsHumanReview),
+      updated_at: new Date().toISOString(),
+    }).eq('tenant_id', tenantId).eq('id', conversation.id);
+    if (draft.preferredChannel && ['call', 'sms', 'whatsapp', 'email', 'messenger'].includes(draft.preferredChannel)) {
+      await db.database.from('leads').update({ preferred_contact_channel: draft.preferredChannel, updated_at: new Date().toISOString() })
+        .eq('tenant_id', tenantId).eq('id', lead.id);
+    }
     await sendTwilioMessage(db, { tenantId, lead, channel, body: draft.reply, replyToMessageId: inbound?.id || null, source: 'openai_inbound_reply', ai: draft });
     if (draft.needsHumanReview) {
       await db.database.from('leads').update({ requires_human_review: true, escalation_reason: 'openai_text_reply_requested_review', updated_at: new Date().toISOString() })
         .eq('tenant_id', tenantId).eq('id', lead.id);
     }
+    await callLifecycle(db, {
+      tenantId,
+      leadId: lead.id,
+      outcome,
+      sourceChannel: channel,
+      requestedChannel: draft.preferredChannel || draft.lifecycleRecommendation?.nextActionChannel || channel,
+      requestedCallbackAt: draft.requestedCallbackAt || draft.lifecycleRecommendation?.nextActionAt || null,
+      bookingIntent: Boolean(draft.bookingIntent),
+      conversationId: conversation?.id || null,
+      metadata: {
+        source: 'phase29_text_reply',
+        detectedIntent: draft.detectedIntent || null,
+        confidence: draft.confidence ?? null,
+        providerMessageId,
+        inboundMessageId: inbound?.id || null,
+      },
+    });
   } catch (error) {
     await db.database.from('lead_conversations').update({ human_review_required: true, next_action: 'review_text_reply_failure', updated_at: new Date().toISOString() })
       .eq('tenant_id', tenantId).eq('id', conversation.id);
@@ -400,7 +667,7 @@ async function handleStatus(db: any, tenantId: string, lead: any, data: Record<s
   if (!smsMessage || smsMessage.channel !== 'sms' || !FAILURE_STATUSES.has(providerStatus) || smsMessage.fallback_channel || !lead) return;
   if (!channelAllowed(lead, 'whatsapp').allowed) return;
   const phoneNumber = await getTenantPhoneNumberForChannel(db, tenantId, 'whatsapp');
-  if (phoneNumber?.whatsapp_status !== 'active') return;
+  if (!globalWhatsappSenderPhone() && phoneNumber?.whatsapp_status !== 'active') return;
   try {
     const fallback = await sendTwilioMessage(db, {
       tenantId, lead, channel: 'whatsapp', body: smsMessage.body_text || '', replyToMessageId: smsMessage.reply_to_message_id || null, source: 'sms_failure_whatsapp_fallback',
@@ -441,9 +708,15 @@ export default async function(req: Request): Promise<Response> {
     const isStatus = mode === 'status';
     const isWhatsapp = /^whatsapp:/i.test(String(isStatus ? data.From : data.To || '')) || /^whatsapp:/i.test(String(isStatus ? data.To : data.From || ''));
     const channel: 'sms' | 'whatsapp' = isWhatsapp ? 'whatsapp' : 'sms';
-    const tenantId = await resolveTenantIdByPhone(db, isStatus ? data.From : data.To);
+    let tenantId = await resolveTenantIdByPhone(db, isStatus ? data.From : data.To);
+    let globalWhatsappLead = null;
+    const endpointPhone = normalizePhone(isStatus ? data.From : data.To);
+    if (!tenantId && channel === 'whatsapp' && endpointPhone === globalWhatsappSenderPhone()) {
+      globalWhatsappLead = await resolveGlobalWhatsappLead(db, isStatus ? data.To : data.From);
+      tenantId = globalWhatsappLead?.tenant_id || null;
+    }
     if (!tenantId) return isStatus ? jsonResponse({ success: true, ignored: true, reason: 'tenant_not_resolved' }) : emptyTwilioXmlResponse();
-    const lead = await findLeadByPhone(db, tenantId, isStatus ? data.To : data.From);
+    const lead = globalWhatsappLead || await findLeadByPhone(db, tenantId, isStatus ? data.To : data.From);
     if (!lead) return isStatus ? jsonResponse({ success: true, ignored: true }) : emptyTwilioXmlResponse();
     if (isStatus) await handleStatus(db, tenantId, lead, data);
     else await handleInbound(db, tenantId, lead, channel, data);
