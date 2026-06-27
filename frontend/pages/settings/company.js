@@ -731,7 +731,7 @@ export default function CompanySettingsPage() {
                   </div>
                   <div>
                     <p className="text-xs font-medium text-text-muted">Calling hours</p>
-                    <p className="mt-1 text-sm text-text-primary">10:00 AM - 5:00 PM</p>
+                    <p className="mt-1 text-sm text-text-primary">{summary.tenant?.businessHoursStart || '10:00'} - {summary.tenant?.businessHoursEnd || '17:00'}</p>
                   </div>
                 </div>
               </Panel>

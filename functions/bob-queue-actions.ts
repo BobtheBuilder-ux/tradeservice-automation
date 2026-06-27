@@ -135,8 +135,14 @@ function defaultLifecycleRules(tenantId?: string | null) {
   return {
     tenantId: tenantId || null,
     maxCallAttempts: 3,
-    channelOrder: ['call', 'sms', 'whatsapp', 'email'],
-    voicemailAllowed: false,
+    channelOrder: ['email', 'call', 'sms', 'whatsapp'],
+    voicemailAllowed: true,
+    emailFirstPolicy: {
+      enabled: true,
+      waitHours: 2,
+      actionType: 'queue_call_attempt',
+      reason: 'Email first-touch sent; call after two hours only if the lead has not replied.',
+    },
     noAnswerPolicy: {
       first: { afterAttempt: 1, actionType: 'send_sms', channel: 'sms', delayMinutes: 10, requiresConsent: true },
       second: { afterAttempt: 2, actionType: 'queue_call_attempt', channel: 'call', delayBusinessDays: 1, respectBusinessHours: true },
@@ -144,7 +150,7 @@ function defaultLifecycleRules(tenantId?: string | null) {
     },
     busyPolicy: { actionType: 'schedule_callback', defaultDelayMinutes: 60, askForConvenientTime: true, respectBusinessHours: true },
     notAvailablePolicy: { actionType: 'schedule_callback', askForConvenientTime: true, askForPreferredChannel: true, respectBusinessHours: true },
-    voicemailPolicy: { actionType: 'send_recap', delayMinutes: 5, preferredChannels: ['sms', 'email', 'whatsapp'], requiresConsent: true },
+    voicemailPolicy: { actionType: 'send_recap', delayMinutes: 0, preferredChannels: ['sms', 'email', 'whatsapp'], requiresConsent: true },
     nurturePolicy: { notInterestedNowDelayDays: 30, checkupCadenceDays: [7, 14, 30], maxCheckups: 3, preferredChannels: ['email', 'whatsapp', 'sms'] },
     humanReviewTriggers: { missingConsent: true, missingChannelSetup: true, ambiguousIntent: true, providerFailureLimit: 2, repeatedFailedAttempts: true },
     offDutyCallPolicy: { behavior: 'defer_to_next_business_window', respectTenantBusinessHours: true },
@@ -921,6 +927,129 @@ async function findExistingLifecycleAction(db: any, tenantId: string, leadId: st
   return (rows || []).find((row: any) => row?.payload?.sourceLifecycleEventId === eventId) || null;
 }
 
+function emailFirstPolicyFromRules(rules: any) {
+  const policy = rules?.emailFirstPolicy || rules?.email_first_policy || {};
+  return {
+    enabled: policy.enabled !== false,
+    waitHours: Math.min(Math.max(Number(policy.waitHours ?? policy.wait_hours ?? 2) || 2, 0.25), 48),
+    reason: String(policy.reason || 'Email first-touch sent; call after two hours only if the lead has not replied.'),
+  };
+}
+
+function isEmailFirstCallFallback(action: any) {
+  const payload = action?.payload || {};
+  return payload.lifecyclePath === 'email_first_call_after_no_reply'
+    || payload.source === 'email_first_followup_call'
+    || Boolean(payload.previousEmailActionId || payload.previous_email_action_id);
+}
+
+async function hasLeadInboundReplyAfter(db: any, tenantId: string, leadId: string, afterIso?: string | null) {
+  if (!tenantId || !leadId || !afterIso) return false;
+  const rows = await unwrap(
+    await db.database
+      .from('lead_conversation_messages')
+      .select('id')
+      .eq('tenant_id', tenantId)
+      .eq('lead_id', leadId)
+      .eq('direction', 'inbound')
+      .gt('created_at', afterIso)
+      .limit(1),
+    'Failed to inspect lead replies'
+  );
+  return Boolean(rows?.length);
+}
+
+async function findExistingEmailFirstFallback(db: any, tenantId: string, leadId: string, emailActionId: string) {
+  const rows = await unwrap(
+    await db.database
+      .from('bob_actions')
+      .select('*')
+      .eq('tenant_id', tenantId)
+      .eq('lead_id', leadId)
+      .eq('action_type', 'queue_call_attempt')
+      .in('status', ['awaiting_call', 'calling', 'pending'])
+      .order('created_at', { ascending: false })
+      .limit(50),
+    'Failed to inspect existing email-first fallback calls'
+  );
+  return (rows || []).find((row: any) => String(row?.payload?.previousEmailActionId || row?.payload?.previous_email_action_id || '') === String(emailActionId)) || null;
+}
+
+async function scheduleEmailFirstCallFallback(db: any, input: {
+  tenantId: string;
+  tenant: any;
+  lead: any;
+  action: any;
+  agent?: any;
+  rules: any;
+  sentAt: string;
+}) {
+  if (!input?.lead?.id || !input?.action?.id) return { action: null, skipped: true, reason: 'missing_context' };
+  if (input.action.payload?.skipEmailFirstCallFallback || input.action.payload?.skip_email_first_call_fallback) {
+    return { action: null, skipped: true, reason: 'disabled_on_action' };
+  }
+  const policy = emailFirstPolicyFromRules(input.rules);
+  if (!policy.enabled) return { action: null, skipped: true, reason: 'email_first_policy_disabled' };
+  if (isNurtureAction(input.action)) return { action: null, skipped: true, reason: 'nurture_action' };
+  if (input.lead?.meeting_scheduled || input.lead?.do_not_contact || ['booked', 'closed', 'do_not_contact'].includes(String(input.lead?.lead_stage || ''))) {
+    return { action: null, skipped: true, reason: 'lead_stop_state' };
+  }
+  if (await hasLeadInboundReplyAfter(db, input.tenantId, input.lead.id, input.sentAt)) {
+    return { action: null, skipped: true, reason: 'lead_replied_after_email' };
+  }
+  const existing = await findExistingEmailFirstFallback(db, input.tenantId, input.lead.id, input.action.id);
+  if (existing) return { action: existing, skipped: true, reason: 'existing_fallback_call' };
+
+  const callSetup = await channelSetupStatus(db, input.tenantId, input.lead, 'call');
+  if (!callSetup.allowed) return { action: null, skipped: true, reason: callSetup.reason, blockedReason: callSetup.blockedReason };
+  const scheduled = addMinutes(new Date(input.sentAt), policy.waitHours * 60);
+  const hours = businessHoursStatus(input.tenant, scheduled);
+  const scheduledFor = hours.allowed ? scheduled.toISOString() : hours.nextAllowedAt;
+  const service = spokenField(leadServiceInterest(input.lead) || 'the service they asked about');
+  const rows = await unwrap(
+    await db.database.from('bob_actions').insert([{
+      tenant_id: input.tenantId,
+      campaign_id: input.action.campaign_id || null,
+      campaign_lead_id: input.action.campaign_lead_id || null,
+      lead_id: input.lead.id,
+      conversation_id: input.action.conversation_id || null,
+      action_type: 'queue_call_attempt',
+      channel: 'phone',
+      status: 'awaiting_call',
+      reason: policy.reason,
+      scheduled_for: scheduledFor,
+      payload: {
+        source: 'email_first_followup_call',
+        lifecyclePath: 'email_first_call_after_no_reply',
+        previousEmailActionId: input.action.id,
+        previousEmailSentAt: input.sentAt,
+        tenantAgentId: input.agent?.id || input.action.payload?.tenantAgentId || input.action.payload?.tenant_agent_id || input.lead.assigned_tenant_agent_id || null,
+        contactPolicy: callSetup,
+        serviceInterest: service,
+        callOpeningIntent: 'assistant_followup_after_form_email',
+        callOpeningGuidance: `Say you are ${input.agent?.display_name || 'the assistant'}, assistant for ${input.tenant?.name || 'the company'}, that the lead filled a form about ${service}, that details are in the email, and ask to schedule a meeting with an expert advisor.`,
+      },
+    }]).select(),
+    'Failed to schedule email-first fallback call'
+  );
+  const fallback = rows?.[0] || null;
+  await db.database.from('leads').update({
+    lead_stage: 'attempting_contact',
+    scheduling_state: 'needs_follow_up',
+    next_contact_at: scheduledFor,
+    updated_at: nowIso(),
+  }).eq('tenant_id', input.tenantId).eq('id', input.lead.id);
+  if (input.action.campaign_lead_id) {
+    await db.database.from('campaign_leads').update({
+      status: 'queued',
+      current_step: 'email_sent_call_followup_scheduled',
+      next_action_at: scheduledFor,
+      updated_at: nowIso(),
+    }).eq('tenant_id', input.tenantId).eq('id', input.action.campaign_lead_id);
+  }
+  return { action: fallback, skipped: false, scheduledFor };
+}
+
 async function countLeadCallAttempts(db: any, tenantId: string, leadId: string, action?: any) {
   if (action?.campaign_lead_id) return campaignLeadAttemptCount(db, action);
   const rows = await unwrap(
@@ -1514,15 +1643,18 @@ function defaultCampaignSmsBody(input: { tenant?: any; agent?: any; lead: any })
 
 function defaultCampaignEmailMessage(input: { tenant?: any; agent?: any; lead: any }) {
   const agentName = input.agent?.display_name || 'the AI assistant';
+  const tenantName = input.tenant?.name || 'our team';
   const service = spokenField(leadServiceInterest(input.lead) || 'insurance coverage');
   return [
-    `Write a concise first outreach email from ${agentName}.`,
-    `The lead preferred email, so do not mention that we tried to call first.`,
-    `Use this opening format: "I’m ${agentName}. You filled our form on insurance, and I see you’re interested in ${service}. Would you like to book a consultation with one of our experts?"`,
+    `Write an elaborate but skimmable first outreach email from ${agentName}, assistant for ${tenantName}.`,
+    `This is the first touch, so lead with email and do not say that we tried to call first.`,
+    `Explain that they filled one of our forms about ${service}, that the team would like to connect them with an expert advisor, and that they can reply with questions or with a day and time for a meeting.`,
+    `Include clear next steps: reply with questions, reply with a preferred meeting time, or expect a brief follow-up call if we do not hear back.`,
+    `Use the tenant knowledge base and agent/admin guidance for service details. Do not invent pricing, eligibility, guarantees, or policies that are not in context.`,
     `If the lead replies yes, the next email should ask what day and time they will be available.`,
     input.lead?.qualification_notes ? `Lead notes: ${input.lead.qualification_notes}.` : '',
     input.lead?.preferred_meeting_window ? `Preferred meeting window: ${input.lead.preferred_meeting_window}.` : '',
-    'Do not ask long qualification questions. Keep it warm, specific, and action-oriented.',
+    'Keep paragraphs short, warm, specific, and action-oriented. Do not ask long qualification questions in the first email.',
   ].filter(Boolean).join(' ');
 }
 
@@ -1558,6 +1690,24 @@ function isNurtureAction(action: any) {
     || payload.nurture?.active === true
     || String(payload.lifecyclePath || '').includes('nurture')
     || String(payload.sourceOutcome || '').includes('not_interested_now');
+}
+
+async function safeScheduleEmailFirstCallFallback(db: any, input: {
+  tenantId: string;
+  tenant: any;
+  lead: any;
+  action: any;
+  agent?: any;
+  rules: any;
+  sentAt: string;
+}) {
+  try {
+    return await scheduleEmailFirstCallFallback(db, input);
+  } catch (error) {
+    const message = String(error?.message || 'Email-first fallback scheduling failed');
+    console.warn('Email-first fallback scheduling failed', message);
+    return { action: null, skipped: true, reason: message, error: message };
+  }
 }
 
 function nurtureStepFromAction(action: any) {
@@ -2500,7 +2650,7 @@ async function ensureCampaignCallActions(db: any, body: JsonRecord) {
       await db.database.from('leads').update({ assigned_tenant_agent_id: campaignLead.agent_id, updated_at: nowIso() }).eq('tenant_id', rowTenantId).eq('id', lead.id);
     }
     const smsPolicy = leadAllowsChannel(lead, 'sms');
-    const useEmail = leadPrefersEmail(lead) && emailPolicy.allowed;
+    const useEmail = emailPolicy.allowed;
     const useCall = !useEmail && callPolicy.allowed;
     const useSms = !useEmail && !useCall && smsPolicy.allowed;
     const selectedPolicy = useEmail ? emailPolicy : useCall ? callPolicy : smsPolicy;
@@ -2512,10 +2662,12 @@ async function ensureCampaignCallActions(db: any, body: JsonRecord) {
       action_type: useEmail ? 'send_email' : useCall ? 'queue_call_attempt' : 'send_sms',
       channel: useEmail ? 'email' : useCall ? 'phone' : 'sms',
       status: useCall ? 'awaiting_call' : ((useEmail || useSms) ? 'pending' : 'awaiting_human'),
-      reason: useEmail ? 'Campaign first step: email preference' : useCall ? 'Campaign first step: call' : (useSms ? 'Campaign fallback: SMS' : callPolicy.reason),
+      reason: useEmail ? 'Campaign first step: email first-touch before any call' : useCall ? 'Campaign fallback: call because email is unavailable' : (useSms ? 'Campaign fallback: SMS' : callPolicy.reason),
       scheduled_for: nowIso(),
       payload: {
         source: 'campaign_tick',
+        firstTouch: useEmail,
+        emailFirstPolicy: useEmail ? { callAfterHours: 2, callOnlyIfNoReply: true } : null,
         campaignLeadId: campaignLead.id,
         tenantAgentId: campaignLead.agent_id || lead.assigned_tenant_agent_id || null,
         contactPolicy: selectedPolicy,
@@ -2750,7 +2902,8 @@ async function sendQueuedEmailActions(db: any, body: JsonRecord) {
       }
       const tenant = await loadTenant(db, tenantId);
       const agent = await loadTenantAgent(db, tenantId, action.payload?.tenantAgentId || action.payload?.tenant_agent_id || lead.assigned_tenant_agent_id);
-      const rules = isNurtureAction(action) ? await loadEffectiveLifecycleRules(db, tenantId) : null;
+      const lifecycleRules = await loadEffectiveLifecycleRules(db, tenantId);
+      const rules = isNurtureAction(action) ? lifecycleRules : null;
       const message = String(action.payload?.message || action.payload?.body || '').trim()
         || (isNurtureAction(action)
           ? `Write nurture checkup ${nurtureStepFromAction(action)} for this lead.`
@@ -2776,12 +2929,16 @@ async function sendQueuedEmailActions(db: any, body: JsonRecord) {
       });
 
       const nextNurture = isNurtureAction(action)
-        ? await safeScheduleNextNurtureCheckup(db, { tenantId, lead, action, rules: rules || await loadEffectiveLifecycleRules(db, tenantId), sentChannel: 'email' })
+        ? await safeScheduleNextNurtureCheckup(db, { tenantId, lead, action, rules: rules || lifecycleRules, sentChannel: 'email' })
         : { action: null, error: null };
+      const emailSentAt = nowIso();
+      const emailFirstFallback = !isNurtureAction(action)
+        ? await safeScheduleEmailFirstCallFallback(db, { tenantId, tenant, lead, action, agent, rules: lifecycleRules, sentAt: emailSentAt })
+        : { action: null, skipped: true, reason: 'nurture_action' };
       await db.database.from('bob_actions').update({
         status: 'completed',
-        executed_at: nowIso(),
-        updated_at: nowIso(),
+        executed_at: emailSentAt,
+        updated_at: emailSentAt,
         result: {
           emailQueueId: email.queued?.id || null,
           providerMessageId: email.resend?.id || null,
@@ -2790,16 +2947,19 @@ async function sendQueuedEmailActions(db: any, body: JsonRecord) {
           nextNurtureActionId: nextNurture.action?.id || null,
           nurtureScheduleError: nextNurture.error || null,
           nurtureStep: isNurtureAction(action) ? nurtureStepFromAction(action) : null,
+          emailFirstFallbackActionId: emailFirstFallback.action?.id || null,
+          emailFirstFallbackSkipped: emailFirstFallback.skipped || false,
+          emailFirstFallbackReason: emailFirstFallback.reason || null,
         },
       }).eq('id', action.id).eq('tenant_id', tenantId);
       if (action.campaign_lead_id && !isNurtureAction(action)) {
         await db.database.from('campaign_leads').update({
-          status: 'running',
-          current_step: 'email_sent',
+          status: emailFirstFallback.action?.id ? 'queued' : 'running',
+          current_step: emailFirstFallback.action?.id ? 'email_sent_call_followup_scheduled' : 'email_sent',
           updated_at: nowIso(),
         }).eq('tenant_id', tenantId).eq('id', action.campaign_lead_id);
       }
-      results.push({ actionId: action.id, success: true, email, nextNurtureAction: nextNurture.action, nurtureScheduleError: nextNurture.error });
+      results.push({ actionId: action.id, success: true, email, nextNurtureAction: nextNurture.action, nurtureScheduleError: nextNurture.error, emailFirstFallback });
     } catch (error) {
       await db.database.from('bob_actions').update({
         status: 'failed',
@@ -2984,6 +3144,31 @@ async function startQueuedCalls(db: any, body: JsonRecord) {
   for (const action of actions || []) {
     try {
       const lead = await loadLead(db, action.tenant_id, action.lead_id);
+      if (isEmailFirstCallFallback(action)) {
+        const previousEmailSentAt = action.payload?.previousEmailSentAt || action.payload?.previous_email_sent_at || action.created_at;
+        if (await hasLeadInboundReplyAfter(db, action.tenant_id, action.lead_id, previousEmailSentAt)) {
+          const skippedAt = nowIso();
+          await db.database.from('bob_actions').update({
+            status: 'skipped',
+            executed_at: skippedAt,
+            updated_at: skippedAt,
+            result: {
+              ...(action.result || {}),
+              skippedReason: 'lead_replied_after_email',
+              previousEmailSentAt,
+            },
+          }).eq('id', action.id).eq('tenant_id', action.tenant_id);
+          if (action.campaign_lead_id) {
+            await db.database.from('campaign_leads').update({
+              status: 'running',
+              current_step: 'email_reply_received_call_skipped',
+              updated_at: skippedAt,
+            }).eq('tenant_id', action.tenant_id).eq('id', action.campaign_lead_id);
+          }
+          results.push({ actionId: action.id, success: true, skipped: true, reason: 'lead_replied_after_email' });
+          continue;
+        }
+      }
       const lifecycleRules = await loadEffectiveLifecycleRules(db, action.tenant_id);
       const attemptCount = await campaignLeadAttemptCount(db, action);
       if (attemptCount >= lifecycleRules.maxCallAttempts) {
@@ -3032,7 +3217,7 @@ async function startQueuedCalls(db: any, body: JsonRecord) {
         results.push({ actionId: action.id, success: false, blocked: true, blockedReason: 'max_call_attempts', reason });
         continue;
       }
-      if (leadPrefersEmail(lead)) {
+      if (leadPrefersEmail(lead) && !isEmailFirstCallFallback(action)) {
         const emailPolicy = leadAllowsChannel(lead, 'email');
         await db.database.from('bob_actions').update({
           action_type: 'send_email',

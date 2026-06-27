@@ -773,6 +773,97 @@ async function sendDirectTenantEmail(db: any, context: JsonRecord, input: JsonRe
   return { success: true, queued: queued?.[0] || null, providerMessageId: resend?.id || null, sender };
 }
 
+async function resolveTenantAdminNotificationEmail(db: any, tenantId: string) {
+  const configured = firstValue(
+    Deno.env.get('BOOKING_ADMIN_NOTIFICATION_EMAIL'),
+    Deno.env.get('ADMIN_NOTIFICATION_EMAIL')
+  );
+  if (configured) return String(configured).trim();
+  const identities = await unwrap(
+    await db.database
+      .from('tenant_email_identities')
+      .select('from_email, reply_to_email')
+      .eq('tenant_id', tenantId)
+      .eq('status', 'active')
+      .order('created_at', { ascending: false })
+      .limit(1),
+    'Failed to resolve tenant admin notification email'
+  );
+  const identity = identities?.[0] || null;
+  return firstValue(identity?.reply_to_email, identity?.from_email);
+}
+
+async function notifyTenantAdminBooking(db: any, context: JsonRecord, input: {
+  meeting: JsonRecord | null;
+  start: Date;
+  endTime: string;
+  meetingUrl?: string | null;
+  title?: string | null;
+}) {
+  const toEmail = await resolveTenantAdminNotificationEmail(db, context.tenantId);
+  if (!toEmail) return { success: false, skipped: true, reason: 'No admin notification email is configured' };
+  const apiKey = Deno.env.get('RESEND_API_KEY');
+  if (!apiKey) return { success: false, skipped: true, reason: 'RESEND_API_KEY is not configured' };
+  const sender = await resolveEmailSender(db, context.tenantId, context.agent);
+  const lead = publicLead(context.lead);
+  const service = context.lead?.service_interest || 'consultation';
+  const timezone = context.tenant?.default_timezone || 'UTC';
+  const formattedTime = input.start.toLocaleString('en-US', { timeZone: timezone, dateStyle: 'medium', timeStyle: 'short' });
+  const subject = `Appointment booked: ${lead.name || 'Lead'} - ${formattedTime}`;
+  const lines = [
+    `Appointment booked for ${lead.name || 'Lead'}.`,
+    `Service/interest: ${service}.`,
+    `Date and time: ${formattedTime} (${timezone}).`,
+    `Lead email: ${lead.email || 'Not provided'}.`,
+    `Lead phone: ${lead.phone || 'Not provided'}.`,
+    input.meetingUrl ? `Meeting link/location: ${input.meetingUrl}.` : '',
+    input.meeting?.id ? `Meeting ID: ${input.meeting.id}.` : '',
+  ].filter(Boolean);
+  const text = lines.join('\n');
+  const html = lines.map((line) => `<p>${escapeHtml(line)}</p>`).join('');
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from: sender.from,
+      to: [toEmail],
+      subject,
+      html,
+      text,
+      reply_to: sender.replyTo || undefined,
+    }),
+  });
+  const resend = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(resend?.message || resend?.error || `Admin booking notification failed with ${response.status}`);
+  const queued = await unwrap(
+    await db.database.from('email_queue').insert([{
+      tenant_id: context.tenantId,
+      lead_id: context.leadId,
+      to_email: toEmail,
+      from_email: sender.fromEmail,
+      sender_identity_id: sender.identityId,
+      sender_display_name: sender.fromName,
+      reply_to_email: sender.replyTo,
+      sender_resolution: sender.resolution,
+      delivery_provider: 'resend',
+      provider_message_id: resend?.id || null,
+      subject,
+      html_content: html,
+      text_content: text,
+      email_type: 'admin_booking_notification',
+      status: 'sent',
+      sent_at: nowIso(),
+      generated_by: 'template',
+      generation_model: 'deterministic-admin-booking-notification',
+      generation_status: 'generated',
+      generated_at: nowIso(),
+      metadata: { source: 'elevenlabs_create_booking', adminNotification: true, meetingId: input.meeting?.id || null },
+    }]).select(),
+    'Failed to record admin booking notification'
+  );
+  return { success: true, queued: queued?.[0] || null, providerMessageId: resend?.id || null, toEmail };
+}
+
 async function writeAuditLog(
   db: any,
   context: JsonRecord,
@@ -1227,6 +1318,16 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
 
   const smsConfirmationQueued = reminderRows.some((row) => row.reminder_type === 'confirmation' && row.delivery_method === 'sms' && row.status === 'pending');
   const emailConfirmationQueued = reminderRows.some((row) => row.reminder_type === 'confirmation' && row.delivery_method === 'email' && row.status === 'pending');
+  let adminNotification = null;
+  try {
+    adminNotification = await notifyTenantAdminBooking(db, {
+      ...context,
+      lead: { ...(context.lead || {}), scheduled_at: start.toISOString() },
+    }, { meeting, start, endTime, meetingUrl, title });
+  } catch (error) {
+    adminNotification = { success: false, skipped: false, error: safeError(error, 'Admin booking notification failed') };
+    console.warn('Admin booking notification failed', adminNotification.error);
+  }
 
   return {
     success: true,
@@ -1239,6 +1340,7 @@ async function createBooking(db: any, context: JsonRecord, input: JsonRecord) {
     smsError: smsConfirmationQueued ? null : 'SMS confirmation was not queued because consent or phone details are missing.',
     emailError: emailConfirmationQueued ? null : 'Email confirmation was not queued because consent or email details are missing.',
     remindersScheduled: reminderRows.filter((row) => row.status === 'pending').length,
+    adminNotification,
   };
 }
 

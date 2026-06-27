@@ -136,6 +136,25 @@ async function resolveGlobalWhatsappLead(db: any, peerPhone: unknown) {
   return data?.[0] || null;
 }
 
+function providerMessageSid(data: Record<string, string>) {
+  return String(firstValue(data.MessageSid, data.SmsMessageSid, data.SmsSid, data.Sid, '') || '');
+}
+
+async function findMessageByProviderSid(db: any, sid: string) {
+  if (!sid) return null;
+  const { data, error } = await db.database.from('lead_conversation_messages').select('id,tenant_id,lead_id,channel,provider_message_id')
+    .eq('provider_message_id', sid).limit(1);
+  if (error) throw new Error(error.message || 'Failed to resolve message status row');
+  return data?.[0] || null;
+}
+
+async function findLeadById(db: any, tenantId: string, leadId: unknown) {
+  if (!tenantId || !leadId) return null;
+  const { data, error } = await db.database.from('leads').select('*').eq('tenant_id', tenantId).eq('id', String(leadId)).limit(1);
+  if (error) throw new Error(error.message || 'Failed to load status lead');
+  return data?.[0] || null;
+}
+
 async function findLeadByPhone(db: any, tenantId: string, phone: unknown) {
   const normalized = normalizePhone(phone);
   if (!normalized) return null;
@@ -653,7 +672,7 @@ async function handleInbound(db: any, tenantId: string, lead: any, channel: 'sms
 }
 
 async function handleStatus(db: any, tenantId: string, lead: any, data: Record<string, string>) {
-  const sid = String(firstValue(data.MessageSid, data.SmsSid, data.Sid) || '');
+  const sid = providerMessageSid(data);
   if (!sid) return;
   const providerStatus = String(firstValue(data.MessageStatus, data.SmsStatus, data.Status, 'unknown')).toLowerCase();
   const patch: Record<string, unknown> = { status: providerStatus, provider_status: providerStatus };
@@ -710,13 +729,18 @@ export default async function(req: Request): Promise<Response> {
     const channel: 'sms' | 'whatsapp' = isWhatsapp ? 'whatsapp' : 'sms';
     let tenantId = await resolveTenantIdByPhone(db, isStatus ? data.From : data.To);
     let globalWhatsappLead = null;
+    let statusMessage = null;
     const endpointPhone = normalizePhone(isStatus ? data.From : data.To);
+    if (!tenantId && isStatus) {
+      statusMessage = await findMessageByProviderSid(db, providerMessageSid(data));
+      tenantId = statusMessage?.tenant_id || null;
+    }
     if (!tenantId && channel === 'whatsapp' && endpointPhone === globalWhatsappSenderPhone()) {
       globalWhatsappLead = await resolveGlobalWhatsappLead(db, isStatus ? data.To : data.From);
       tenantId = globalWhatsappLead?.tenant_id || null;
     }
     if (!tenantId) return isStatus ? jsonResponse({ success: true, ignored: true, reason: 'tenant_not_resolved' }) : emptyTwilioXmlResponse();
-    const lead = globalWhatsappLead || await findLeadByPhone(db, tenantId, isStatus ? data.To : data.From);
+    const lead = globalWhatsappLead || await findLeadById(db, tenantId, statusMessage?.lead_id) || await findLeadByPhone(db, tenantId, isStatus ? data.To : data.From);
     if (!lead) return isStatus ? jsonResponse({ success: true, ignored: true }) : emptyTwilioXmlResponse();
     if (isStatus) await handleStatus(db, tenantId, lead, data);
     else await handleInbound(db, tenantId, lead, channel, data);

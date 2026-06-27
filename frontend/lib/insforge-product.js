@@ -209,6 +209,14 @@ function snakeToCamel(key) {
   return SNAKE_TO_CAMEL[key] || key.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
 }
 
+function normalizeBusinessHour(value, fallback) {
+  const match = String(value || fallback || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!match) return fallback;
+  const hour = Math.min(Math.max(Number(match[1]), 0), 23);
+  const minute = Math.min(Math.max(Number(match[2]), 0), 59);
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
 export function toDbRecord(record = {}) {
   return Object.fromEntries(
     Object.entries(record)
@@ -556,6 +564,8 @@ export async function createAssistedTenant(user, input = {}) {
     industry: String(input.industry || '').trim() || null,
     businessNiche: input.businessNiche || null,
     defaultTimezone: String(input.defaultTimezone || '').trim() || 'America/Toronto',
+    businessHoursStart: normalizeBusinessHour(input.businessHoursStart, '10:00'),
+    businessHoursEnd: normalizeBusinessHour(input.businessHoursEnd, '17:00'),
     status: 'onboarding',
     metadata: {
       source: 'super_admin_assisted',
@@ -587,6 +597,8 @@ export async function createAssistedTenant(user, input = {}) {
         industry: String(input.industry || '').trim() || null,
         businessNiche: input.businessNiche || null,
         defaultTimezone: String(input.defaultTimezone || '').trim() || 'America/Toronto',
+        businessHoursStart: normalizeBusinessHour(input.businessHoursStart, '10:00'),
+        businessHoursEnd: normalizeBusinessHour(input.businessHoursEnd, '17:00'),
       },
     },
     actorMode: 'super_admin_assisted',
@@ -633,6 +645,12 @@ export async function updateSuperAdminTenantProfile(user, tenantId, input = {}) 
     const defaultTimezone = String(input.defaultTimezone || '').trim();
     if (!defaultTimezone) throw new Error('Default timezone is required');
     patch.defaultTimezone = defaultTimezone;
+  }
+  if (input.businessHoursStart !== undefined) {
+    patch.businessHoursStart = normalizeBusinessHour(input.businessHoursStart, '10:00');
+  }
+  if (input.businessHoursEnd !== undefined) {
+    patch.businessHoursEnd = normalizeBusinessHour(input.businessHoursEnd, '17:00');
   }
   if (input.city !== undefined) patch.city = String(input.city || '').trim() || null;
   if (input.country !== undefined) patch.country = String(input.country || '').trim() || null;
@@ -1339,6 +1357,8 @@ export async function updateTenantCompanyProfile(user, input = {}) {
   if (!country) throw new Error('Country is required');
   const industry = input.industry?.trim() || null;
   const businessNiche = input.businessNiche?.trim() || null;
+  const businessHoursStart = normalizeBusinessHour(input.businessHoursStart, '10:00');
+  const businessHoursEnd = normalizeBusinessHour(input.businessHoursEnd, '17:00');
   const tenantId = tenantIdFromUser(user);
 
   const data = await unwrap(
@@ -1351,8 +1371,8 @@ export async function updateTenantCompanyProfile(user, input = {}) {
         defaultTimezone,
         city,
         country,
-        businessHoursStart: '10:00',
-        businessHoursEnd: '17:00',
+        businessHoursStart,
+        businessHoursEnd,
         status: 'onboarding',
         updatedAt: new Date().toISOString(),
       }))

@@ -56,6 +56,8 @@ const defaultCompanyForm = {
   industry: '',
   businessNiche: '',
   defaultTimezone: 'America/Toronto',
+  businessHoursStart: '10:00',
+  businessHoursEnd: '17:00',
 };
 
 const defaultAgentForm = {
@@ -339,6 +341,8 @@ export default function OnboardingPage() {
       industry: tenant.industry || '',
       businessNiche: tenant.businessNiche || '',
       defaultTimezone: tenant.defaultTimezone || 'America/Toronto',
+      businessHoursStart: tenant.businessHoursStart || '10:00',
+      businessHoursEnd: tenant.businessHoursEnd || '17:00',
     });
     setAgentForm({
       id: firstAgent?.id || '',
@@ -690,6 +694,12 @@ export default function OnboardingPage() {
                     </Field>
                     <Field label="Timezone">
                       <input className="ops-input" value={companyForm.defaultTimezone} onChange={(event) => setCompanyForm({ ...companyForm, defaultTimezone: event.target.value })} />
+                    </Field>
+                    <Field label="Calling starts">
+                      <input type="time" className="ops-input" value={companyForm.businessHoursStart} onChange={(event) => setCompanyForm({ ...companyForm, businessHoursStart: event.target.value })} />
+                    </Field>
+                    <Field label="Calling ends">
+                      <input type="time" className="ops-input" value={companyForm.businessHoursEnd} onChange={(event) => setCompanyForm({ ...companyForm, businessHoursEnd: event.target.value })} />
                     </Field>
                     <Field label="Business niche" optional>
                       <select className="ops-select" value={companyForm.businessNiche} onChange={(event) => setCompanyForm({ ...companyForm, businessNiche: event.target.value })}>

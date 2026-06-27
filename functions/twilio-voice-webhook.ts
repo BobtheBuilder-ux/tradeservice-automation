@@ -328,6 +328,13 @@ function insuranceFormOpening(rows: JsonRecord) {
   return `Hi ${leadDisplayName(rows.lead)}, I’m ${agentName}. You filled our form on insurance, and I see you’re interested in ${leadInterestPhrase(rows.lead)}. Would you like to book a consultation with one of our experts?`;
 }
 
+function isEmailFirstFollowupCall(rows: JsonRecord) {
+  const payload = rows.bobAction?.payload || rows.session?.metadata || {};
+  return payload.lifecyclePath === 'email_first_call_after_no_reply'
+    || payload.source === 'email_first_followup_call'
+    || Boolean(payload.previousEmailActionId || payload.previous_email_action_id);
+}
+
 function leadOpeningSummary(lead: JsonRecord) {
   const formData = leadFormData(lead);
   const skipKeys = new Set([
@@ -416,6 +423,7 @@ function contactPreferenceInstruction(lead: JsonRecord) {
 
 function buildCallFirstMessage(rows: JsonRecord) {
   const agentName = rows.agent?.display_name || 'the AI assistant';
+  const tenantName = rows.tenant?.name || 'the company';
   const service = serviceInterest(rows.lead);
   const reason = service ? `your recent request about ${friendlyValue(service)}` : 'your recent request';
   const preferredLanguage = rows.lead?.preferred_language;
@@ -423,6 +431,15 @@ function buildCallFirstMessage(rows: JsonRecord) {
   const prefilled = hasUsefulPreFilledLeadContext(rows.lead);
   const actionPayload = rows.bobAction?.payload || {};
   const sessionMetadata = rows.session?.metadata || {};
+  if (isEmailFirstFollowupCall(rows)) {
+    const variants = [
+      `Hi ${leadDisplayName(rows.lead)}, my name is ${agentName}, assistant for ${tenantName}. We saw you filled one of our forms about ${leadInterestPhrase(rows.lead)}. The details are in the email I sent, and I’m calling to help schedule a meeting with one of our expert advisors. What day and time works for you?`,
+      `Hello ${leadDisplayName(rows.lead)}, this is ${agentName}, assistant for ${tenantName}. I’m following up on your form for ${leadInterestPhrase(rows.lead)}. I sent the details by email, and I can help book a meeting with our expert advisor now if you have a minute.`,
+      `Hi ${leadDisplayName(rows.lead)}, ${agentName} here, assistant for ${tenantName}. You recently asked about ${leadInterestPhrase(rows.lead)} through our form. I emailed the details and wanted to help schedule time with an expert advisor.`
+    ];
+    const seed = String(rows.bobAction?.id || rows.session?.id || rows.lead?.id || '').split('').reduce((total, char) => total + char.charCodeAt(0), 0);
+    return variants[seed % variants.length];
+  }
   if (actionPayload.reboundCall || actionPayload.rebound_call || sessionMetadata.reboundCall || sessionMetadata.rebound_call) {
     const summary = leadOpeningSummary(rows.lead);
     const summarySentence = summary ? ` I still have your details: ${summary}.` : '';
@@ -452,6 +469,8 @@ function buildCallPrompt(rows: JsonRecord) {
   const bookingProvider = booking.provider || 'manual';
   const bookingPath = booking.booking_url || booking.event_type_id || 'not configured';
   const tenantTimezone = rows.tenant?.default_timezone || 'UTC';
+  const businessHoursStart = String(rows.tenant?.business_hours_start || '10:00').slice(0, 5);
+  const businessHoursEnd = String(rows.tenant?.business_hours_end || '17:00').slice(0, 5);
   const tenantLocation = [rows.tenant?.city, rows.tenant?.country].filter(Boolean).join(', ') || 'not configured';
   const formSummary = leadFormSummary(rows.lead);
   const mode = qualificationMode(rows.lead);
@@ -463,7 +482,9 @@ function buildCallPrompt(rows: JsonRecord) {
     rows.bobAction?.payload?.reboundCall || rows.bobAction?.payload?.rebound_call || rows.session?.metadata?.reboundCall || rows.session?.metadata?.rebound_call
       ? 'This is a rebound call after an interrupted/drop event. Start by apologizing briefly for the interruption, then continue the same purpose without restarting awkwardly.'
       : '',
-    'Opening script for insurance/form leads: "Hi [lead name], I’m [agent name]. You filled our form on insurance, and I see you’re interested in [service_interest or coverage_type_needed]. Would you like to book a consultation with one of our experts?" Do not mention the company name in the opening.',
+    isEmailFirstFollowupCall(rows)
+      ? `This is a follow-up call after a first outreach email. Vary the wording naturally, but include the same meaning: "Hello, my name is ${agentName}, assistant for ${tenantName}. We saw you filled one of our forms about ${service}. The details are in the email, and we would like to schedule a meeting with you and our expert advisor." If the call reaches voicemail, leave this short reason for calling and mention the email details.`
+      : 'Opening script for insurance/form leads: "Hi [lead name], I’m [agent name]. You filled our form on insurance, and I see you’re interested in [service_interest or coverage_type_needed]. Would you like to book a consultation with one of our experts?" Do not mention the company name in the opening.',
     'Use expressive speech naturally. Match your tone to the lead: calm and reassuring when they sound worried, warm when they are positive, and clear and measured when explaining details. Keep delivery professional and never overact.',
     'Default to English. Do not ask the lead to choose a language. If lead preferred_language is already set, use that language from the start. If the lead asks to switch language mid-call, never end the call and never restart the introduction. Respond within one short sentence in the requested language, then continue all subsequent responses in that language from the current point in the conversation. Save preferredLanguage with update_lead_status after the spoken acknowledgement, but do not let the save delay the language switch.',
     'Never end the call because of background noise, cross-talk, multiple interruptions, silence, or a language change. Treat interruptions as normal conversation. If the lead is silent, patiently prompt again instead of ending.',
@@ -472,10 +493,10 @@ function buildCallPrompt(rows: JsonRecord) {
     'After the lead responds, keep the conversation warm, concise, and useful. If they are busy, say it is not a good time, ask you to call later, or give a better day/time, do not pressure them and do not abandon the lead. Ask one short clarifying question for the best callback time if needed, then call update_lead_status with outcome callback_requested or not_available, nextContactAt when a time is known, and preferredContactChannel call unless they asked for another consented channel.',
     'Use the tenant knowledge base for company-specific services, process, pricing guidance, objections, and policies. If knowledge is missing, do not invent details; offer to have the team follow up.',
     'Use the runtime lead variables first. Only call get_lead_context when important lead, company, campaign, or setup context is missing or ambiguous. Do not call get_lead_context just because the lead said yes to booking or gave a day/time.',
-    `Business-hours guardrail: this tenant allows outbound voice calls only from 10:00 AM to 5:00 PM in tenant local time (${tenantTimezone}). Never request, schedule, or retry a voice call before 10:00 AM or at/after 5:00 PM local tenant time. If outside that window, wait until the next 10:00 AM local tenant window or use an allowed non-call channel only when consent permits it.`,
+    `Business-hours guardrail: this tenant allows outbound voice calls only from ${businessHoursStart} to ${businessHoursEnd} in tenant local time (${tenantTimezone}). Never request, schedule, or retry a voice call outside that tenant window. If outside that window, wait until the next allowed tenant window or use an allowed non-call channel only when consent permits it.`,
     `Booking provider: ${bookingProvider}. Booking path: ${bookingPath}.`,
     `Tenant location: ${tenantLocation}. Tenant timezone: ${tenantTimezone}.`,
-    'Tenant calling hours: 10:00 AM to 5:00 PM local tenant time.',
+    `Tenant calling hours: ${businessHoursStart} to ${businessHoursEnd} local tenant time.`,
     formSummary ? `Lead already provided this form/context data. Use it as answered information and do not ask it again: ${formSummary}.` : '',
     mode === 'form_prequalified_ask_only_missing_then_book'
       ? `This lead appears pre-qualified or form-qualified. Do not run the long question-and-answer flow. The required flow is: introduce yourself with the insurance form script, mention the known interest/coverage, then ask whether they want to book a consultation with one of our experts. If the lead says yes, okay, sure, sounds good, or otherwise agrees but does not give a time, do not go silent and do not call a tool yet. Immediately ask one scheduling question only: "Great — what day and time will you be available?" or offer ${suggestedDate} as a suggested date and ask what time works. When the lead gives a date and time, call create_booking immediately. Do not call check_availability first during a live call.`
@@ -557,7 +578,10 @@ function buildCallDynamicVariables(session: JsonRecord, rows: JsonRecord) {
     suggested_booking_date: dynamicString(dateAfterDays(2)),
     booking_provider: dynamicString(rows.bookingIntegration?.provider),
     booking_url: dynamicString(rows.bookingIntegration?.booking_url),
-    call_reason: dynamicString(service ? 'Follow up about ' + service : 'Follow up on recent request'),
+    call_reason: dynamicString(isEmailFirstFollowupCall(rows)
+      ? (service ? 'Follow up after emailed details about ' + service : 'Follow up after emailed details')
+      : (service ? 'Follow up about ' + service : 'Follow up on recent request')),
+    email_first_followup_call: dynamicString(isEmailFirstFollowupCall(rows) ? 'true' : ''),
     ready_knowledge_documents: dynamicString(rows.knowledgeDocuments?.length || 0),
     current_date: dynamicString(new Date().toISOString().slice(0, 10)),
     current_time: dynamicString(new Date().toISOString()),
