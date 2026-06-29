@@ -127,3 +127,41 @@ export async function disconnectMetaIntegration() {
 export async function testMetaSetup() {
   return invokeFunction('meta-oauth', { action: 'test-setup', body: {} });
 }
+
+export async function createBulkEmailCampaign(user, payload) {
+  return invokeFunction('bulk-email-sender', {
+    action: 'create-campaign',
+    body: {
+      tenantId: user?.tenantId,
+      ...payload,
+    },
+  });
+}
+
+export async function tickBulkEmailCampaign(campaignId) {
+  return invokeFunction('bulk-email-sender', {
+    action: 'tick',
+    body: { campaignId },
+  });
+}
+
+export async function pauseBulkEmailCampaign(campaignId) {
+  return invokeFunction('bulk-email-sender', {
+    action: 'pause-campaign',
+    body: { campaignId },
+  });
+}
+
+export async function resumeBulkEmailCampaign(campaignId) {
+  return invokeFunction('bulk-email-sender', {
+    action: 'resume-campaign',
+    body: { campaignId },
+  });
+}
+
+export async function cancelBulkEmailCampaign(campaignId) {
+  return invokeFunction('bulk-email-sender', {
+    action: 'cancel-campaign',
+    body: { campaignId },
+  });
+}

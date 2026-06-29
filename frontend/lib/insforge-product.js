@@ -184,6 +184,23 @@ const CAMEL_TO_SNAKE = {
   stopReason: 'stop_reason',
   followUpAt: 'follow_up_at',
   followUpStatus: 'follow_up_status',
+  campaignId: 'campaign_id',
+  recipientCount: 'recipient_count',
+  sentCount: 'sent_count',
+  deliveredCount: 'delivered_count',
+  failedCount: 'failed_count',
+  senderIdentityId: 'sender_identity_id',
+  fromName: 'from_name',
+  fromEmail: 'from_email',
+  providerMessageId: 'provider_message_id',
+  errorMessage: 'error_message',
+  sentAt: 'sent_at',
+  deliveredAt: 'delivered_at',
+  failedAt: 'failed_at',
+  startedAt: 'started_at',
+  bodyText: 'body_text',
+  bodyHtml: 'body_html',
+  customFields: 'custom_fields',
 };
 
 export const ONBOARDING_STEPS = [
@@ -2454,4 +2471,32 @@ export async function recordCallOutcome(user, actionId, { outcome, notes }) {
   });
 
   return updateTenantRow('leads', user, action.leadId, { lastContactedAt: now });
+}
+
+export async function listBulkEmailCampaigns(user) {
+  return selectTenantRows('tenant_bulk_email_campaigns', user, {
+    order: { column: 'created_at', ascending: false },
+    limit: 500,
+  });
+}
+
+export async function getBulkEmailCampaign(user, campaignId) {
+  if (!campaignId) throw new Error('campaignId is required');
+  const rows = await selectTenantRows('tenant_bulk_email_campaigns', user);
+  return rows.find((r) => r.id === campaignId) || null;
+}
+
+export async function listBulkEmailFailedRecipients(user, campaignId) {
+  if (!campaignId) throw new Error('campaignId is required');
+  const query = insforge.database
+    .from('tenant_bulk_email_recipients')
+    .select('*')
+    .eq('campaign_id', campaignId)
+    .eq('tenant_id', tenantIdFromUser(user))
+    .in('status', ['failed', 'bounced'])
+    .order('created_at', { ascending: false });
+
+  const { data, error } = await query;
+  if (error) throw new Error(error.message || 'Failed to load failed recipients');
+  return fromDbRows(data || []);
 }
