@@ -138,6 +138,31 @@ function buildFallbackEmailHtml(subject: string, body: string) {
 </html>`;
 }
 
+function firstNonEmpty(...values: unknown[]) {
+  for (const value of values) {
+    const text = String(value || '').trim();
+    if (text) return text;
+  }
+  return '';
+}
+
+function leadNameFromRecipient(recipient: any) {
+  const fields = recipient?.custom_fields || {};
+  return firstNonEmpty(
+    recipient?.name,
+    fields.lead_name,
+    fields.lead_full_name,
+    fields.full_name,
+    fields.fullname,
+    fields.contact_name,
+    fields.customer_name,
+    fields.client_name,
+    fields.recipient_name,
+    firstNonEmpty(fields.first_name, fields.firstname, fields.first) &&
+      `${firstNonEmpty(fields.first_name, fields.firstname, fields.first)} ${firstNonEmpty(fields.last_name, fields.lastname, fields.last, fields.surname)}`.trim()
+  );
+}
+
 export default async function(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders });
 
@@ -320,7 +345,7 @@ export default async function(req: Request): Promise<Response> {
         tenant_id: tenantId,
         campaign_id: campaignId,
         email: r.email,
-        name: r.name || null,
+        name: firstNonEmpty(r.name, r.leadName, r.fullName, r.full_name) || null,
         custom_fields: r.customFields || {},
         status: 'pending',
       }));
@@ -398,7 +423,7 @@ export default async function(req: Request): Promise<Response> {
 
       const results = [];
       for (const recipient of pendingRecipients) {
-        const nameForSub = recipient.name || 'Friend';
+        const nameForSub = leadNameFromRecipient(recipient);
         const placeholderValues = {
           leadName: nameForSub,
           senderName: campaign.from_name || '',

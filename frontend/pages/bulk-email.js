@@ -95,6 +95,59 @@ function applyToken(value, token) {
   return `${value || ''}${token}`;
 }
 
+function normalizeCsvHeader(value) {
+  return String(value || '')
+    .replace(/^\uFEFF/, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ');
+}
+
+function parseCsvLine(row) {
+  const cells = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let index = 0; index < row.length; index += 1) {
+    const char = row[index];
+    const nextChar = row[index + 1];
+    if (char === '"' && inQuotes && nextChar === '"') {
+      current += '"';
+      index += 1;
+    } else if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === ',' && !inQuotes) {
+      cells.push(current.trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+
+  cells.push(current.trim());
+  return cells;
+}
+
+function findHeaderIndex(headers, aliases) {
+  return headers.findIndex((header) => aliases.includes(header));
+}
+
+function hasLeadNameToken(form) {
+  return [
+    form.subject,
+    form.content,
+    form.ctaLabel,
+    form.headerNote,
+    form.signoff,
+    form.signatureName,
+  ].some((value) => String(value || '').includes('{lead_name}'));
+}
+
+function compactName(...parts) {
+  return parts.map((part) => String(part || '').trim()).filter(Boolean).join(' ');
+}
+
 function emptyFormFromTemplate(template = templates[0]) {
   return {
     name: '',
@@ -345,20 +398,46 @@ export default function BulkEmailPage() {
       setCsvError('CSV must include a header and at least one recipient.');
       return [];
     }
-    const headers = rows[0].split(',').map((header) => header.trim().toLowerCase());
+    const rawHeaders = parseCsvLine(rows[0]);
+    const headers = rawHeaders.map(normalizeCsvHeader);
     const emailIndex = headers.indexOf('email');
-    const nameIndex = headers.indexOf('name');
+    const nameIndex = findHeaderIndex(headers, [
+      'name',
+      'lead name',
+      'lead full name',
+      'full name',
+      'fullname',
+      'contact name',
+      'customer name',
+      'client name',
+      'recipient name',
+    ]);
+    const firstNameIndex = findHeaderIndex(headers, ['first name', 'firstname', 'first']);
+    const lastNameIndex = findHeaderIndex(headers, ['last name', 'lastname', 'last', 'surname']);
     if (emailIndex === -1) {
       setCsvError('CSV must contain an email column.');
       return [];
     }
     const parsed = rows.slice(1).map((row) => {
-      const cols = row.split(',').map((cell) => cell.trim());
+      const cols = parseCsvLine(row);
+      const customFields = Object.fromEntries(
+        headers.map((header, index) => [header.replace(/\s+/g, '_'), cols[index] || ''])
+      );
+      const leadName = compactName(
+        nameIndex !== -1 ? cols[nameIndex] : '',
+        nameIndex === -1 && firstNameIndex !== -1 ? cols[firstNameIndex] : '',
+        nameIndex === -1 && lastNameIndex !== -1 ? cols[lastNameIndex] : ''
+      );
       return {
         email: cols[emailIndex],
-        name: nameIndex !== -1 ? cols[nameIndex] || '' : '',
+        name: leadName,
+        customFields,
       };
     }).filter((recipient) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient.email || ''));
+    if (hasLeadNameToken(form) && parsed.some((recipient) => !recipient.name)) {
+      setCsvError('Each recipient must have a lead name column because this campaign uses {lead_name}. Accepted headers include name, lead name, full name, first name, and last name.');
+      return [];
+    }
     if (!parsed.length) setCsvError('No valid email addresses found.');
     return parsed;
   };
